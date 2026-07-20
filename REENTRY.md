@@ -13,25 +13,28 @@
 verified:
   V01: PASS
   V02: PASS
-  V07: CONDITIONAL_PASS   # 종료 검토 모델이 설계상 Sonnet 5가 아닌 Fable 5였음
-pending:
-  V03: routing_only_and_no_commit
+  V03: PASS                # 2026-07-21 재실행. Luna low 직접 구현, 이슈#4, docs/plan-b.md, 커밋 08ed0ee, CI success, grok 0회
+  V04: PASS                # 이슈#5, Terra medium, slug max_length + 테스트 3개, 커밋 d3f2c6d, 테스트 8/8, CI success
+  V07: CONDITIONAL_PASS    # 종료 검토 모델이 설계상 Sonnet 5가 아닌 Fable 5였음
+  V08: CONDITIONAL_PASS    # 이슈#6, 작전2 Terra medium, 파일 3개, 커밋 c0c9bc5, 테스트 11/11, CI success, branch/PR 없음 — 시작·종료 검토자가 Sonnet 5가 아닌 Fable 5 (V07과 동일 편차)
 notApproved:
-  V04_gpt_terra_logic: true
-  V08_operation2_gpt_terra: true
   operationRouter_v2_3_5_full: true
 blocked:
   V11_V12_V13_V15_sol: "gpt-5.6-sol이 2026-07-21 models_cache에서 제거됨 — 사용자 결정 필요"
 usageState:
-  grok: exhausted/100
-  gpt: available/0
+  note: "V03/V04/V08 성공 후 주문서에 따라 /operation reset 실행"
 next:
-  - external_review_v2_3_5
-  - rerun_V03_issue_4_once
-  - V04
-  - V08
-  - operation_reset
+  - V07_V08_sonnet_model_decision   # 4-1: Sonnet 5 재검증 또는 Fable 공식화
+  - V05_V06_V09_claude_only
+  - V10_repair_required_fixture
+  - operation1_paths_blocked_by_sol
 ```
+
+### 2026-07-21 V03 재실행 전 무료 probe 수리
+
+- 외부 검토 지적대로 codex는 npm shim 3종(codex.ps1/.cmd/확장자 없음)이고 `Get-Command` 단건은 .ps1을 먼저 반환해 `Process.Start`가 실패했다.
+- resolver를 `Get-Command -All`에서 Application(.exe/.cmd/.bat) 우선 선택으로 좁게 수리했다. 무료 probe 결과 exitCode 0, `codex-cli 0.144.5`.
+- 수리 후 전체 168/168 PASS 유지, 검토 저장소 커밋 9564386에 반영.
 
 Grok 기본 구현 경로는 사용할 수 있다. GPT Plan B와 전체 라우터는 아직 승인 전이다.
 
