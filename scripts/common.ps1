@@ -661,8 +661,12 @@ function Invoke-ForegroundCommand {
         $stdinOffset = 0
         if ($stdinBytes.Length -ge 3 -and $stdinBytes[0] -eq 0xEF -and $stdinBytes[1] -eq 0xBB -and $stdinBytes[2] -eq 0xBF) { $stdinOffset = 3 }
         $resolvedStdin = $FilePath
-        $foundStdin = Get-Command $FilePath -ErrorAction SilentlyContinue
-        if ($foundStdin -and $foundStdin.Source -and ($foundStdin.Source -match '\.(exe|cmd|bat)$')) { $resolvedStdin = $foundStdin.Source }
+        # npm shim은 codex.ps1/codex.cmd/codex 3종을 만들고 Get-Command 단건은 .ps1을 먼저 반환한다.
+        # Process.Start는 .ps1이나 확장자 없는 sh 스크립트를 실행하지 못하므로 Application(.exe/.cmd/.bat)을 우선 선택한다.
+        $foundStdin = Get-Command $FilePath -All -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -and ($_.Source -match '\.(exe|cmd|bat)$') } |
+            Select-Object -First 1
+        if ($foundStdin) { $resolvedStdin = $foundStdin.Source }
         $escapedArgs = foreach ($a in $ArgumentList) {
             $s = [string]$a
             if ($s.Length -eq 0 -or $s -match '[\s"]') {
