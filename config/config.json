@@ -1,0 +1,98 @@
+{
+  "_comment": "operation-router v2.3.5 config. Verified 2026-07-20 against installed CLIs: claude 2.1.212 (SKILL.md supports model/effort/disable-model-invocation/argument-hint; model IDs claude-opus-4-8/claude-sonnet-5/claude-haiku-4-5-20251001 recognized), grok 0.2.102 (only grok-4.5; grok --help confirms --always-approve, --allow, --deny; NO --no-auto-update flag/env/config exists), codex-cli 0.144.5 (gpt-5.6-sol/terra/luna). v2.3.5 adds the final-worker marker and UTF-8 stdin preservation; routing, model, effort, permission, fallback, and v2.3.4 log/test/package isolation values are unchanged. Do not hand-edit model IDs without re-verifying.",
+  "grok": {
+    "model": "grok-4.5",
+    "operations": {
+      "1": { "effort": "high", "maxTurns": 120 },
+      "2": { "effort": "medium", "maxTurns": 80 },
+      "3": { "effort": "low", "maxTurns": 40, "noPlan": true, "noSubagents": true }
+    },
+    "thresholds": {
+      "conserveOp12FromPercent": 85,
+      "gptPlanBFromPercent": 95
+    },
+    "headlessPermissions": {
+      "_comment": "v2.3.5 retains the v2.3.3 headless permission policy unchanged. grok --allow/--deny are compat aliases for Claude Code --allowedTools/--disallowedTools. mode=alwaysApprove maps to --always-approve: grok's built-in policy classifies heredoc/command-substitution commands as ask rules, and under the retired dontAsk mode a headless run cannot answer, so the whole session dies with cancellationCategory=PermissionCancelled (measured 2026-07-20, op2-issue3 debug log). --always-approve removes ask prompts while --deny rules still take priority and block matched commands as a graceful tool error (probe-verified). Trade-off: non-terminal tools are no longer constrained by the allow list; deny remains the effective guard.",
+      "mode": "alwaysApprove",
+      "allow": [
+        "Read",
+        "Grep",
+        "Edit",
+        "Bash(*)"
+      ],
+      "deny": [
+        "Bash(git reset --hard*)",
+        "Bash(git clean*)",
+        "Bash(git push --force*)",
+        "Bash(git push -f*)",
+        "Bash(rm -rf*)",
+        "Bash(del /s*)",
+        "Bash(Remove-Item *-Recurse*)"
+      ]
+    }
+  },
+  "gpt": {
+    "workers": {
+      "sol": "gpt-5.6-sol",
+      "terra": "gpt-5.6-terra",
+      "luna": "gpt-5.6-luna"
+    },
+    "sandbox": "workspace-write",
+    "approvalPolicy": "never",
+    "thresholds": {
+      "tier1MaxPercent": 59,
+      "tier2MaxPercent": 79,
+      "workerStopPercent": 80
+    },
+    "desired": {
+      "1": { "implement": { "worker": "sol", "effort": "high" }, "review": { "worker": "sol", "effort": "high" } },
+      "2": { "implement": { "worker": "terra", "effort": "medium" } },
+      "3": {
+        "logic": { "worker": "terra", "effort": "medium" },
+        "mechanical": { "worker": "luna", "effort": "low" }
+      }
+    }
+  },
+  "claudeSession": {
+    "1": { "model": "claude-opus-4-8", "effort": "high" },
+    "2": { "model": "claude-sonnet-5", "effort": "medium" },
+    "3": { "model": "claude-haiku-4-5-20251001", "effort": "low" },
+    "dispatcher": { "model": "claude-haiku-4-5-20251001", "effort": "low" }
+  },
+  "claudeOnly": {
+    "1": { "model": "claude-sonnet-5", "effort": "medium" },
+    "2": { "model": "claude-sonnet-5", "effort": "medium" },
+    "3": {
+      "logic": { "model": "claude-sonnet-5", "effort": "low" },
+      "mechanical": { "model": "claude-haiku-4-5-20251001", "direct": true }
+    }
+  },
+  "ciPolling": { "intervalSeconds": 10, "maxAttempts": 6 },
+  "transientRetry": { "maxRetries": 1, "delaySeconds": 5 },
+  "logRetentionCount": 20,
+  "weeklyExhaustedPatterns": [
+    "weekly limit",
+    "weekly usage limit",
+    "weekly plan limit",
+    "weekly quota"
+  ],
+  "quotaUnknownPatterns": [
+    "usage limit reached",
+    "quota exceeded",
+    "you have exceeded your current quota"
+  ],
+  "transientRateLimitPatterns": [
+    "rate limit exceeded",
+    "too many requests",
+    "requests per minute",
+    "retry after",
+    "429"
+  ],
+  "providerFailurePatterns": [
+    "authentication",
+    "invalid api key",
+    "billing",
+    "permission",
+    "model not found"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "grok": {
+    "status": "available",
+    "percent": 0
+  },
+  "gpt": {
+    "status": "available",
+    "percent": 0
+  },
+  "updatedAt": null
+}

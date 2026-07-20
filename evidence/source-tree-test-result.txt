@@ -1,0 +1,32 @@
+operation-router v2.3.5 source-tree + installed integration test result
+Date: 2026-07-21 (KST)
+Command: & "$env:USERPROFILE\.claude\operation-router\tests\run-tests.ps1" -InstalledIntegration
+Runner: Windows PowerShell 5.1.26100.8875, Pester 3.4 (-Strict)
+
+Final run (after v2.3.5 repairs, definitive):
+  Passed: 168  Failed: 0  Skipped: 0  Pending: 0  Inconclusive: 0
+  installedIntegrationTests: executed
+  installedIntegrationFailures: 0   (6/6 skills byte-identical, SHA-256)
+  statePath: isolated-temp-state
+  logRoot:  isolated-temp-logs
+
+Run history this session:
+  Run 1: 166/168 PASS, 2 FAIL
+    FAIL A "doctor 보고서 항목": codex.models.sol = 'unresolved'
+      Cause: ~/.codex/models_cache.json refreshed 2026-07-21 01:27 no longer
+      contains slug gpt-5.6-sol (terra/luna/5.5/5.4-mini remain).
+      Environment change, not a code defect. Narrow repair: test now requires
+      exact luna/terra slugs and allows sol = exact slug OR 'unresolved'
+      (invoke-gpt already fail-closes on unresolved — covered by existing test).
+    FAIL B "19. Windows PowerShell 전경 실행이 한글 stdin을 UTF-8 바이트로 보존한다":
+      child received extra leading bytes EF BB BF (see utf8-stdin-regression.md).
+  Run 2 (after repair A): 167/168 PASS — only FAIL B remained.
+  Run 3 (after repair B, strengthened to ordinal StartsWith): 168/168 PASS.
+  Final confirmation run (after README/REENTRY/contract doc updates): 168/168 PASS.
+
+Isolation verification (baseline captured before Run 1, compared after final run):
+  frozen logs logs/*.log      : 20 files, names+SHA-256 unchanged
+  logs/runtime                : 1 file, SHA-256 unchanged
+  logs/tests                  : empty before and after (mock logs use temp workroot)
+  real state/usage-state.json : SHA-256 unchanged (grok=exhausted/100, gpt=available/0)
+  temp 'operation-router-tests-*' workroots remaining: 0
