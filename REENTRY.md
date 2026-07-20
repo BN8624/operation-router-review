@@ -23,12 +23,22 @@ blocked:
   V11_V12_V13_V15_sol: "gpt-5.6-sol이 2026-07-21 models_cache에서 제거됨 — 사용자 결정 필요"
 usageState:
   note: "V03/V04/V08 성공 후 주문서에 따라 /operation reset 실행"
-next:
-  - V07_V08_sonnet_model_decision   # 4-1: Sonnet 5 재검증 또는 Fable 공식화
+next:   # 2026-07-21 사용자 확정 순서
+  - static_defects_4_repair_and_full_tests   # 이번 사이클 범위는 여기까지
+  - V07_V08_sonnet5_reverify                 # 4-1 결정: Fable 공식화 금지, Sonnet 5로 작은 작전 2 1회 재검증. Sonnet 실행 불가 시 BLOCKED_BY_REVIEWER_AVAILABILITY로 남기고 다음으로
   - V05_V06_V09_claude_only
   - V10_repair_required_fixture
-  - operation1_paths_blocked_by_sol
+  - security_and_install_verification
+  - v2_4_0_final_docs
+  - operation1_V11_V15_hold                  # sol 제거. 임의 모델 치환·canon 변경 금지
 ```
+
+### 2026-07-21 정적 결함 4건 수리 (외부 검토 지적)
+
+- P1: 비ASCII 명령줄 전경 실행이 상속 실행으로 폴백하며 `< NUL`을 잃던 경로를 제거했다. 비ASCII 문자열을 배치 본문에 쓰지 않고 유니코드 환경변수 참조("%VAR%")로 전달해 NUL 고정을 유지한다. 테스트 20 추가(STDINLEN=0 + 한글 인수 왕복).
+- P2: UTF-8 stdin 테스트 19가 실제 한글 디렉터리(`한글 경로/`)에서 stdin 파일을 전송하도록 확장해 문서의 "한글 경로 검증" 주장과 테스트 범위를 일치시켰다.
+- P2: config `_comment`의 codex 모델 목록을 현재 환경(terra/luna, sol 제거·fail-closed)에 맞게 갱신했다.
+- P2: README 오류 분류 서술을 코드 정본(weekly → transient → quota_unknown → provider, 명시적 weekly는 429 동반에도 우선)에 맞췄다.
 
 ### 2026-07-21 V03 재실행 전 무료 probe 수리
 

@@ -718,9 +718,28 @@ function Invoke-ForegroundCommand {
     $hasNonAscii = $false
     foreach ($ch in $cmdLine.ToCharArray()) { if ([int]$ch -gt 127) { $hasNonAscii = $true; break } }
     if ($hasNonAscii) {
-        # cmd 배치 파일은 OEM 코드페이지로 읽혀 비ASCII 경로가 깨질 수 있다. 이 경우에만 기존 상속 방식으로 폴백한다.
-        $output = & $FilePath @ArgumentList 2>&1
-        $exit = $LASTEXITCODE
+        # v2.3.5-p1: 비ASCII 명령줄에서도 stdin NUL 고정을 유지한다. cmd 배치 본문은 OEM 코드페이지로
+        # 읽혀 비ASCII가 깨지므로, 비ASCII 문자열은 배치에 직접 쓰지 않고 유니코드 환경변수 참조("%VAR%")로
+        # 전달한다 (cmd 변수 확장은 유니코드를 보존한다). 이전의 상속 실행 폴백은 < NUL이 없어
+        # grok 헤드리스가 파이프 EOF를 User cancelled로 오인하는 경로였다.
+        Initialize-RuntimeDirs
+        $wrapperPath = Join-Path $Script:TempDir ('fg-' + [guid]::NewGuid().ToString('N') + '.cmd')
+        $envNames = @('OR_FG_EXE')
+        $parts = @('@"%OR_FG_EXE%"')
+        for ($i = 0; $i -lt $ArgumentList.Count; $i++) {
+            $envNames += ('OR_FG_ARG' + $i)
+            $parts += ('"%OR_FG_ARG' + $i + '%"')
+        }
+        try {
+            Set-Item -Path 'env:OR_FG_EXE' -Value $resolved
+            for ($i = 0; $i -lt $ArgumentList.Count; $i++) { Set-Item -Path ('env:OR_FG_ARG' + $i) -Value ([string]$ArgumentList[$i]) }
+            Set-Content -LiteralPath $wrapperPath -Value (($parts -join ' ') + ' < NUL') -Encoding Ascii
+            $output = & cmd.exe /d /c $wrapperPath 2>&1
+            $exit = $LASTEXITCODE
+        } finally {
+            Remove-Item -LiteralPath $wrapperPath -Force -ErrorAction SilentlyContinue
+            foreach ($n in $envNames) { Remove-Item -Path ('env:' + $n) -ErrorAction SilentlyContinue }
+        }
         return [pscustomobject]@{ ExitCode = $exit; Output = ($output | Out-String) }
     }
     Initialize-RuntimeDirs

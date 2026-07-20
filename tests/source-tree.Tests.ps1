@@ -1799,7 +1799,10 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
     }
 
     It '19. Windows PowerShell 전경 실행이 한글 stdin을 UTF-8 바이트로 보존한다' {
-        $stdinPath = Join-Path $TestWorkRoot 'utf8-stdin.txt'
+        # 비ASCII 디렉터리 경로에서도 stdin 파일이 전달되는지 함께 검증한다 (P2 지적 반영).
+        $stdinDir = Join-Path $TestWorkRoot '한글 경로'
+        New-Item -ItemType Directory -Path $stdinDir -Force | Out-Null
+        $stdinPath = Join-Path $stdinDir 'utf8-stdin.txt'
         $payload = "[OPERATION_ROUTER_FINAL_WORKER]`n한글 계약 보존 ✓"
         Set-Content -LiteralPath $stdinPath -Value $payload -Encoding UTF8 -NoNewline
         $reader = '$s=[Console]::OpenStandardInput();$m=New-Object IO.MemoryStream;$b=New-Object byte[] 4096;while(($n=$s.Read($b,0,$b.Length))-gt 0){$m.Write($b,0,$n)};[Convert]::ToBase64String($m.ToArray())'
@@ -1809,6 +1812,16 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         # culture-sensitive StartsWith는 BOM(U+FEFF)을 무시하므로 ordinal로 비교해야 BOM 누출을 잡는다.
         $received.StartsWith($payload, [System.StringComparison]::Ordinal) | Should Be $true
         $received.Substring($payload.Length) | Should Match '^(\r?\n)?$'
+    }
+
+    It '20. 비ASCII 인수 전경 실행도 NUL 고정 래퍼를 유지한다 (P1)' {
+        # 명령줄에 한글이 있으면 env-var 래퍼 경로를 타며, stdin은 NUL(즉시 EOF)이어야 한다.
+        $cmd = '$i=[Console]::In.ReadToEnd(); Write-Output (''STDINLEN='' + $i.Length); Write-Output ''한글인수확인'''
+        $r = Invoke-ForegroundCommand -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-Command',$cmd)
+        $r.ExitCode | Should Be 0
+        $r.Output | Should Match 'STDINLEN=0'
+        $r.Output | Should Match '한글인수확인'
+        (Test-Path env:OR_FG_EXE) | Should Be $false
     }
 }
 
