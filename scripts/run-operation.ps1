@@ -364,6 +364,15 @@ function Invoke-RunOperation {
                 -IssueNumber $IssueNumber -LogPath $lp -RemainingProblems @($route.reason) -Extra @{ reason = $route.reason; hint = $route.hint }
         }
 
+        # v2.4.3: 작전 1 실제 worker 호출 직전에 같은 이슈의 기존 run·review 영수증을 무효화한다.
+        # 영수증 키는 (작전+이슈+저장소)로 고정이라 이전 세대가 남을 수 있다. 새 실행이 경계 위반·실패로
+        # 조기 반환돼도 과거 completed run 영수증이나 REPAIR_REQUIRED review 영수증이 남아 review·repair가
+        # 이전 세대를 재사용하는 것을 막는다. 새 영수증은 성공 postflight에서만 저장한다.
+        if ($OperationNumber -eq 1) {
+            Remove-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+            Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+        }
+
         # 워커 실행. 최초·fallback·review·repair가 같은 공통 오류 정책을 사용한다.
         $invokePrimary = { Invoke-RouteWorker -Route $route -RepoPath $RepoPath -PromptPath $tempOrderPath -Config $config -GrokRunner $GrokRunner -GptRunner $GptRunner }
         $execution = Invoke-WorkerWithErrorPolicy -Provider $route.worker -InvokeWorker $invokePrimary -State $state -Config $config -Log $log
@@ -649,6 +658,10 @@ $diff
         if ($null -eq $GptReviewRunner) {
             $GptReviewRunner = { param($repo, $prompt, $r) Invoke-GptWorker -Cwd $repo -Model $r.model -Effort $r.effort -PromptFilePath $prompt -Sandbox 'read-only' -ApprovalPolicy 'never' }
         }
+        # v2.4.3: 실제 GPT 검수 호출 직전에 기존 review 영수증을 무효화한다. 새 검수가 경계 위반·실패로
+        # 끝나면 이전 세대의 REPAIR_REQUIRED 영수증이 남아 repair가 그것을 재사용하는 것을 막는다.
+        # 유효한 REPAIR_REQUIRED + 경계 위반 없음일 때만 아래 6)에서 새 영수증을 저장한다.
+        Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
         $invokeReviewWorker = { & $GptReviewRunner $RepoPath $promptPath $route }
         $execution = Invoke-WorkerWithErrorPolicy -Provider 'gpt' -InvokeWorker $invokeReviewWorker -State $state -Config $config
         $res = $execution.Result

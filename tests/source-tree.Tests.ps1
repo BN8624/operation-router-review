@@ -514,6 +514,45 @@ Describe 'v2.4.0/v2.4.1 저장소 경계 탐지 + 공통 finalizer' {
             (Test-Path (Get-ReviewReceiptPath -Operation 1 -IssueNumber 51 -RepoPath $repo)) | Should Be $false
         } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; if($wf){ Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }; Invoke-ResetCommand | Out-Null }
     }
+    It 'v2.4.3 HIGH: 이전 completed run 영수증이 재실행(경계위반+실패) 뒤 남지 않는다' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = $null
+        try {
+            # 1) seam 없이 정상 completed run 영수증 생성
+            $grOk = { param($r,$repo2,$prompt) Push-Location $repo2; "impl" | Out-File impl.txt -Encoding utf8; git add .; git commit -q -m impl; git push -q origin main; Pop-Location; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
+            Invoke-RunOperation -OperationNumber 1 -IssueNumber 60 -RepoPath $repo -IssueFetcher $issue -GrokRunner $grOk -CiProbe ({ param($h) 'success' }) | Out-Null
+            (Get-RunReceipt -Operation 1 -IssueNumber 60 -RepoPath $repo).status | Should Be 'completed'
+            # 2) 같은 이슈 재실행: 감시 파일 변경 + worker 실패 (HEAD 불변)
+            $wf = New-BoundaryWatchSeam
+            $grFail = { param($r,$repo2,$prompt) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;Output='auth error 401' } }
+            $res = Invoke-RunOperation -OperationNumber 1 -IssueNumber 60 -RepoPath $repo -IssueFetcher $issue -GrokRunner $grFail -GptRunner ({ param($r,$repo2,$prompt) throw 'no gpt' }) -CiProbe $ciNone
+            $res.status | Should Be 'repo_boundary_violation'
+            # 이전 completed 영수증이 무효화돼야 한다(과거 성공 상태 재사용 차단)
+            (Get-RunReceipt -Operation 1 -IssueNumber 60 -RepoPath $repo) | Should Be $null
+            # 후속 review는 영수증이 없어 GPT 미호출
+            $script:rc60 = 0
+            $revRunner = { param($repo2,$prompt,$r) $script:rc60++; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='{"verdict":"PASS","findings":[]}' } }
+            Invoke-OperationReview -OperationNumber 1 -IssueNumber 60 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $revRunner | Out-Null
+            $script:rc60 | Should Be 0
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; if($wf){ Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }; Invoke-ResetCommand | Out-Null }
+    }
+    It 'v2.4.3 HIGH: 이전 REPAIR_REQUIRED review 영수증이 경계위반 재검수 뒤 남지 않는다' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = $null
+        try {
+            $grOk = { param($r,$repo2,$prompt) Push-Location $repo2; "impl" | Out-File impl.txt -Encoding utf8; git add .; git commit -q -m impl; git push -q origin main; Pop-Location; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
+            Invoke-RunOperation -OperationNumber 1 -IssueNumber 61 -RepoPath $repo -IssueFetcher $issue -GrokRunner $grOk -CiProbe ({ param($h) 'success' }) | Out-Null
+            # 1) 정상 REPAIR_REQUIRED review 영수증 생성 (seam 없음)
+            $revRR = { param($repo2,$prompt,$r) [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='{"verdict":"REPAIR_REQUIRED","findings":[{"severity":"high","file":"a.txt","issue":"x","requiredFix":"y"}]}' } }
+            Invoke-OperationReview -OperationNumber 1 -IssueNumber 61 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $revRR | Out-Null
+            (Test-Path (Get-ReviewReceiptPath -Operation 1 -IssueNumber 61 -RepoPath $repo)) | Should Be $true
+            # 2) 같은 이슈 재검수: 감시 파일 변경 + REPAIR_REQUIRED
+            $wf = New-BoundaryWatchSeam
+            $revTamper = { param($repo2,$prompt,$r) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='{"verdict":"REPAIR_REQUIRED","findings":[{"severity":"high","file":"a.txt","issue":"x","requiredFix":"y"}]}' } }
+            $rv = Invoke-OperationReview -OperationNumber 1 -IssueNumber 61 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $revTamper
+            $rv.status | Should Be 'repo_boundary_violation'
+            # 이전 REPAIR_REQUIRED 영수증이 무효화돼야 한다(repair 재사용 차단)
+            (Test-Path (Get-ReviewReceiptPath -Operation 1 -IssueNumber 61 -RepoPath $repo)) | Should Be $false
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; if($wf){ Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }; Invoke-ResetCommand | Out-Null }
+    }
 }
 
 Describe '21-24. postflight 상태' {
@@ -1968,9 +2007,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v2.4.2를 현재 버전으로 기록한다' {
+    It '12. README는 v2.4.3을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v2\.4\.2\)'
+        $readme | Should Match '^# operation-router \(v2\.4\.3\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {
