@@ -541,7 +541,8 @@ function Save-RunReceipt {
         [Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber,
         [Parameter(Mandatory)][string]$RepoPath,
         [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)]$Postflight,
-        [Parameter(Mandatory)]$Route, $WorkerResult, $RemainingProblems = @()
+        [Parameter(Mandatory)]$Route, $WorkerResult, $RemainingProblems = @(),
+        [string]$StatusOverride
     )
     Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
     $id = Get-RepoIdentity -RepoPath $RepoPath
@@ -565,7 +566,7 @@ function Save-RunReceipt {
         worker      = $Route.worker
         model       = $Route.model
         effort      = $effort
-        status      = $Postflight.status
+        status      = if (-not [string]::IsNullOrEmpty($StatusOverride)) { $StatusOverride } else { $Postflight.status }
         postflight  = $Postflight
         remainingProblems = @($RemainingProblems)
         workerSummary = $summary

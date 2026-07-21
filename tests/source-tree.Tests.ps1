@@ -483,6 +483,37 @@ Describe 'v2.4.0/v2.4.1 저장소 경계 탐지 + 공통 finalizer' {
             ($res.PSObject.Properties.Name -contains 'underlyingStatus') | Should Be $false
         } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }
     }
+    It 'v2.4.2 HIGH: 경계 위반 + 정상 커밋·push → run 영수증도 repo_boundary_violation, 후속 review not_eligible(GPT 0회)' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = New-BoundaryWatchSeam
+        try {
+            $gr = { param($r,$repo2,$prompt) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; Push-Location $repo2; "impl" | Out-File impl.txt -Encoding utf8; git add .; git commit -q -m impl; git push -q origin main; Pop-Location; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
+            $res = Invoke-RunOperation -OperationNumber 1 -IssueNumber 50 -RepoPath $repo -IssueFetcher $issue -GrokRunner $gr -CiProbe ({ param($h) 'success' })
+            $res.status | Should Be 'repo_boundary_violation'
+            # run 영수증 status도 승격돼야 한다 (completed로 남으면 review 자격을 통과함)
+            (Get-RunReceipt -Operation 1 -IssueNumber 50 -RepoPath $repo).status | Should Be 'repo_boundary_violation'
+            # 후속 review: 완료 영수증이 아니므로 자격 거부 + GPT 검수 미호출
+            $script:revCalls50 = 0
+            $revRunner = { param($repo2,$prompt,$r) $script:revCalls50++; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='{"verdict":"PASS","findings":[]}' } }
+            $rv = Invoke-OperationReview -OperationNumber 1 -IssueNumber 50 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $revRunner
+            $rv.status | Should Be 'review_not_eligible'
+            $script:revCalls50 | Should Be 0
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue; Invoke-ResetCommand | Out-Null }
+    }
+    It 'v2.4.2 HIGH: 검수 중 경계 위반 → review 영수증 미저장(repair 자격 원천 차단)' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = $null
+        try {
+            # 1) 경계 seam 없이 정상 completed run 영수증 생성
+            $grOk = { param($r,$repo2,$prompt) Push-Location $repo2; "impl" | Out-File impl.txt -Encoding utf8; git add .; git commit -q -m impl; git push -q origin main; Pop-Location; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
+            Invoke-RunOperation -OperationNumber 1 -IssueNumber 51 -RepoPath $repo -IssueFetcher $issue -GrokRunner $grOk -CiProbe ({ param($h) 'success' }) | Out-Null
+            # 2) 검수 중 감시 파일 변경 + 유효한 REPAIR_REQUIRED JSON
+            $wf = New-BoundaryWatchSeam
+            $revRunner = { param($repo2,$prompt,$r) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='{"verdict":"REPAIR_REQUIRED","findings":[{"severity":"high","file":"a.txt","issue":"x","requiredFix":"y"}]}' } }
+            $rv = Invoke-OperationReview -OperationNumber 1 -IssueNumber 51 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $revRunner
+            $rv.status | Should Be 'repo_boundary_violation'
+            $rv.underlyingStatus | Should Be 'reviewed'
+            (Test-Path (Get-ReviewReceiptPath -Operation 1 -IssueNumber 51 -RepoPath $repo)) | Should Be $false
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; if($wf){ Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }; Invoke-ResetCommand | Out-Null }
+    }
 }
 
 Describe '21-24. postflight 상태' {
@@ -1937,9 +1968,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v2.4.1을 현재 버전으로 기록한다' {
+    It '12. README는 v2.4.2를 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v2\.4\.1\)'
+        $readme | Should Match '^# operation-router \(v2\.4\.2\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {

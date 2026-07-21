@@ -268,9 +268,15 @@ function Invoke-PostflightCommand {
             note = 'pending 시작 스냅샷이 없다. 먼저 --claude-only 로 실행해 지시를 받아야 한다.' }
     }
     # v2.3: 현재 저장소와 스냅샷 저장소가 다르면 중단
+    # v2.4.2: pending 스냅샷이 존재하므로 이 조기 반환도 경계 검사를 통과시킨다(감시 파일 변경 시 승격).
+    $pendBoundary = $null
+    if ($pend.PSObject.Properties.Name -contains 'snapshot' -and $null -ne $pend.snapshot -and ($pend.snapshot.PSObject.Properties.Name -contains 'boundaryWatch')) {
+        $pendBoundary = $pend.snapshot.boundaryWatch
+    }
     if (-not (Test-ReceiptRepoMatch -Receipt $pend -RepoPath $RepoPath)) {
-        return [pscustomobject]@{ operation = $Operation; issueNumber = $IssueNumber; status = 'repository_receipt_mismatch'
+        $mismatch = [pscustomobject]@{ operation = $Operation; issueNumber = $IssueNumber; status = 'repository_receipt_mismatch'
             note = '현재 저장소와 pending 스냅샷의 저장소가 다르다. postflight를 중단한다.' }
+        return (Complete-BoundaryFinalizer -Result $mismatch -BoundarySnapshot $pendBoundary)
     }
     $wr = [pscustomobject]@{ Success = $true; ExitCode = 0; QuotaExhausted = $false; Output = 'claude-postflight' }
     $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $pend.snapshot -WorkerResult $wr -DeclaredNoCodeChange:$false -CiProbe $CiProbe
@@ -398,11 +404,19 @@ function Invoke-RunOperation {
 
         # postflight
         $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -DeclaredNoCodeChange:$false -CiProbe $CiProbe
+        # v2.4.2: 영수증을 저장하기 전에 경계 위반을 먼저 확정한다. 위반이면 영수증 status도
+        # repo_boundary_violation으로 저장해, 보안 위반 run이 completed 영수증으로 남아 review 자격을
+        #통과하는 결함을 막는다(finalizer는 출력만 고쳤음).
+        $runBoundaryViol = @()
+        if ($snapshot -and ($snapshot.PSObject.Properties.Name -contains 'boundaryWatch')) {
+            $runBoundaryViol = @(Test-RepoBoundaryViolation -BeforeSnapshot $snapshot.boundaryWatch)
+        }
+        $receiptStatus = if ($runBoundaryViol.Count -gt 0) { 'repo_boundary_violation' } else { $pf.status }
         # 작전 1 실행 영수증 자동 저장 (v2.2): review가 -StartHead 재입력 없이 자동으로 읽는다.
         if ($OperationNumber -eq 1 -and $effectiveRoute.worker -in @('grok','gpt')) {
             $rcPath = Save-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $snapshot -Postflight $pf `
-                -Route $effectiveRoute -WorkerResult $result -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf)
-            $log.Add("op1 run receipt saved: $rcPath")
+                -Route $effectiveRoute -WorkerResult $result -StatusOverride $receiptStatus -RemainingProblems (Get-RemainingProblems -Status $receiptStatus -Postflight $pf)
+            $log.Add("op1 run receipt saved: $rcPath (status=$receiptStatus)")
         }
         $lp = Write-RouterLog -Name "op$OperationNumber-issue$IssueNumber" -Content ($log -join "`n")
         return New-FinalOutput -Operation $OperationNumber -RouteLabel (New-RouteLabel -Route $effectiveRoute) -Status $pf.status `
@@ -677,8 +691,12 @@ $diff
         }
 
         # 6) REPAIR_REQUIRED면 findings를 런타임 review 영수증에 저장 (repair가 자동 복원)
+        # v2.4.2: 검수 실행 중 감시 파일이 변경됐다면 REPAIR_REQUIRED 영수증을 저장하지 않는다.
+        # 저장 후 finalizer가 출력만 repo_boundary_violation으로 바꾸면 경계 위반 review 영수증이 남아
+        # repair가 그것으로 실행될 수 있다. 영수증 자체를 만들지 않아 repair 자격을 원천 차단한다.
         $reviewReceiptPath = $null
-        if ($parsed.verdict -eq 'REPAIR_REQUIRED') {
+        $reviewBoundaryViol = @(Test-RepoBoundaryViolation -BeforeSnapshot $__reviewBoundary)
+        if ($parsed.verdict -eq 'REPAIR_REQUIRED' -and $reviewBoundaryViol.Count -eq 0) {
             $reviewReceiptPath = Save-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath `
                 -Verdict $parsed.verdict -Findings $parsed.findings -PostReviewHead $finalHead -OriginalWorker $receipt.worker
         }
