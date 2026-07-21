@@ -40,8 +40,8 @@ next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. ⑤ 일부 착수:
   - security_secret_done                     # ⑤-2 완료(2026-07-21): Authorization(임의 스킴)/AWS/고엔트로피 마스킹 추가, git SHA·UUID 오탐 제외, env 전체 덤프 없음 확인. 178/178
   - install_lifecycle_EXCLUDED               # 사용자 결정 2026-07-21: 1인 사용이라 install.ps1/업그레이드/롤백 및 INSTALL.md/ROLLBACK.md는 범위 제외. 롤백은 ~/.claude/backups 폴더 복원으로 충분. 다음 세션은 설치기를 만들지 말 것.
   - deny_pattern_grok_probe_optional         # ⑤-3 선택: deny 중간 와일드카드(git push*+*) 실제 발동은 grok 프로브 필요 — 경계 탐지가 실질 방어라 후순위
-  - v2_4_0_policy_changes_ABC                # ⑤.5 자연어 호출+확인게이트(A), 작전1 claude-only high(B), 고위험 경고(C) — 아래 절차 3 참조
-  - reverify_after_policy_changes            # A/B/C 적용 후 작전1 claude-only(V14계열)+자연어 호출 경로 재검증
+  - v2_4_0_policy_ABC_done                    # ⑤.5 완료(2026-07-21): A(operation-1/2/3 disable-model-invocation=false+실행 전 확인게이트, 디스패처·claude변형은 true 유지), B(claudeOnly.1.effort medium→high, operation-1-claude frontmatter도 high), C(작전1 claude_only_required에 highRiskWarning 필드). 184/184. 검토 저장소 6b48665. 주의: SKILL.md는 설치본(~/.claude/skills)과 소스(~/.claude/operation-router/skills) 양쪽 동기화 필수(테스트·manifest는 소스 사용)
+  - reverify_policy_ABC_optional             # A/B/C는 정적 테스트로 검증됨. 실전 재검증은 선택: 자연어 호출은 이 세션에서 이미 operation-1/2/3 Skill 도구 노출 확인됨. 작전1 claude-only high는 유료라 후순위(V14는 medium으로 이미 PASS, effort만 상향)
   - v2_4_0_final_docs                        # ⑥ CHANGELOG, VERIFICATION_MATRIX, SECURITY, INSTALL, ROLLBACK
   - external_review_v2_4_0                   # ⑤⑥ 완료 후 검토 저장소 링크로 1회
   - sol_retest_when_available                # sol 복귀 시 config 매핑 원복 + V11~V13·V15 재검증
