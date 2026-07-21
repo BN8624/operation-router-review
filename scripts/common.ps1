@@ -696,6 +696,7 @@ function New-ExecutionGeneration {
         processId = $null; processStartedAt = $null; finalHead = $null; workerExitCode = $null
         workerStopReason = $null; interruptedReason = $null; workerReportedVerification = $null
         localVerificationComplete = $false; interrupted = $false; recoveredByPostflight = $false
+        resultEnvelopePresent = $false; verificationProvenance = 'worker_result_pending'
         postflight = $null; remainingProblems = @()
     }
     Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
@@ -797,7 +798,10 @@ function Save-RunReceipt {
         [Parameter(Mandatory)][string]$RepoPath,
         [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)]$Postflight,
         [Parameter(Mandatory)]$Route, $WorkerResult, $RemainingProblems = @(),
-        [string]$StatusOverride
+        [string]$StatusOverride, [bool]$ResultEnvelopePresent = $true,
+        [bool]$Interrupted = $false, [string]$InterruptedReason,
+        [bool]$LocalVerificationComplete = $false, [bool]$RecoveredByPostflight = $false,
+        [string]$VerificationProvenance = 'valid_worker_result_envelope'
     )
     Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
     $id = Get-RepoIdentity -RepoPath $RepoPath
@@ -811,6 +815,10 @@ function Save-RunReceipt {
     }
     $effort = $null
     if ($Route.PSObject.Properties.Name -contains 'effort') { $effort = $Route.effort }
+    $reportedVerification = $null
+    if ($null -ne $WorkerResult -and ($WorkerResult.PSObject.Properties.Name -contains 'WorkerReportedVerification') -and $null -ne $WorkerResult.WorkerReportedVerification) {
+        $reportedVerification = Protect-SecretText -Text ([string]$WorkerResult.WorkerReportedVerification)
+    }
     $payload = [pscustomobject]@{
         operation   = $Operation
         issueNumber = $IssueNumber
@@ -828,6 +836,13 @@ function Save-RunReceipt {
         postflight  = $Postflight
         remainingProblems = @($RemainingProblems)
         workerSummary = $summary
+        resultEnvelopePresent = [bool]$ResultEnvelopePresent
+        interrupted = [bool]$Interrupted
+        interruptedReason = $InterruptedReason
+        localVerificationComplete = [bool]$LocalVerificationComplete
+        workerReportedVerification = $reportedVerification
+        recoveredByPostflight = [bool]$RecoveredByPostflight
+        verificationProvenance = $VerificationProvenance
         createdAt   = (Get-Date).ToUniversalTime().ToString('o')
     }
     Write-JsonFile -Path $path -Object $payload

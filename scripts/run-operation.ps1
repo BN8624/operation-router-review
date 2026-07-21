@@ -137,9 +137,10 @@ function Get-RemainingProblems {
         'interrupted_no_changes' { $probs += 'worker result missing and no committed change recovered' }
         'interrupted_dirty_worktree' { $probs += 'worker result missing and worktree is dirty' }
         'interrupted_push_incomplete' { $probs += 'worker result missing and final HEAD is not confirmed on origin/main' }
-        'recovered_ci_pending_after_interruption' { $probs += 'worker result missing; commit recovered but CI is pending' }
-        'recovered_ci_failed_after_interruption' { $probs += 'worker result missing; commit recovered but CI failed' }
-        'recovered_ci_unavailable_after_interruption' { $probs += 'worker result missing; commit recovered but CI status is unavailable' }
+        'recovered_commit_unverified' { $probs += 'commit/push recovered, but worker result and local verification are unverified; manual verification is required' }
+        'recovered_ci_pending_unverified' { $probs += 'commit recovered but worker result is missing and CI is pending; review is not eligible' }
+        'recovered_ci_failed_unverified' { $probs += 'commit recovered but worker result is missing and CI failed; review is not eligible' }
+        'recovered_ci_unavailable_unverified' { $probs += 'commit recovered but worker result is missing and CI status is unavailable; review is not eligible' }
         'repair_worker_failed'    { $probs += 'repair worker returned non-zero exit (not a quota error)' }
         'repair_quota_exhausted'  { $probs += 'repair worker hit quota' }
         'repair_transient_rate_limited' { $probs += 'repair worker hit a transient rate limit; usage-state unchanged' }
@@ -431,8 +432,11 @@ function Invoke-RunOperation {
         $receiptStatus = if ($runBoundaryViol.Count -gt 0) { 'repo_boundary_violation' } else { $pf.status }
         # 작전 1 실행 영수증 자동 저장 (v2.2): review가 -StartHead 재입력 없이 자동으로 읽는다.
         if ($OperationNumber -eq 1 -and $effectiveRoute.worker -in @('grok','gpt')) {
+            $runLocalVerification = if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false}
             $rcPath = Save-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $snapshot -Postflight $pf `
-                -Route $effectiveRoute -WorkerResult $result -StatusOverride $receiptStatus -RemainingProblems (Get-RemainingProblems -Status $receiptStatus -Postflight $pf)
+                -Route $effectiveRoute -WorkerResult $result -StatusOverride $receiptStatus -RemainingProblems (Get-RemainingProblems -Status $receiptStatus -Postflight $pf) `
+                -ResultEnvelopePresent $true -Interrupted $false -LocalVerificationComplete $runLocalVerification `
+                -RecoveredByPostflight $false -VerificationProvenance 'valid_worker_result_envelope'
             $log.Add("op1 run receipt saved: $rcPath (status=$receiptStatus)")
         }
         if ($result.PSObject.Properties.Name -contains 'ExecutionReceipt' -and $null -ne $result.ExecutionReceipt) {
@@ -441,8 +445,9 @@ function Invoke-RunOperation {
                 $er.status = $receiptStatus; $er.finalHead = $pf.finalHead; $er.workerExitCode = $result.ExitCode
                 $er.workerStopReason = $result.WorkerStopReason; $er.postflight = $pf
                 $er.interrupted = $false; $er.recoveredByPostflight = $false
-                $er.workerReportedVerification = if ($result.PSObject.Properties.Name -contains 'WorkerReportedVerification') { $result.WorkerReportedVerification } else { $null }
+                $er.workerReportedVerification = if ($result.PSObject.Properties.Name -contains 'WorkerReportedVerification' -and $null -ne $result.WorkerReportedVerification) { Protect-SecretText -Text ([string]$result.WorkerReportedVerification) } else { $null }
                 $er.localVerificationComplete = if ($result.PSObject.Properties.Name -contains 'LocalVerificationComplete') { [bool]$result.LocalVerificationComplete } else { $false }
+                $er.resultEnvelopePresent = $true; $er.verificationProvenance = 'valid_worker_result_envelope'
                 $er.remainingProblems = @(Get-RemainingProblems -Status $receiptStatus -Postflight $pf)
                 Save-ExecutionReceipt -Receipt $er -RepoPath $RepoPath | Out-Null
             }
@@ -454,7 +459,8 @@ function Invoke-RunOperation {
             -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
             -Extra @{ interrupted=$false; recoveredByPostflight=$false
                 workerReportedVerification=if($result.PSObject.Properties.Name -contains 'WorkerReportedVerification'){$result.WorkerReportedVerification}else{$null}
-                localVerificationComplete=if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false} }
+                localVerificationComplete=if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false}
+                resultEnvelopePresent=$true; verificationProvenance='valid_worker_result_envelope' }
     }
     finally {
         Remove-TempOrderFile -Path $tempOrderPath
@@ -755,14 +761,23 @@ function Invoke-OperationReview {
             reason = "worker_not_grok:$($receipt.worker)"
             note = 'GPT가 구현한 결과는 Sol 자기검수를 하지 않는다. 현재 세션(Opus)이 직접 종료 검토한다.' }
     }
-    # 4) run 상태가 완료 계열이어야 검수 자격이 있다
-    if ($receipt.status -notin @('completed','completed_ci_pending','completed_ci_unavailable',
-        'recovered_completed_after_interruption','recovered_ci_pending_after_interruption','recovered_ci_unavailable_after_interruption')) {
+    # 4) 정상 worker result envelope와 검증 provenance가 없는 복구 결과는 독립 검수 자격이 없다.
+    $receiptProps = $receipt.PSObject.Properties.Name
+    $resultEnvelopePresent = ($receiptProps -contains 'resultEnvelopePresent' -and [bool]$receipt.resultEnvelopePresent)
+    $provenance = if ($receiptProps -contains 'verificationProvenance') { [string]$receipt.verificationProvenance } else { $null }
+    if (-not $resultEnvelopePresent -or $provenance -notin @('valid_worker_result_envelope','valid_worker_result_envelope_recovered_postflight') -or
+        ($receiptProps -contains 'interrupted' -and [bool]$receipt.interrupted)) {
+        return [pscustomobject]@{ status = 'review_not_eligible'; verdict = $null; findings = @()
+            reason = 'recovered_result_missing_or_unverified'
+            note = '정상 worker result envelope와 review 가능한 검증 provenance가 없어 Sol 검수를 호출하지 않는다. 로컬 검증 재실행 또는 수동 종료 검토가 필요하다.' }
+    }
+    # 5) run 상태가 정상 완료 계열이어야 검수 자격이 있다
+    if ($receipt.status -notin @('completed','completed_ci_pending','completed_ci_unavailable')) {
         return [pscustomobject]@{ status = 'review_not_eligible'; verdict = $null; findings = @()
             reason = "run_not_completed:$($receipt.status)"
             note = '완료되지 않은 run 결과는 검수하지 않는다. run을 먼저 정상 완료해야 한다.' }
     }
-    # 5) 현재 HEAD == 영수증 finalHead
+    # 6) 현재 HEAD == 영수증 finalHead
     $currentHead = Get-GitHead -Path $RepoPath
     if ($currentHead -ne $receipt.finalHead) {
         return [pscustomobject]@{ status = 'review_receipt_head_mismatch'; verdict = $null; findings = @()
@@ -1151,11 +1166,14 @@ function Invoke-RecoverCommand {
         $route = [pscustomobject]@{ worker=$receipt.worker; model=$receipt.model; effort=$receipt.effort }
         if ($null -ne $result) {
             $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -DeclaredNoCodeChange:$false -CiProbe $CiProbe
-            $interrupted = $false; $recovered = $true; $localVerificationComplete = $false
+            $interrupted = $false; $recovered = $true
+            $localVerificationComplete = if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false}
+            $resultEnvelopePresent = $true; $verificationProvenance = 'valid_worker_result_envelope_recovered_postflight'
             $workerStopReason = $result.WorkerStopReason; $interruptedReason = $null
         } else {
             $pf = Resolve-RecoveryPostflight -RepoPath $RepoPath -StartSnapshot $snapshot -CiProbe $CiProbe
             $interrupted = $true; $recovered = $true; $localVerificationComplete = $false
+            $resultEnvelopePresent = $false; $verificationProvenance = 'git_postflight_without_worker_result'
             $workerStopReason = 'external_interruption'; $interruptedReason = 'result_missing_after_process_exit'
         }
         $boundary = @()
@@ -1163,21 +1181,28 @@ function Invoke-RecoverCommand {
         $finalStatus = if ($boundary.Count -gt 0) { 'repo_boundary_violation' } else { $pf.status }
         $receipt.status = $finalStatus; $receipt.finalHead = $pf.finalHead; $receipt.workerExitCode = if ($null -ne $result) { $result.ExitCode } else { $null }
         $receipt.workerStopReason = $workerStopReason; $receipt.interruptedReason = $interruptedReason; $receipt.postflight = $pf
+        $receipt.workerReportedVerification = if($null -ne $result -and $result.PSObject.Properties.Name -contains 'WorkerReportedVerification' -and $null -ne $result.WorkerReportedVerification){Protect-SecretText -Text ([string]$result.WorkerReportedVerification)}else{$null}
         $receipt.remainingProblems = @(Get-RemainingProblems -Status $finalStatus -Postflight $pf)
-        foreach ($item in @(@('interrupted',$interrupted),@('localVerificationComplete',$localVerificationComplete),@('recoveredByPostflight',$recovered))) {
+        foreach ($item in @(@('interrupted',$interrupted),@('localVerificationComplete',$localVerificationComplete),@('recoveredByPostflight',$recovered),
+                @('resultEnvelopePresent',$resultEnvelopePresent),@('verificationProvenance',$verificationProvenance))) {
             if ($receipt.PSObject.Properties.Name -contains $item[0]) { $receipt.($item[0]) = $item[1] }
             else { Add-Member -InputObject $receipt -NotePropertyName $item[0] -NotePropertyValue $item[1] }
         }
         Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
         if ($OperationNumber -eq 1 -and $receipt.worker -in @('grok','gpt') -and ($null -eq $result -or $result.Success)) {
+            if ($null -eq $result) { Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath }
             Save-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $snapshot -Postflight $pf `
-                -Route $route -WorkerResult $result -StatusOverride $finalStatus -RemainingProblems $receipt.remainingProblems | Out-Null
+                -Route $route -WorkerResult $result -StatusOverride $finalStatus -RemainingProblems $receipt.remainingProblems `
+                -ResultEnvelopePresent $resultEnvelopePresent -Interrupted $interrupted -InterruptedReason $interruptedReason `
+                -LocalVerificationComplete $localVerificationComplete -RecoveredByPostflight $recovered `
+                -VerificationProvenance $verificationProvenance | Out-Null
         }
         $extra = @{
             executionId=$receipt.executionId; generation=$receipt.generation; interrupted=$interrupted
             workerExitCode=$receipt.workerExitCode; workerStopReason=$workerStopReason; interruptedReason=$interruptedReason
             workerReportedVerification=if($null -ne $result){Protect-SecretText -Text ([string]$result.Output)}else{$null}
             localVerificationComplete=$localVerificationComplete; recoveredByPostflight=$recovered; workerCalls=0
+            resultEnvelopePresent=$resultEnvelopePresent; verificationProvenance=$verificationProvenance
         }
         return New-FinalOutput -Operation $OperationNumber -RouteLabel 'recover' -Status $finalStatus `
             -Worker $receipt.worker -Model $receipt.model -Effort $receipt.effort -Snapshot $snapshot -Postflight $pf `

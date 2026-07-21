@@ -1957,9 +1957,10 @@ Describe 'v2.4.4. 실행 세대 영속화·중복 차단·recover' {
             Push-Location $repo;'done'|Out-File done.txt -Encoding utf8;git add .;git commit -q -m done;git push -q origin main;Pop-Location
             $dead={param($processIdValue)[pscustomobject]@{exists=$false;startedAt=$null}}
             $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 312 -RepoPath $repo -ProcessProbe $dead -CiProbe ({param($p)'success'})
-            $res.status|Should Be 'recovered_completed_after_interruption';$res.workerCalls|Should Be 0
+            $res.status|Should Be 'recovered_commit_unverified';$res.workerCalls|Should Be 0
             $res.interrupted|Should Be $true;$res.localVerificationComplete|Should Be $false;$res.recoveredByPostflight|Should Be $true
-            (Get-ExecutionReceipt -Operation 2 -IssueNumber 312 -RepoPath $repo).status|Should Be 'recovered_completed_after_interruption'
+            $saved=Get-ExecutionReceipt -Operation 2 -IssueNumber 312 -RepoPath $repo
+            $saved.status|Should Be 'recovered_commit_unverified';$saved.resultEnvelopePresent|Should Be $false
         } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
     }
 
@@ -1969,9 +1970,9 @@ Describe 'v2.4.4. 실행 세대 영속화·중복 차단·recover' {
             @{n=314;mode='dirty';ci='success';want='interrupted_dirty_worktree'},
             @{n=315;mode='ahead';ci='success';want='interrupted_push_incomplete'},
             @{n=324;mode='behind';ci='success';want='interrupted_push_incomplete'},
-            @{n=316;mode='push';ci='pending';want='recovered_ci_pending_after_interruption'},
-            @{n=317;mode='push';ci='failure';want='recovered_ci_failed_after_interruption'},
-            @{n=318;mode='push';ci='unavailable';want='recovered_ci_unavailable_after_interruption'})) {
+            @{n=316;mode='push';ci='pending';want='recovered_ci_pending_unverified'},
+            @{n=317;mode='push';ci='failure';want='recovered_ci_failed_unverified'},
+            @{n=318;mode='push';ci='unavailable';want='recovered_ci_unavailable_unverified'})) {
             $repo=New-FakeRepo -WithRemote
             try {
                 $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 2 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
@@ -2136,6 +2137,63 @@ Describe 'v2.4.5-1. canonical root namespace와 legacy receipt 안전 처리' {
             $res.status|Should Be 'repository_receipt_mismatch';$res.reason|Should Be 'legacy_active_execution_migration_blocked'
             (Test-Path -LiteralPath $legacyPath)|Should Be $true;(Test-Path -LiteralPath $current)|Should Be $false
         } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+}
+
+Describe 'v2.4.5-2. result 유실 recover의 review 자격 차단' {
+    It '정상 result envelope recover는 postflight와 적격 Grok 작전 1 review를 유지한다' {
+        Invoke-ResetCommand|Out-Null;$repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 1 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+            $rc=New-ExecutionGeneration -Operation 1 -IssueNumber 410 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+            Push-Location $repo;'ok'|Out-File ok.txt -Encoding utf8;git add .;git commit -q -m ok;git push -q origin main;Pop-Location
+            Write-InjectedExecutionResult -Receipt $rc -WorkerResult ([pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;ErrorClass='none';Output='verified';WorkerReportedVerification='targeted tests pass';LocalVerificationComplete=$true}) -RepoPath $repo
+            $recover=Invoke-RecoverCommand -OperationNumber 1 -IssueNumber 410 -RepoPath $repo -CiProbe $ciNone
+            $recover.status|Should Be 'completed';$recover.resultEnvelopePresent|Should Be $true
+            $run=Get-RunReceipt -Operation 1 -IssueNumber 410 -RepoPath $repo
+            $run.verificationProvenance|Should Be 'valid_worker_result_envelope_recovered_postflight'
+            $script:v245ReviewCalls=0
+            $review=Invoke-OperationReview -OperationNumber 1 -IssueNumber 410 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner ({param($p,$o,$r)$script:v245ReviewCalls++;[pscustomobject]@{ExitCode=0;Output='{"verdict":"PASS","findings":[]}'}})
+            $review.verdict|Should Be 'PASS';$script:v245ReviewCalls|Should Be 1
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It 'result 없음 + commit/push 성공은 unverified 진단 receipt만 남기고 GPT review를 0회 호출한다' {
+        Invoke-ResetCommand|Out-Null;$repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 1 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+            $rc=New-ExecutionGeneration -Operation 1 -IssueNumber 411 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+            $rc.status='worker_running';$rc.processId=999;$rc.processStartedAt='2026-01-01T00:00:00Z';$rc.updatedAt='2020-01-01T00:00:00Z'
+            Write-AtomicJsonFile -Path (Get-ExecutionReceiptPath -Operation 1 -IssueNumber 411 -RepoPath $repo) -Object $rc
+            Push-Location $repo;'lost'|Out-File lost.txt -Encoding utf8;git add .;git commit -q -m lost;git push -q origin main;Pop-Location
+            $recover=Invoke-RecoverCommand -OperationNumber 1 -IssueNumber 411 -RepoPath $repo -ProcessProbe ({param($n)[pscustomobject]@{exists=$false;startedAt=$null}}) -CiProbe ({param($p)'success'})
+            $recover.status|Should Be 'recovered_commit_unverified';$recover.resultEnvelopePresent|Should Be $false;$recover.localVerificationComplete|Should Be $false
+            $run=Get-RunReceipt -Operation 1 -IssueNumber 411 -RepoPath $repo
+            $run.status|Should Be 'recovered_commit_unverified';$run.interrupted|Should Be $true;$run.verificationProvenance|Should Be 'git_postflight_without_worker_result'
+            $script:v245ReviewCalls=0
+            $review=Invoke-OperationReview -OperationNumber 1 -IssueNumber 411 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner ({param($p,$o,$r)$script:v245ReviewCalls++;throw 'must not run'})
+            $review.status|Should Be 'review_not_eligible';$review.reason|Should Be 'recovered_result_missing_or_unverified';$script:v245ReviewCalls|Should Be 0
+            (Invoke-RepairCommand -OperationNumber 1 -IssueNumber 411 -RepoPath $repo).status|Should Be 'repair_receipt_missing'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It 'result 없는 CI pending/failure/unavailable은 모두 unverified이며 review worker 호출은 0회다' {
+        foreach($case in @(
+            @{n=412;ci='pending';want='recovered_ci_pending_unverified'},
+            @{n=413;ci='failure';want='recovered_ci_failed_unverified'},
+            @{n=414;ci='unavailable';want='recovered_ci_unavailable_unverified'})) {
+            Invoke-ResetCommand|Out-Null;$repo=New-FakeRepo -WithRemote
+            try {
+                $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 1 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+                $rc=New-ExecutionGeneration -Operation 1 -IssueNumber $case.n -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+                $rc.status='worker_running';$rc.processId=999;$rc.processStartedAt='2026-01-01T00:00:00Z';$rc.updatedAt='2020-01-01T00:00:00Z';Write-AtomicJsonFile -Path (Get-ExecutionReceiptPath -Operation 1 -IssueNumber $case.n -RepoPath $repo) -Object $rc
+                Push-Location $repo;'c'|Out-File c.txt -Encoding utf8;git add .;git commit -q -m c;git push -q origin main;Pop-Location
+                (Invoke-RecoverCommand -OperationNumber 1 -IssueNumber $case.n -RepoPath $repo -ProcessProbe ({param($n)[pscustomobject]@{exists=$false;startedAt=$null}}) -CiProbe ({param($p)$case.ci})).status|Should Be $case.want
+                $script:v245ReviewCalls=0
+                $review=Invoke-OperationReview -OperationNumber 1 -IssueNumber $case.n -RepoPath $repo -IssueFetcher $issue -GptReviewRunner ({param($p,$o,$r)$script:v245ReviewCalls++;throw 'must not run'})
+                $review.status|Should Be 'review_not_eligible';$review.reason|Should Be 'recovered_result_missing_or_unverified';$script:v245ReviewCalls|Should Be 0
+            } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+        }
     }
 }
 

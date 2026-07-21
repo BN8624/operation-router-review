@@ -196,13 +196,13 @@ function Resolve-RecoveryPostflight {
     else {
         $boundaryViol = @()
         if ($StartSnapshot.PSObject.Properties.Name -contains 'boundaryWatch') { $boundaryViol = @(Test-RepoBoundaryViolation -BeforeSnapshot $StartSnapshot.boundaryWatch) }
-        if ($boundaryViol.Count -gt 0) { $status = 'recovered_completed_after_interruption' }
+        if ($boundaryViol.Count -gt 0) { $status = 'recovered_commit_unverified' }
         else {
             $ci = Get-CiStatus -RepoPath $RepoPath -FinalHead $finalHead -CiProbe $CiProbe
-            if ($ci -eq 'pending') { $status = 'recovered_ci_pending_after_interruption' }
-            elseif ($ci -eq 'failure') { $status = 'recovered_ci_failed_after_interruption' }
-            elseif ($ci -eq 'unavailable') { $status = 'recovered_ci_unavailable_after_interruption' }
-            else { $status = 'recovered_completed_after_interruption' }
+            if ($ci -eq 'pending') { $status = 'recovered_ci_pending_unverified' }
+            elseif ($ci -eq 'failure') { $status = 'recovered_ci_failed_unverified' }
+            elseif ($ci -eq 'unavailable') { $status = 'recovered_ci_unavailable_unverified' }
+            else { $status = 'recovered_commit_unverified' }
         }
     }
     return [pscustomobject]@{
