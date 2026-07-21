@@ -6,7 +6,7 @@
 
 - 작전 1의 `sol` 역할을 임시 `gpt-5.6-terra` 매핑에서 설계 모델인 `gpt-5.6-sol`로 원복했다. `codex-cli 0.144.5` models_cache에서 Sol/Terra/Luna 노출을 확인했으며 `_sol_note`를 제거했다.
 - 과거 Terra로 실행한 V11~V13·V15의 `PASS_PENDING_SOL_RETEST` 판정은 실제 Sol 재검증 전까지 유지한다.
-- 검토 저장소 manifest에서 누락된 `evidence/` 파일 3개를 등록해 배포 대상 집합과 manifest 경로 집합을 일치싰다.
+- 검토 저장소 manifest에서 누락된 `evidence/` 파일 3개를 등록해 배포 대상 집합과 manifest 경로 집합을 일치시켰다.
 
 ## v2.4.3 (2026-07-21)
 
