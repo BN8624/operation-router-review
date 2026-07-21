@@ -653,18 +653,19 @@ Describe '29-30. 보안/임시파일' {
         $uuid = '019f8235-b50a-7121-81d0-d25acc4b8199'
         (Protect-SecretText -Text "sessionId $uuid") | Should Match ([regex]::Escape($uuid))
     }
-    It '30. 작업자 실패 시 복구용 주문서와 hash를 실행 세대에 보존한다' {
+    It '30. 작업자 실패 terminal 상태는 주문서 원문을 삭제하고 hash만 보존한다' {
         Invoke-ResetCommand | Out-Null
         $repo = New-FakeRepo -WithRemote
         try {
             $script:capPath = $null
             $gr = { param($r,$repo,$prompt) $script:capPath = $prompt; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;Output='fail' } }
             Invoke-RunOperation -OperationNumber 2 -IssueNumber 18 -RepoPath $repo -IssueFetcher $issue -GrokRunner $gr -CiProbe $ciNone | Out-Null
-            (Test-Path -LiteralPath $script:capPath) | Should Be $true
+            (Test-Path -LiteralPath $script:capPath) | Should Be $false
             (Assert-PathWithinRoot -Path $script:capPath -Root $script:PendingDir) | Should Be $script:capPath
             $receipt = Get-ExecutionReceipt -Operation 2 -IssueNumber 18 -RepoPath $repo
-            $receipt.promptPath | Should Be $script:capPath
-            [string]::IsNullOrWhiteSpace([string]$receipt.promptHash) | Should Be $false
+            $receipt.promptPath | Should Be $null
+            $receipt.promptPresent | Should Be $false
+            ([string]$receipt.promptHash) | Should Match '^[A-Fa-f0-9]{64}$'
         } finally { Remove-Item -Recurse -Force $repo }
     }
 }
@@ -1947,7 +1948,7 @@ Describe 'v2.4.4. 실행 세대 영속화·중복 차단·recover' {
         } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
     }
 
-    It '11~16. result 없이 커밋·push된 중단은 worker 재호출 없이 정직한 완료 상태로 복구된다' {
+    It '11~16. result 없이 커밋·push된 중단은 worker 재호출 없이 unverified 상태로 복구된다' {
         $repo=New-FakeRepo -WithRemote
         try {
             $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 2 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
@@ -2208,7 +2209,7 @@ Describe 'v2.4.5-3. execution artifact sanitization과 retention' {
             git -C $repo remote add origin 'https://github.com/BN8624/artifact-fixture.git'
             $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='gpt';model='fixture';effort='low'}
             $promptSecret='PromptSecretAbC1234567890XyZ987654321'
-            $ghSecret='ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456'
+            $ghSecret=('ghp_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ123456')
             $authSecret='dXNlcjpwYXNzd29yZDEyMzQ1Njc4OTA='
             $awsSecret='AKIA1234567890ABCDEF'
             $entropySecret='AbCdEfGhIjKlMnOpQrStUvWxYz123456'
@@ -2448,9 +2449,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v2.4.4를 현재 버전으로 기록한다' {
+    It '12. README는 v2.4.5를 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v2\.4\.4\)'
+        $readme | Should Match '^# operation-router \(v2\.4\.5\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {

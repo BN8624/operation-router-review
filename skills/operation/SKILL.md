@@ -50,7 +50,7 @@ PowerShell 경로는 `$env:USERPROFILE\.claude\operation-router\operation-router
 ```
 
 ### `/operation recover <작전번호> <이슈번호>`
-중단된 실행 세대의 프로세스·result·Git·CI·postflight만 확인한다. 외부 Grok/GPT worker를 새로 호출하거나 자동 재시도하지 않는다.
+중단된 실행 세대의 프로세스·result·Git·CI·postflight만 확인한다. 외부 Grok/GPT worker를 새로 호출하거나 자동 재시도하지 않는다. 정상 result가 없으면 `recovered_*_unverified`로 반환하며 작전 1 review/repair 자격이 없고 검증 재실행 또는 수동 종료 검토가 필요하다.
 ```
 & "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command recover -Operation <작전번호> -IssueNumber <이슈번호>
 # Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command recover -Operation <작전번호> -IssueNumber <이슈번호>

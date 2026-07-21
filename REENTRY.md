@@ -1,15 +1,16 @@
-# REENTRY — operation-router v2.4.4 장시간 실행 복구
+# REENTRY — operation-router v2.4.5 영속 실행·복구 보안 강화
 
 ## 현재 버전과 승인 상태
 
-- source tree 목표 버전은 v2.4.4다. 구현 worker 실행 세대·실행 중 로그·중복 차단·`/operation recover N X`를 추가했으며 recover는 worker를 다시 호출하지 않는다.
-- 외부 중단 후 CI가 성공해도 `interrupted=true`, `localVerificationComplete=false`, `recoveredByPostflight=true`로 보존한다.
+- source tree 목표 버전은 v2.4.5다. v2.4.4의 라우팅을 유지하면서 clone별 root-hash namespace, unverified recover 차단, terminal artifact sanitization/retention, watched critical-tree 사후 검사를 추가했다.
+- 정상 result가 없는 recover는 `recovered_*_unverified`, `resultEnvelopePresent=false`, `localVerificationComplete=false`이며 작전 1 review/repair 불가다. recover의 worker 호출은 계속 0회다.
+- active 동안만 prompt/raw가 존재하고 terminal 후 마스킹 보존본으로 전환한다. terminal generation은 namespace별 10개를 보존한다.
 - 전역 Claude 설정과 저장소 밖 설치본은 이 변경에서 수정하지 않는다. 설치본 일치 검증은 격리된 임시 설치 fixture로 수행한다.
-- 실제 전역 설치 런타임 버전은 이 저장소 작업에서 변경하거나 단정하지 않는다. v2.4.4 설치 정합성은 격리 사용자 홈의 Skill 6종 사본으로 검증했다.
+- 실제 전역 설치 런타임 버전은 이 저장소 작업에서 변경하거나 단정하지 않는다. v2.4.5 설치 정합성은 격리 사용자 홈 fixture로만 검증한다.
 - v2.3.3 전체 백업은 `~/.claude/backups/operation-router.bak.v2.3.3.20260721-000909/`에 있다.
 - v2.3.4 전체 백업은 `~/.claude/backups/operation-router.bak.v2.3.4.20260721-004357/`에 있다.
 - v2.3.4는 로그 격리와 검토본 재현성을 수리했고 166/166 source-tree 테스트를 통과했다.
-- v2.3.5의 최종 작업자 예외·UTF-8 stdin 수리는 v2.4.4에서도 회귀 테스트로 유지한다.
+- v2.3.5의 최종 작업자 예외·UTF-8 stdin 수리는 v2.4.5에서도 회귀 테스트로 유지한다.
 - 라우팅·모델·effort·권한·fallback 정책은 바꾸지 않았다.
 
 ```yaml
@@ -39,10 +40,10 @@ blocked:
 usageState:
   note: "V03/V04/V08 성공 후 주문서에 따라 /operation reset 실행"
 next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. ⑤ 일부 착수:
-  - security_repo_boundary_done              # ⑤-1 완료(2026-07-21): deny 확장(9-1 위험명령) + postflight 저장소 경계 탐지(Test-RepoBoundaryViolation, status repo_boundary_violation 최우선). 테스트 177/177
+  - security_watched_file_done               # v2.4.5: 선택 critical tree의 추가·수정·삭제 사후 탐지. 호환 status repo_boundary_violation, OS sandbox 아님
   - security_secret_done                     # ⑤-2 완료(2026-07-21): Authorization(임의 스킴)/AWS/고엔트로피 마스킹 추가, git SHA·UUID 오탐 제외, env 전체 덤프 없음 확인. 178/178
   - install_lifecycle_EXCLUDED               # 사용자 결정 2026-07-21: 1인 사용이라 install.ps1/업그레이드/롤백 및 INSTALL.md/ROLLBACK.md는 범위 제외. 롤백은 ~/.claude/backups 폴더 복원으로 충분. 다음 세션은 설치기를 만들지 말 것.
-  - deny_pattern_grok_probe_optional         # ⑤-3 선택: deny 중간 와일드카드(git push*+*) 실제 발동은 grok 프로브 필요 — 경계 탐지가 실질 방어라 후순위
+  - deny_pattern_grok_probe_optional         # deny 중간 와일드카드(git push*+*) 실제 발동은 유료 live probe 미실행. watched-file 검사는 이를 사전 차단하지 않음
   - v2_4_0_policy_ABC_done                    # ⑤.5 완료(2026-07-21): A(operation-1/2/3 disable-model-invocation=false+실행 전 확인게이트, 디스패처·claude변형은 true 유지), B(claudeOnly.1.effort medium→high, operation-1-claude frontmatter도 high), C(작전1 claude_only_required에 highRiskWarning 필드). 184/184. 검토 저장소 6b48665. 주의: SKILL.md는 설치본(~/.claude/skills)과 소스(~/.claude/operation-router/skills) 양쪽 동기화 필수(테스트·manifest는 소스 사용)
   - reverify_policy_ABC_optional             # A/B/C는 정적 테스트로 검증됨. 실전 재검증은 선택: 자연어 호출은 이 세션에서 이미 operation-1/2/3 Skill 도구 노출 확인됨. 작전1 claude-only high는 유료라 후순위(V14는 medium으로 이미 PASS, effort만 상향)
   - v2_4_0_docs_done                         # ⑥ 완료: 버전 통일, CHANGELOG/VERIFICATION_MATRIX/SECURITY 작성
@@ -64,7 +65,7 @@ optional_considered_not_scheduled:          # 사용자 논의됨, 미확정 —
    - 검토 저장소 `C:\Users\USER\operation-router-build\review-repo` = github.com/BN8624/operation-router-review, HEAD 4d0f21a, clean/0-0 확인
 2. ⑤ 보안·설치 검증 (사용자 승인된 범위, mock/임시 환경 우선):
    - deny 프로브: grok --deny 목록이 force-with-lease·+main push·reset --merge/--keep·rm -r -f·Remove-Item·cmd del/rd·rmdir /s·format·diskpart·shutdown·reg delete를 실제 패턴 매칭으로 막는지 (README 목록과 config 대조 후 무료 프로브)
-   - 저장소 경계: postflight에 repo 밖 변경 탐지 여부 확인, 없으면 좁게 추가 검토
+   - watched-file 검사: 선택 critical tree의 사후 변화만 탐지하며 비감시 접근·읽기·전송은 범위 밖임을 유지
    - secret: 로그·evidence 마스킹 재확인 (기존 테스트 29·16 + 고엔트로피 스캔)
    - 설치 lifecycle: 임시 사용자 프로필/임시 HOME에서 신규 설치 → status/doctor/테스트, v2.3.3→최종 업그레이드(백업·usage-state 보존), 롤백(백업 복원) — 실제 사용자 환경을 건드리지 않는 격리 방식만
 3. ⑤.5 v2.4.0 정책 변경 3건 (사용자 확정 2026-07-21 — 라우팅 구조는 유지, 아래만 변경):
