@@ -1,4 +1,4 @@
-# operation-router (v2.4.2)
+# operation-router (v2.4.3)
 
 Claude Code 전역 작전 라우터. GitHub 이슈를 작전 1/2/3으로 Grok CLI / Codex CLI(GPT) / Claude 중 하나에게 라우팅한다. 모델 ID·CLI 옵션·Skill frontmatter 지원은 설치본에서 실측했다. 작전 1/2/3의 실전 E2E와 실패·격리 경로의 mock 검증은 [VERIFICATION_MATRIX.md](VERIFICATION_MATRIX.md)에, 방어층은 [SECURITY.md](SECURITY.md)에, 변경 이력은 [CHANGELOG.md](CHANGELOG.md)에 있다.
 

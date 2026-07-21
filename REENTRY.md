@@ -44,8 +44,9 @@ next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. ⑤ 일부 착수:
   - reverify_policy_ABC_optional             # A/B/C는 정적 테스트로 검증됨. 실전 재검증은 선택: 자연어 호출은 이 세션에서 이미 operation-1/2/3 Skill 도구 노출 확인됨. 작전1 claude-only high는 유료라 후순위(V14는 medium으로 이미 PASS, effort만 상향)
   - v2_4_0_docs_done                         # ⑥ 완료: 버전 통일, CHANGELOG/VERIFICATION_MATRIX/SECURITY 작성
   - v2_4_1_review_followup_done              # 완료: 외부 검토 6개 지적 수리(finalizer 통합 등). 193/193
-  - v2_4_2_receipt_ordering_done             # 완료(2026-07-21): v2.4.1 재검토 REPAIR_REQUIRED 수리 — HIGH run 영수증 경계 승격(Save-RunReceipt -StatusOverride, 경계위반 run→review_not_eligible+GPT 0회), HIGH review 영수증 미저장(검수중 감시변경 시 REPAIR_REQUIRED 영수증 저장 안 함→repair 자격 차단), MEDIUM Invoke-PostflightCommand repository_receipt_mismatch도 finalizer 통과, LOW 문서(VERIFICATION 정책행 soft policy·README 머리말). 195/195. 검토저장소 태그 v2.4.2
-  - external_review_v2_4_2                    # 남음: 검토 저장소 링크(태그 v2.4.2)로 외부 재검토 1회
+  - v2_4_2_receipt_ordering_done             # 완료: run/review 영수증을 finalizer 확정 후 저장. 195/195
+  - v2_4_3_receipt_generation_done           # 완료(2026-07-21): v2.4.2 재검토 REPAIR_REQUIRED 수리 — 영수증 키가 (작전+이슈+저장소) 고정이라 이전 세대가 남던 문제. HIGH 작전1 worker 호출 직전 기존 run·review 영수증 삭제(Remove-RunReceipt/Remove-ReviewReceipt), GPT 검수 호출 직전 review 영수증 삭제, 성공 시에만 재저장. 실패·경계위반 재실행/재검수 후 과거 completed/REPAIR_REQUIRED 영수증 미잔존. 신규 테스트 2(재실행→run 영수증 null+review GPT 0회 / 재검수→review 영수증 삭제). 197/197. 검토저장소 태그 v2.4.3
+  - external_review_v2_4_3                    # 남음: 검토 저장소 링크(태그 v2.4.3)로 외부 재검토 1회
   - sol_retest_when_available                # sol 복귀(한도 복구+노출) 시 config 매핑 원복 + V11~V13·V15 재검증 → 최종 PASS 승격
 optional_considered_not_scheduled:          # 사용자 논의됨, 미확정 — 별도 지시 전까지 손대지 않음
   - provider_effort_consistency             # 3-logic effort가 grok=low/gpt=medium/sonnet=low로 공급자마다 다름(작업 난이도 무관). 통일 여부는 사용자 결정 대기
