@@ -28,7 +28,7 @@
 ⁴ V12: repair가 grok/medium 1회·finding만 전달·HEAD 가드 통과·2차 검수 없음·no_commit을 `repair_postflight_failed`로 정직 반환하는 역학을 검증. 원 finding은 자동 해소 처리하지 않음. 검수 영수증이 Terra 검수에서 나왔으므로 Sol 재검증 대기에 포함한다.
 ⁵ V14 실행 시점 effort는 medium. v2.4.0에서 정책 B로 high로 상향(정적 테스트로 검증, 유료 재검증은 후순위).
 
-## 정적/격리 검증 (테스트 197/197 PASS, v2.4.3)
+## 정적/격리 검증 (테스트 207/207 PASS, v2.4.4)
 
 | 영역 | 검증 |
 |------|------|
@@ -37,6 +37,9 @@
 | postflight | no_commit/dirty/push_incomplete/not_on_main, CI 집계(success/failure/pending/unavailable), 실패 시 CI 미조회 |
 | 워커 오류 | stopReason 분류(Cancelled/MaxTurns/protocol), exit 0≠성공, usage 불변 |
 | 영수증 | 저장소 네임스페이스, review/repair 자격 강제, HEAD mismatch, repository mismatch |
+| 실행 영속화 | worker 시작 전 generation 영수증, 독립 host, 종료 전 로그, 활성 실행 중복 차단, PID+시작시각 판정 |
+| recover | worker 호출 0회, 정상 result postflight 재개, 중단 Git·push·CI 상태 세분화, CI/로컬 검증 분리 |
+| live probe | 격리 로컬 저장소에서 실제 Grok 1회, executionId `62dfe394…`, 호출 전 영수증 timestamp·CLI-start 로그·postflight completed, fixture 삭제. 종료 전 partial log 관찰은 별도 worker-host OS 테스트 |
 | 보안 | secret 마스킹(+오탐 제외), 저장소 경계 탐지, deny 목록, 임시파일 finally 삭제 |
 | 정책 A/B/C | disable-model-invocation, 자연어 호출 soft confirmation policy(코드 강제 게이트 아님), claudeOnly.1 high, highRiskWarning |
 | 격리 | 로그 runtime/test 분리, usage-state 임시 격리, 삭제 경로 검증 |
@@ -48,4 +51,4 @@
 |------|------|
 | sol 실제 모델 재검증 | 한도 복구 + Sol 노출 계정에서 config 매핑 원복 후 V11~V13·V15 재실행 → 통과 시 최종 PASS 승격 |
 | 작전 1 Claude-only high 유료 재검증 | 정책 B는 정적 검증 완료. effort high 실전 재확인은 선택 |
-| 외부 정적 검토 | v2.4.0→v2.4.1 6개 지적 수리, v2.4.1→v2.4.2 영수증 순서 수리, v2.4.2→v2.4.3 영수증 세대 무효화 수리. v2.4.3 재검토 예정 |
+| 외부 정적 검토 | v2.4.4는 사용자 지시에 따라 라우터/외부 검수 worker 없이 직접 구현. 별도 외부 검토 미실행 |

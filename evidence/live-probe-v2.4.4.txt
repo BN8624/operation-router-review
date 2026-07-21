@@ -1,0 +1,20 @@
+operation-router v2.4.4 isolated Grok live probe
+Date: 2026-07-22 (KST)
+Command: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-live-probe.ps1
+Target: generated local Git repository with generated bare origin; main review repository was not modified by the worker
+
+Result:
+  status: completed
+  worker: grok
+  workerCalls: 1
+  executionId: 62dfe3946e2a4c51ac2080beb5ff18b9
+  generation: 1
+  receiptBeforeWorker: true
+  runtimeLogPresentAfterWorker: true
+  preExitLogObservation: covered by the deterministic worker-host OS process test, not observed by this foreground live probe
+  postflightCompleted: true
+  startHead: c5f1fbd9f3dd2579b10fd1747f5338668ec066c6
+  finalHead: 43c71f2669f8fac16da50b373e6e39ad3d43538c
+  fixtureRetained: false
+
+The receipt and log paths were under the generated system-temp fixture. The script validated receipt-before-process timestamps, CLI-start log content, result, and postflight before deleting the fixture. The Pester worker-host process test separately observed partial output in the runtime log before process exit.

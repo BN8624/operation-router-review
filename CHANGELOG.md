@@ -2,8 +2,13 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
-## Unreleased (2026-07-22)
+## v2.4.4 (2026-07-22)
 
+- 작전 1·2·3의 실제 Grok/GPT 구현 호출마다 `executionId`와 증가하는 `generation`을 가진 저장소별 실행 영수증을 worker 시작 전에 원자적으로 저장한다.
+- 독립 `worker-host.ps1`이 raw stdout/stderr, 마스킹 runtime log, heartbeat, result를 실행 중부터 지속 저장하며 전경 대기는 480초로 제한한다. 전경 대기 종료는 worker 재호출 조건이 아니다.
+- 활성 실행은 `execution_already_active`로 중복 worker 호출을 막고 `/operation recover <작전번호> <이슈번호>`를 반환한다. PID와 시작시각을 함께 비교해 PID 재사용을 방어한다.
+- recover는 worker를 호출하지 않고 최신 세대 result 또는 Git·push·CI 상태로 postflight를 재개한다. 외부 중단 상태와 `interrupted`·`localVerificationComplete`·`recoveredByPostflight`를 일반 완료와 분리한다.
+- CI 성공은 로컬 검증 완료나 worker 정상 JSON 반환으로 간주하지 않는다. 주문서 검증 계층 지침은 명시된 전체 로컬 검증을 임의로 삭제하지 않는다.
 - 작전 1의 `sol` 역할을 임시 `gpt-5.6-terra` 매핑에서 설계 모델인 `gpt-5.6-sol`로 원복했다. `codex-cli 0.144.5` models_cache에서 Sol/Terra/Luna 노출을 확인했으며 `_sol_note`를 제거했다.
 - 과거 Terra로 실행한 V11~V13·V15의 `PASS_PENDING_SOL_RETEST` 판정은 실제 Sol 재검증 전까지 유지한다.
 - 검토 저장소 manifest에서 누락된 `evidence/` 파일 3개를 등록해 배포 대상 집합과 manifest 경로 집합을 일치시켰다.

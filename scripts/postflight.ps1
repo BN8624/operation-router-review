@@ -173,3 +173,42 @@ function Resolve-Postflight {
         workerExitCode = $WorkerResult.ExitCode
     }
 }
+
+# 정상 worker result가 유실된 중단 복구용 판정. worker 성공을 합성하지 않고 Git·push·CI 사실만 기록한다.
+function Resolve-RecoveryPostflight {
+    param(
+        [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)]$StartSnapshot,
+        [scriptblock]$CiProbe
+    )
+    $branch = Get-GitCurrentBranch -Path $RepoPath
+    $finalHead = Get-GitHead -Path $RepoPath
+    $wt = Get-GitWorktreeStatus -Path $RepoPath
+    $ab = Get-GitAheadBehind -Path $RepoPath
+    $commitCount = 0
+    if ($StartSnapshot.startHead) { $commitCount = Get-GitCommitCountSince -Path $RepoPath -SinceHead $StartSnapshot.startHead }
+    $headChanged = ($finalHead -ne $StartSnapshot.startHead)
+    $pushComplete = ($ab.Available -and $ab.Ahead -eq 0 -and $ab.Behind -eq 0)
+    $ci = 'not-checked'
+    if ((-not $headChanged -or $commitCount -eq 0) -and $wt.Clean) { $status = 'interrupted_no_changes' }
+    elseif (-not $wt.Clean) { $status = 'interrupted_dirty_worktree' }
+    elseif ($branch -ne 'main' -or -not $pushComplete) { $status = 'interrupted_push_incomplete' }
+    else {
+        $boundaryViol = @()
+        if ($StartSnapshot.PSObject.Properties.Name -contains 'boundaryWatch') { $boundaryViol = @(Test-RepoBoundaryViolation -BeforeSnapshot $StartSnapshot.boundaryWatch) }
+        if ($boundaryViol.Count -gt 0) { $status = 'recovered_completed_after_interruption' }
+        else {
+            $ci = Get-CiStatus -RepoPath $RepoPath -FinalHead $finalHead -CiProbe $CiProbe
+            if ($ci -eq 'pending') { $status = 'recovered_ci_pending_after_interruption' }
+            elseif ($ci -eq 'failure') { $status = 'recovered_ci_failed_after_interruption' }
+            elseif ($ci -eq 'unavailable') { $status = 'recovered_ci_unavailable_after_interruption' }
+            else { $status = 'recovered_completed_after_interruption' }
+        }
+    }
+    return [pscustomobject]@{
+        status=$status; branch=$branch; startHead=$StartSnapshot.startHead; finalHead=$finalHead
+        headChanged=[bool]$headChanged; commitCount=[int]$commitCount; worktreeClean=[bool]$wt.Clean
+        aheadBehindAvailable=[bool]$ab.Available; ahead=$ab.Ahead; behind=$ab.Behind
+        pushComplete=[bool]$pushComplete; ciStatus=$ci; workerExitCode=$null
+    }
+}

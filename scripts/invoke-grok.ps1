@@ -86,6 +86,27 @@ function Get-GrokResultClassification {
     }
 }
 
+function Get-GrokWorkerInvocation {
+    param(
+        [Parameter(Mandatory)][string]$Cwd, [Parameter(Mandatory)][string]$Model,
+        [Parameter(Mandatory)][string]$Effort, [Parameter(Mandatory)][int]$MaxTurns,
+        [Parameter(Mandatory)][string]$PromptFilePath, [bool]$NoPlan = $false,
+        [bool]$NoSubagents = $false, $Permissions = $null
+    )
+    if ($null -eq $Permissions) { $Permissions = (Get-Config).grok.headlessPermissions }
+    $mode = [string]$Permissions.mode
+    if ([string]::IsNullOrWhiteSpace($mode)) { throw 'headless permission mode is empty; refusing to run (config.grok.headlessPermissions.mode)' }
+    $argList = @('--cwd', $Cwd, '--model', $Model, '--reasoning-effort', $Effort,
+        '--max-turns', [string]$MaxTurns, '--prompt-file', $PromptFilePath, '--output-format', 'json')
+    if ($mode -eq 'alwaysApprove') { $argList += '--always-approve' } else { $argList += @('--permission-mode', $mode) }
+    if ($null -ne $Permissions.allow) { foreach ($a in @($Permissions.allow)) { if (-not [string]::IsNullOrWhiteSpace([string]$a)) { $argList += @('--allow', [string]$a) } } }
+    if ($null -ne $Permissions.deny) { foreach ($d in @($Permissions.deny)) { if (-not [string]::IsNullOrWhiteSpace([string]$d)) { $argList += @('--deny', [string]$d) } } }
+    if ($NoPlan) { $argList += '--no-plan' }
+    if ($NoSubagents) { $argList += '--no-subagents' }
+    if (-not [string]::IsNullOrWhiteSpace($env:OPERATION_ROUTER_GROK_DEBUG)) { $argList += @('--debug-file', [string]$env:OPERATION_ROUTER_GROK_DEBUG) }
+    return [pscustomobject]@{ filePath = 'grok'; argumentList = @($argList); stdinMode = 'nul'; permissionMode = $mode }
+}
+
 function Invoke-GrokWorker {
     param(
         [Parameter(Mandatory)][string]$Cwd,
@@ -101,25 +122,10 @@ function Invoke-GrokWorker {
     if (-not (Test-Path -LiteralPath $Cwd)) { throw "Working directory not found: $Cwd" }
     if (-not (Test-Path -LiteralPath $PromptFilePath)) { throw "Prompt file not found: $PromptFilePath" }
 
-    if ($null -eq $Permissions) { $Permissions = (Get-Config).grok.headlessPermissions }
-    $mode = [string]$Permissions.mode
-    if ([string]::IsNullOrWhiteSpace($mode)) { throw 'headless permission mode is empty; refusing to run (config.grok.headlessPermissions.mode)' }
-
-    $argList = @(
-        '--cwd', $Cwd, '--model', $Model, '--reasoning-effort', $Effort,
-        '--max-turns', [string]$MaxTurns, '--prompt-file', $PromptFilePath,
-        '--output-format', 'json'
-    )
-    if ($mode -eq 'alwaysApprove') { $argList += '--always-approve' }
-    else { $argList += @('--permission-mode', $mode) }
-    if ($null -ne $Permissions.allow) { foreach ($a in @($Permissions.allow)) { if (-not [string]::IsNullOrWhiteSpace([string]$a)) { $argList += @('--allow', [string]$a) } } }
-    if ($null -ne $Permissions.deny)  { foreach ($d in @($Permissions.deny))  { if (-not [string]::IsNullOrWhiteSpace([string]$d)) { $argList += @('--deny',  [string]$d) } } }
-    if ($NoPlan) { $argList += '--no-plan' }
-    if ($NoSubagents) { $argList += '--no-subagents' }
-    # v2.3.3 진단용: 환경변수로 grok 자체 디버그 로그를 켠다 (기본 꺼짐, 로그 회전 대상 아님)
-    if (-not [string]::IsNullOrWhiteSpace($env:OPERATION_ROUTER_GROK_DEBUG)) {
-        $argList += @('--debug-file', [string]$env:OPERATION_ROUTER_GROK_DEBUG)
-    }
+    $invocation = Get-GrokWorkerInvocation -Cwd $Cwd -Model $Model -Effort $Effort -MaxTurns $MaxTurns `
+        -PromptFilePath $PromptFilePath -NoPlan:$NoPlan -NoSubagents:$NoSubagents -Permissions $Permissions
+    $argList = @($invocation.argumentList)
+    $mode = $invocation.permissionMode
 
     if ($null -eq $Runner) { $Runner = { param($fp, $al) Invoke-ForegroundCommand -FilePath $fp -ArgumentList $al } }
     $result = & $Runner 'grok' $argList

@@ -653,14 +653,18 @@ Describe '29-30. 보안/임시파일' {
         $uuid = '019f8235-b50a-7121-81d0-d25acc4b8199'
         (Protect-SecretText -Text "sessionId $uuid") | Should Match ([regex]::Escape($uuid))
     }
-    It '30. 작업자 실패 시에도 임시 주문서 finally 삭제' {
+    It '30. 작업자 실패 시 복구용 주문서와 hash를 실행 세대에 보존한다' {
         Invoke-ResetCommand | Out-Null
         $repo = New-FakeRepo -WithRemote
         try {
             $script:capPath = $null
             $gr = { param($r,$repo,$prompt) $script:capPath = $prompt; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;Output='fail' } }
             Invoke-RunOperation -OperationNumber 2 -IssueNumber 18 -RepoPath $repo -IssueFetcher $issue -GrokRunner $gr -CiProbe $ciNone | Out-Null
-            (Test-Path $script:capPath) | Should Be $false
+            (Test-Path -LiteralPath $script:capPath) | Should Be $true
+            (Assert-PathWithinRoot -Path $script:capPath -Root $script:PendingDir) | Should Be $script:capPath
+            $receipt = Get-ExecutionReceipt -Operation 2 -IssueNumber 18 -RepoPath $repo
+            $receipt.promptPath | Should Be $script:capPath
+            [string]::IsNullOrWhiteSpace([string]$receipt.promptHash) | Should Be $false
         } finally { Remove-Item -Recurse -Force $repo }
     }
 }
@@ -1887,6 +1891,191 @@ Describe 'v2.3.2-19. 기존 작전 3 grok 실행 설정 불변' {
     }
 }
 
+Describe 'v2.4.4. 실행 세대 영속화·중복 차단·recover' {
+    It '1~4. 작전 1·2·3은 worker 호출 전 영수증·로그를 만들고 정상 완료 상태를 저장한다' {
+        foreach($op in @(1,2,3)) {
+            Invoke-ResetCommand | Out-Null
+            $repo = New-FakeRepo -WithRemote
+            try {
+                $runner = {
+                    param($route,$repo2,$prompt)
+                    $rc = Get-ExecutionReceipt -Operation $op -IssueNumber (300+$op) -RepoPath $repo2
+                    $rc.status | Should Be 'worker_running'
+                    (Test-Path -LiteralPath $rc.logPath) | Should Be $true
+                    Push-Location $repo2; "op$op" | Out-File "op$op.txt" -Encoding utf8; git add .; git commit -q -m "op$op"; git push -q origin main; Pop-Location
+                    [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;ErrorClass='none';Output='ok' }
+                }
+                $res = Invoke-RunOperation -OperationNumber $op -IssueNumber (300+$op) -RepoPath $repo -IssueFetcher $issue -GrokRunner $runner -CiProbe $ciNone
+                $res.status | Should Be 'completed'
+                $rc = Get-ExecutionReceipt -Operation $op -IssueNumber (300+$op) -RepoPath $repo
+                $rc.schemaVersion | Should Be 1; $rc.generation | Should Be 1; $rc.status | Should Be 'completed'
+            } finally { Remove-Item -LiteralPath $repo -Recurse -Force }
+        }
+    }
+
+    It '8~10. 살아 있는 동일 실행은 runner 0회와 recover 명령을 반환하고 다른 저장소는 격리된다' {
+        Invoke-ResetCommand | Out-Null
+        $repoA = New-FakeRepo -WithRemote; $repoB = New-FakeRepo -WithRemote
+        try {
+            $snap = Get-StartSnapshot -RepoPath $repoA
+            $route = Resolve-OperationRoute -OperationNumber 2 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+            $rc = New-ExecutionGeneration -Operation 2 -IssueNumber 310 -RepoPath $repoA -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+            $rc.status='worker_running'; $rc.processId=$PID; $rc.processStartedAt=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o'); Save-ExecutionReceipt -Receipt $rc -RepoPath $repoA | Out-Null
+            $script:dupCalls=0
+            $runner={param($r,$p,$o)$script:dupCalls++;[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;Output='no'}}
+            $a=Invoke-RunOperation -OperationNumber 2 -IssueNumber 310 -RepoPath $repoA -IssueFetcher $issue -GrokRunner $runner -CiProbe $ciNone
+            $a.status | Should Be 'execution_already_active'; $a.resumeCommand | Should Be '/operation recover 2 310'; $script:dupCalls | Should Be 0
+            $bRunner={param($r,$p,$o) Push-Location $p; 'b'|Out-File b.txt -Encoding utf8;git add .;git commit -q -m b;git push -q origin main;Pop-Location;[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok'}}
+            (Invoke-RunOperation -OperationNumber 2 -IssueNumber 310 -RepoPath $repoB -IssueFetcher $issue -GrokRunner $bRunner -CiProbe $ciNone).status | Should Be 'completed'
+        } finally { Remove-Item -LiteralPath $repoA -Recurse -Force; Remove-Item -LiteralPath $repoB -Recurse -Force }
+    }
+
+    It '17,25. PID와 시작시각이 모두 일치할 때만 worker_running이며 recover는 postflight를 실행하지 않는다' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo; $route=Resolve-OperationRoute -OperationNumber 2 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+            $rc=New-ExecutionGeneration -Operation 2 -IssueNumber 311 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+            $rc.status='worker_running';$rc.processId=777;$rc.processStartedAt='2026-01-01T00:00:00Z';Save-ExecutionReceipt -Receipt $rc -RepoPath $repo|Out-Null
+            $script:ciRecover=0;$ci={param($p)$script:ciRecover++;'success'}
+            $alive={param($processIdValue)[pscustomobject]@{exists=$true;startedAt='2026-01-01T00:00:00Z'}}
+            $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 311 -RepoPath $repo -ProcessProbe $alive -CiProbe $ci
+            $res.status|Should Be 'worker_running';$res.workerCalls|Should Be 0;$script:ciRecover|Should Be 0
+            $mismatch={param($processIdValue)[pscustomobject]@{exists=$true;startedAt='2026-01-02T00:00:00Z'}}
+            $raw=Get-ExecutionReceipt -Operation 2 -IssueNumber 311 -RepoPath $repo;$raw.updatedAt='2020-01-01T00:00:00Z'
+            Write-AtomicJsonFile -Path (Get-ExecutionReceiptPath -Operation 2 -IssueNumber 311 -RepoPath $repo) -Object $raw
+            (Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 311 -RepoPath $repo -ProcessProbe $mismatch -CiProbe $ci).status|Should Be 'interrupted_no_changes'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It '11~16. result 없이 커밋·push된 중단은 worker 재호출 없이 정직한 완료 상태로 복구된다' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 2 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+            $rc=New-ExecutionGeneration -Operation 2 -IssueNumber 312 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+            $rc.status='worker_running';$rc.processId=999;$rc.processStartedAt='2026-01-01T00:00:00Z';$rc.updatedAt='2020-01-01T00:00:00Z'
+            Write-AtomicJsonFile -Path (Get-ExecutionReceiptPath -Operation 2 -IssueNumber 312 -RepoPath $repo) -Object $rc
+            Push-Location $repo;'done'|Out-File done.txt -Encoding utf8;git add .;git commit -q -m done;git push -q origin main;Pop-Location
+            $dead={param($processIdValue)[pscustomobject]@{exists=$false;startedAt=$null}}
+            $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 312 -RepoPath $repo -ProcessProbe $dead -CiProbe ({param($p)'success'})
+            $res.status|Should Be 'recovered_completed_after_interruption';$res.workerCalls|Should Be 0
+            $res.interrupted|Should Be $true;$res.localVerificationComplete|Should Be $false;$res.recoveredByPostflight|Should Be $true
+            (Get-ExecutionReceipt -Operation 2 -IssueNumber 312 -RepoPath $repo).status|Should Be 'recovered_completed_after_interruption'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It '18~22. no-change·dirty·push·CI pending/failure/unavailable 상태를 구분한다' {
+        foreach($case in @(
+            @{n=313;mode='clean';ci='success';want='interrupted_no_changes'},
+            @{n=314;mode='dirty';ci='success';want='interrupted_dirty_worktree'},
+            @{n=315;mode='ahead';ci='success';want='interrupted_push_incomplete'},
+            @{n=324;mode='behind';ci='success';want='interrupted_push_incomplete'},
+            @{n=316;mode='push';ci='pending';want='recovered_ci_pending_after_interruption'},
+            @{n=317;mode='push';ci='failure';want='recovered_ci_failed_after_interruption'},
+            @{n=318;mode='push';ci='unavailable';want='recovered_ci_unavailable_after_interruption'})) {
+            $repo=New-FakeRepo -WithRemote
+            try {
+                $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 2 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+                $rc=New-ExecutionGeneration -Operation 2 -IssueNumber $case.n -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+                $rc.status='worker_running';$rc.processId=999;$rc.processStartedAt='2026-01-01T00:00:00Z';$rc.updatedAt='2020-01-01T00:00:00Z'
+                Write-AtomicJsonFile -Path (Get-ExecutionReceiptPath -Operation 2 -IssueNumber $case.n -RepoPath $repo) -Object $rc
+                if($case.mode -eq 'dirty'){'d'|Out-File (Join-Path $repo d.txt) -Encoding utf8}
+                if($case.mode -in @('ahead','push')){Push-Location $repo;'c'|Out-File c.txt -Encoding utf8;git add .;git commit -q -m c;if($case.mode -eq 'push'){git push -q origin main};Pop-Location}
+                if($case.mode -eq 'behind'){
+                    Push-Location $repo;'local'|Out-File local.txt -Encoding utf8;git add .;git commit -q -m local;git push -q origin main;Pop-Location
+                    $peer=Join-Path $env:TEMP ('rr-peer-'+[guid]::NewGuid().ToString('N'))
+                    try {
+                        $remote=(git -C $repo remote get-url origin);git clone -q -b main $remote $peer
+                        git -C $peer config user.email t@t.com;git -C $peer config user.name t
+                        'remote'|Out-File (Join-Path $peer remote.txt) -Encoding utf8;git -C $peer add .;git -C $peer commit -q -m remote;git -C $peer push -q origin main
+                    } finally {if(Test-Path -LiteralPath $peer){Remove-Item -LiteralPath $peer -Recurse -Force}}
+                    git -C $repo fetch -q origin
+                }
+                $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber $case.n -RepoPath $repo -ProcessProbe ({param($processIdValue)[pscustomobject]@{exists=$false;startedAt=$null}}) -CiProbe ({param($p)$case.ci})
+                $res.status|Should Be $case.want
+            } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+        }
+    }
+
+    It '23. 다른 저장소의 실행 영수증으로 recover하면 fail-closed 한다' {
+        $repoA=New-FakeRepo -WithRemote;$repoB=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repoA;$route=Resolve-OperationRoute -OperationNumber 2 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+            $rc=New-ExecutionGeneration -Operation 2 -IssueNumber 322 -RepoPath $repoA -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+            $foreignPath=Get-ExecutionReceiptPath -Operation 2 -IssueNumber 322 -RepoPath $repoB
+            Write-AtomicJsonFile -Path $foreignPath -Object $rc
+            (Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 322 -RepoPath $repoB -CiProbe $ciNone).status | Should Be 'repository_receipt_mismatch'
+        } finally {Remove-Item -LiteralPath $repoA -Recurse -Force;Remove-Item -LiteralPath $repoB -Recurse -Force}
+    }
+
+    It '22,24. 현재 generation과 일치하는 정상 result만 기존 postflight로 재개한다' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 2 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+            $rc=New-ExecutionGeneration -Operation 2 -IssueNumber 319 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+            Push-Location $repo;'c'|Out-File c.txt -Encoding utf8;git add .;git commit -q -m c;git push -q origin main;Pop-Location
+            Write-InjectedExecutionResult -Receipt $rc -WorkerResult ([pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;ErrorClass='none';Output='verified'}) -RepoPath $repo
+            $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 319 -RepoPath $repo -CiProbe ({param($p)'success'})
+            $res.status|Should Be 'completed';$res.interrupted|Should Be $false;$res.workerCalls|Should Be 0
+            $rc2=New-ExecutionGeneration -Operation 2 -IssueNumber 320 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent 'x'
+            $bad=[pscustomobject]@{schemaVersion=1;executionId='old';generation=0;worker='grok';exitCode=0;success=$true;quotaExhausted=$false;errorClass='none';workerStopReason=$null}
+            Write-AtomicJsonFile -Path $rc2.resultPath -Object $bad;$rc2.status='worker_running';$rc2.updatedAt='2020-01-01T00:00:00Z';Write-AtomicJsonFile -Path (Get-ExecutionReceiptPath -Operation 2 -IssueNumber 320 -RepoPath $repo) -Object $rc2
+            (Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 320 -RepoPath $repo -ProcessProbe ({param($processIdValue)[pscustomobject]@{exists=$false;startedAt=$null}}) -CiProbe $ciNone).status|Should Be 'interrupted_no_changes'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It '27~31. 실행 중 로그는 secret을 마스킹하고 artifact 경로는 runtime root 내부다' {
+        Invoke-ResetCommand|Out-Null;$repo=New-FakeRepo -WithRemote
+        try {
+            $runner={param($r,$p,$o) Push-Location $p;'c'|Out-File c.txt -Encoding utf8;git add .;git commit -q -m c;git push -q origin main;Pop-Location;[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;Output='Authorization: Basic abcdefghijklmnopqrstuvwxyz token=supersecretvalue'}}
+            Invoke-RunOperation -OperationNumber 2 -IssueNumber 321 -RepoPath $repo -IssueFetcher $issue -GrokRunner $runner -CiProbe $ciNone|Out-Null
+            $rc=Get-ExecutionReceipt -Operation 2 -IssueNumber 321 -RepoPath $repo;$text=Get-Content -LiteralPath $rc.logPath -Raw -Encoding utf8
+            $text|Should Match 'MASKED';$text|Should Not Match 'supersecretvalue'
+            (Assert-PathWithinRoot -Path $rc.resultPath -Root $Script:PendingDir)|Should Not Be $null
+            (Assert-PathWithinRoot -Path $rc.logPath -Root $Script:LogRoot)|Should Not Be $null
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It '27~28. 독립 worker host가 종료 전 출력과 종료 후 result를 영속화한다' {
+        $repo=New-FakeRepo -WithRemote
+        $hostProcess=$null
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='gpt';model='fixture';effort='low'}
+            $rc=New-ExecutionGeneration -Operation 2 -IssueNumber 323 -RepoPath $repo -Kind mechanical -Snapshot $snap -Route $route -PromptContent 'fixture'
+            $inv=[pscustomobject]@{
+                schemaVersion=1;executionId=$rc.executionId;generation=$rc.generation;filePath='powershell.exe'
+                argumentList=@('-NoProfile','-Command',"Write-Output 'partial-before-exit'; Start-Sleep -Milliseconds 1800; Write-Output 'done'")
+                stdinMode='nul';promptPath=$rc.promptPath
+            }
+            Write-AtomicJsonFile -Path $rc.invocationPath -Object $inv
+            $receiptPath=Get-ExecutionReceiptPath -Operation 2 -IssueNumber 323 -RepoPath $repo
+            $hostArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $ScriptsDir 'worker-host.ps1')+'"'),
+                '-ExecutionReceiptPath',('"'+$receiptPath+'"'),'-InvocationPath',('"'+$rc.invocationPath+'"'),
+                '-PendingDirOverride',('"'+$Script:PendingDir+'"'),'-LogRootOverride',('"'+$Script:LogRoot+'"'),
+                '-ConfigPathOverride',('"'+$Script:ConfigPath+'"'))
+            $hostProcess=Start-Process -FilePath 'powershell.exe' -ArgumentList $hostArgs -WorkingDirectory $repo -PassThru -WindowStyle Hidden
+            $sawPartial=$false
+            1..30 | ForEach-Object {
+                if(-not $hostProcess.HasExited -and (Read-SharedTextFile -Path $rc.logPath) -match 'partial-before-exit'){$sawPartial=$true}
+                if(-not $hostProcess.HasExited){Start-Sleep -Milliseconds 100;$hostProcess.Refresh()}
+            }
+            $hostProcess.WaitForExit();$hostProcess.ExitCode|Should Be 0;$sawPartial|Should Be $true
+            (Test-Path -LiteralPath $rc.resultPath)|Should Be $true
+            (Get-ExecutionReceipt -Operation 2 -IssueNumber 323 -RepoPath $repo).status|Should Be 'worker_exited_postflight_pending'
+        } finally {
+            if ($null -ne $hostProcess -and -not $hostProcess.HasExited) { $hostProcess.WaitForExit(5000) | Out-Null }
+            $removed=$false
+            1..20 | ForEach-Object {
+                if(-not $removed){
+                    try {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction Stop;$removed=$true}
+                    catch {Start-Sleep -Milliseconds 100}
+                }
+            }
+            if(-not $removed){throw "worker-host fixture remained locked: $repo"}
+        }
+    }
+}
+
 Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
     It '1. mock 로그는 현재 test-run 디렉터리에만 생성된다' {
         $path = Write-RouterLog -Name 'v234-mock-only' -Content 'mock'
@@ -2010,9 +2199,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v2.4.3을 현재 버전으로 기록한다' {
+    It '12. README는 v2.4.4를 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v2\.4\.3\)'
+        $readme | Should Match '^# operation-router \(v2\.4\.4\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {

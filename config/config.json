@@ -1,5 +1,5 @@
 {
-  "_comment": "operation-router v2.4.3 config. Verified 2026-07-22 against codex-cli 0.144.5 models_cache: gpt-5.6-sol/terra/luna are exposed. The temporary test-environment Sol-to-Terra substitution has been removed and Operation 1 now uses gpt-5.6-sol as designed. Claude and Grok CLI capabilities remain as verified 2026-07-20: claude 2.1.212 (SKILL.md supports model/effort/disable-model-invocation/argument-hint; model IDs claude-opus-4-8/claude-sonnet-5/claude-haiku-4-5-20251001 recognized), grok 0.2.102 (only grok-4.5; grok --help confirms --always-approve, --allow, --deny; NO --no-auto-update flag/env/config exists). Do not hand-edit model IDs without re-verifying.",
+  "_comment": "operation-router v2.4.4 config. Verified 2026-07-22 against codex-cli 0.144.5 models_cache: gpt-5.6-sol/terra/luna are exposed. The temporary test-environment Sol-to-Terra substitution has been removed and Operation 1 now uses gpt-5.6-sol as designed. Claude and Grok CLI capabilities remain as verified 2026-07-20: claude 2.1.212 (SKILL.md supports model/effort/disable-model-invocation/argument-hint; model IDs claude-opus-4-8/claude-sonnet-5/claude-haiku-4-5-20251001 recognized), grok 0.2.102 (only grok-4.5; grok --help confirms --always-approve, --allow, --deny; NO --no-auto-update flag/env/config exists). Do not hand-edit model IDs without re-verifying.",
   "grok": {
     "model": "grok-4.5",
     "operations": {
@@ -82,6 +82,13 @@
   },
   "ciPolling": { "intervalSeconds": 10, "maxAttempts": 6 },
   "transientRetry": { "maxRetries": 1, "delaySeconds": 5 },
+  "execution": {
+    "_comment": "v2.4.4 worker host limits only the foreground wait. A timeout never starts a second worker; use recover with the same operation and issue.",
+    "schemaVersion": 1,
+    "foregroundWaitSeconds": 480,
+    "pollIntervalMilliseconds": 500,
+    "staleHeartbeatSeconds": 15
+  },
   "logRetentionCount": 20,
   "weeklyExhaustedPatterns": [
     "weekly limit",

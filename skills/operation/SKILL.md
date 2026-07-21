@@ -1,7 +1,7 @@
 ---
 name: operation
-description: operation-router 보조 명령. /operation status|doctor|set|reset 로 사용량 상태와 환경 실측을 관리한다. 작전 실행은 /operation-1, /operation-2, /operation-3 를 쓴다.
-argument-hint: status | doctor | set grok <0-100|available|exhausted> | set gpt <0-100|available|reserved|exhausted> | reset
+description: operation-router 보조 명령. /operation status|doctor|set|reset과 중단 복구용 recover를 제공한다. 작전 실행은 /operation-1, /operation-2, /operation-3 를 쓴다.
+argument-hint: status | doctor | recover <작전번호> <이슈번호> | set grok <0-100|available|exhausted> | set gpt <0-100|available|reserved|exhausted> | reset
 disable-model-invocation: true
 model: claude-haiku-4-5-20251001
 effort: low
@@ -47,6 +47,13 @@ PowerShell 경로는 `$env:USERPROFILE\.claude\operation-router\operation-router
 ```
 & "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command reset
 # Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command reset
+```
+
+### `/operation recover <작전번호> <이슈번호>`
+중단된 실행 세대의 프로세스·result·Git·CI·postflight만 확인한다. 외부 Grok/GPT worker를 새로 호출하거나 자동 재시도하지 않는다.
+```
+& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command recover -Operation <작전번호> -IssueNumber <이슈번호>
+# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command recover -Operation <작전번호> -IssueNumber <이슈번호>
 ```
 
 ## 출력

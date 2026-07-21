@@ -9,6 +9,20 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
+function Get-GptWorkerInvocation {
+    param(
+        [Parameter(Mandatory)][string]$Cwd, [Parameter(Mandatory)][string]$Model,
+        [Parameter(Mandatory)][string]$Effort, [Parameter(Mandatory)][string]$PromptFilePath,
+        [string]$Sandbox = 'workspace-write', [string]$ApprovalPolicy = 'never'
+    )
+    if ($Model -eq 'unresolved' -or [string]::IsNullOrWhiteSpace($Model)) { throw 'GPT model id is unresolved. Refusing to invoke Codex CLI with a guessed model id.' }
+    $argList = @('exec', '--cd', $Cwd, '-m', $Model, '-c', "model_reasoning_effort=$Effort",
+        '-s', $Sandbox, '-c', "approval_policy=$ApprovalPolicy", '--json')
+    if ($Sandbox -eq 'workspace-write') { $argList += @('-c', 'sandbox_workspace_write.network_access=true') }
+    $argList += '-'
+    return [pscustomobject]@{ filePath = 'codex'; argumentList = @($argList); stdinMode = 'file'; promptPath = $PromptFilePath }
+}
+
 function Invoke-GptWorker {
     param(
         [Parameter(Mandatory)][string]$Cwd,
@@ -25,12 +39,9 @@ function Invoke-GptWorker {
     if (-not (Test-Path -LiteralPath $Cwd)) { throw "Working directory not found: $Cwd" }
     if (-not (Test-Path -LiteralPath $PromptFilePath)) { throw "Prompt file not found: $PromptFilePath" }
 
-    $argList = @(
-        'exec', '--cd', $Cwd, '-m', $Model, '-c', "model_reasoning_effort=$Effort",
-        '-s', $Sandbox, '-c', "approval_policy=$ApprovalPolicy", '--json'
-    )
-    if ($Sandbox -eq 'workspace-write') { $argList += @('-c', 'sandbox_workspace_write.network_access=true') }
-    $argList += '-'
+    $invocation = Get-GptWorkerInvocation -Cwd $Cwd -Model $Model -Effort $Effort -PromptFilePath $PromptFilePath `
+        -Sandbox $Sandbox -ApprovalPolicy $ApprovalPolicy
+    $argList = @($invocation.argumentList)
     if ($null -eq $Runner) { $Runner = { param($fp, $al) Invoke-ForegroundCommand -FilePath $fp -ArgumentList $al -StdinFilePath $PromptFilePath } }
     $result = & $Runner 'codex' $argList
 

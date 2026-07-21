@@ -42,6 +42,25 @@ function Write-JsonFile {
     Set-Content -LiteralPath $Path -Value $json -Encoding UTF8
 }
 
+function Write-AtomicJsonFile {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Object, [int]$Depth = 20)
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $temp = Join-Path $parent ('.atomic-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $json = $Object | ConvertTo-Json -Depth $Depth
+    [System.IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $backup = Join-Path $parent ('.atomic-' + [guid]::NewGuid().ToString('N') + '.bak')
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            [System.IO.File]::Replace($temp, $Path, $backup, $true)
+            if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
+        } else { [System.IO.File]::Move($temp, $Path) }
+    } finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+        if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
+    }
+}
+
 function Get-Config { return Read-JsonFile -Path $Script:ConfigPath }
 function Get-UsageState { return Read-JsonFile -Path $Script:UsageStatePath }
 
@@ -286,6 +305,12 @@ function Invoke-WorkerWithErrorPolicy {
     do {
         $attempts++
         $result = & $InvokeWorker
+        if ($result.PSObject.Properties.Name -contains 'ExecutionPending' -and $result.ExecutionPending) {
+            return [pscustomobject]@{
+                Result = $result; Success = $false; ErrorClass = 'execution_pending'; Attempts = $attempts
+                UsageStateChanged = $false; State = $State
+            }
+        }
         if (Test-WorkerResultSuccess -Result $result) {
             return [pscustomobject]@{
                 Result = $result; Success = $true; ErrorClass = 'none'; Attempts = $attempts
@@ -484,6 +509,134 @@ function Test-ReceiptRepoMatch {
     if ($rOwner -and $id.ownerRepo) { return ($rOwner -eq $id.ownerRepo) }
     if ($rRoot -and $id.repoRoot) { return ($rRoot.ToLowerInvariant().TrimEnd('\','/') -eq $id.repoRoot.ToLowerInvariant()) }
     return $false
+}
+
+# ---------- v2.4.4 외부 구현 워커 실행 세대 ----------
+function Get-ExecutionKey {
+    param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber)
+    return "op$Operation-issue$IssueNumber"
+}
+function Get-ExecutionReceiptPath {
+    param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
+    return (Join-Path (Get-PendingNamespacePath -RepoPath $RepoPath) "$(Get-ExecutionKey -Operation $Operation -IssueNumber $IssueNumber)-execution.json")
+}
+function Get-ExecutionLockPath {
+    param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
+    return (Join-Path (Get-PendingNamespacePath -RepoPath $RepoPath) "$(Get-ExecutionKey -Operation $Operation -IssueNumber $IssueNumber)-execution.lock")
+}
+function Open-ExecutionLock {
+    param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
+    Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
+    $path = Get-ExecutionLockPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
+    try { return [System.IO.File]::Open($path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None) }
+    catch [System.IO.IOException] { return $null }
+}
+function Get-ExecutionReceipt {
+    param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
+    $path = Get-ExecutionReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    return (Read-JsonFile -Path $path)
+}
+function Save-ExecutionReceipt {
+    param([Parameter(Mandatory)]$Receipt, [Parameter(Mandatory)][string]$RepoPath)
+    $path = Get-ExecutionReceiptPath -Operation ([int]$Receipt.operation) -IssueNumber ([int]$Receipt.issueNumber) -RepoPath $RepoPath
+    Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
+    $Receipt.updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+    Write-AtomicJsonFile -Path $path -Object $Receipt
+    return $path
+}
+function Test-ExecutionStatusActive {
+    param([AllowNull()][string]$Status)
+    return ($Status -in @('worker_starting','worker_running','worker_exited_postflight_pending','interrupted_postflight_pending','recovering_postflight'))
+}
+function Get-RouterLogDirectory {
+    if ([string]$Script:RouterLogScope -eq 'runtime') { return $Script:RuntimeLogDir }
+    if ([string]$Script:RouterLogScope -eq 'test') { return $Script:TestLogDir }
+    throw "Unknown router log scope '$($Script:RouterLogScope)'."
+}
+function Get-Sha256Text {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return (($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text)) | ForEach-Object { $_.ToString('x2') }) -join '') }
+    finally { $sha.Dispose() }
+}
+function New-ExecutionGeneration {
+    param(
+        [Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$Kind,
+        [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)]$Route,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PromptContent, [string]$RunId
+    )
+    Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
+    $previous = Get-ExecutionReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $generation = 1
+    if ($null -ne $previous -and ($previous.PSObject.Properties.Name -contains 'generation')) { $generation = [int]$previous.generation + 1 }
+    if ([string]::IsNullOrWhiteSpace($RunId)) { $RunId = [guid]::NewGuid().ToString('N') }
+    $executionId = [guid]::NewGuid().ToString('N')
+    $namespace = Get-PendingNamespacePath -RepoPath $RepoPath
+    $artifactRoot = Join-Path $namespace 'executions'
+    $artifactDir = Join-Path $artifactRoot ("$(Get-ExecutionKey -Operation $Operation -IssueNumber $IssueNumber)-g$generation-$executionId")
+    Assert-PathWithinRoot -Path $artifactDir -Root $Script:PendingDir | Out-Null
+    New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+    $promptPath = Join-Path $artifactDir 'prompt.txt'
+    $resultPath = Join-Path $artifactDir 'result.json'
+    $stdoutPath = Join-Path $artifactDir 'stdout.raw'
+    $stderrPath = Join-Path $artifactDir 'stderr.raw'
+    $invocationPath = Join-Path $artifactDir 'invocation.json'
+    foreach ($path in @($promptPath,$resultPath,$stdoutPath,$stderrPath,$invocationPath)) { Assert-PathWithinRoot -Path $path -Root $artifactDir | Out-Null }
+    [System.IO.File]::WriteAllText($promptPath, $PromptContent, (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($stdoutPath, '', (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($stderrPath, '', (New-Object System.Text.UTF8Encoding($false)))
+    $logDir = Get-RouterLogDirectory
+    if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    $logPath = Join-Path $logDir ("execution-$executionId.log")
+    $id = Get-RepoIdentity -RepoPath $RepoPath
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    $header = "executionId=$executionId`noperation=$Operation`nissueNumber=$IssueNumber`nrepository=$($id.ownerRepo)`nstartHead=$($Snapshot.startHead)`nworker=$($Route.worker)`nmodel=$($Route.model)`neffort=$($Route.effort)`nstartedAt=$now`ncliStarted=false"
+    [System.IO.File]::WriteAllText($logPath, (Protect-SecretText -Text $header), (New-Object System.Text.UTF8Encoding($false)))
+    Invoke-LogRetention -Scope ([string]$Script:RouterLogScope)
+    $receipt = [pscustomobject]@{
+        schemaVersion = 1; executionId = $executionId; runId = $RunId; generation = $generation
+        ownerRepo = $id.ownerRepo; repoRoot = $id.repoRoot; canonicalRepoRoot = $id.repoRoot
+        operation = $Operation; issueNumber = $IssueNumber; kind = $Kind; purpose = 'implement'
+        startHead = $Snapshot.startHead; startSnapshot = $Snapshot; worker = $Route.worker; model = $Route.model; effort = $Route.effort
+        status = 'worker_starting'; startedAt = $now; updatedAt = $now
+        promptHash = (Get-Sha256Text -Text $PromptContent); promptPath = $promptPath; logPath = $logPath
+        resultPath = $resultPath; rawStdoutPath = $stdoutPath; rawStderrPath = $stderrPath; invocationPath = $invocationPath
+        processId = $null; processStartedAt = $null; finalHead = $null; workerExitCode = $null
+        workerStopReason = $null; interruptedReason = $null; workerReportedVerification = $null
+        localVerificationComplete = $false; interrupted = $false; recoveredByPostflight = $false
+        postflight = $null; remainingProblems = @()
+    }
+    Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
+    return $receipt
+}
+function Get-ProcessIdentity {
+    param([Parameter(Mandatory)][int]$ProcessId, [scriptblock]$ProcessProbe)
+    if ($null -ne $ProcessProbe) { return (& $ProcessProbe $ProcessId) }
+    try {
+        $p = Get-Process -Id $ProcessId -ErrorAction Stop
+        return [pscustomobject]@{ exists = $true; startedAt = $p.StartTime.ToUniversalTime().ToString('o') }
+    } catch { return [pscustomobject]@{ exists = $false; startedAt = $null } }
+}
+function Test-ExecutionProcessAlive {
+    param([Parameter(Mandatory)]$Receipt, [scriptblock]$ProcessProbe)
+    if ($null -eq $Receipt.processId -or $null -eq $Receipt.processStartedAt) { return $false }
+    $identity = Get-ProcessIdentity -ProcessId ([int]$Receipt.processId) -ProcessProbe $ProcessProbe
+    if (-not $identity.exists -or [string]::IsNullOrWhiteSpace([string]$identity.startedAt)) { return $false }
+    try {
+        $expected = [DateTime]::Parse([string]$Receipt.processStartedAt).ToUniversalTime()
+        $actual = [DateTime]::Parse([string]$identity.startedAt).ToUniversalTime()
+        return ([Math]::Abs(($actual - $expected).TotalSeconds) -lt 1.0)
+    } catch { return $false }
+}
+function Read-SharedTextFile {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    $stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try { $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8, $true); try { return $reader.ReadToEnd() } finally { $reader.Dispose() } }
+    finally { $stream.Dispose() }
 }
 
 # ---------- claude-only 2단계용 pending 상태 (state/pending/<namespace>) ----------

@@ -1,12 +1,15 @@
-# REENTRY — operation-router v2.3.5 완성 검증
+# REENTRY — operation-router v2.4.4 장시간 실행 복구
 
 ## 현재 버전과 승인 상태
 
-- 설치 런타임은 `~/.claude/operation-router`의 v2.3.5 수리본이다.
+- source tree 목표 버전은 v2.4.4다. 구현 worker 실행 세대·실행 중 로그·중복 차단·`/operation recover N X`를 추가했으며 recover는 worker를 다시 호출하지 않는다.
+- 외부 중단 후 CI가 성공해도 `interrupted=true`, `localVerificationComplete=false`, `recoveredByPostflight=true`로 보존한다.
+- 전역 Claude 설정과 저장소 밖 설치본은 이 변경에서 수정하지 않는다. 설치본 일치 검증은 격리된 임시 설치 fixture로 수행한다.
+- 실제 전역 설치 런타임 버전은 이 저장소 작업에서 변경하거나 단정하지 않는다. v2.4.4 설치 정합성은 격리 사용자 홈의 Skill 6종 사본으로 검증했다.
 - v2.3.3 전체 백업은 `~/.claude/backups/operation-router.bak.v2.3.3.20260721-000909/`에 있다.
 - v2.3.4 전체 백업은 `~/.claude/backups/operation-router.bak.v2.3.4.20260721-004357/`에 있다.
 - v2.3.4는 로그 격리와 검토본 재현성을 수리했고 166/166 source-tree 테스트를 통과했다.
-- v2.3.5는 V03 1차 실행에서 확인된 최종 작업자 예외·UTF-8 stdin 결함만 좁게 수리한다.
+- v2.3.5의 최종 작업자 예외·UTF-8 stdin 수리는 v2.4.4에서도 회귀 테스트로 유지한다.
 - 라우팅·모델·effort·권한·fallback 정책은 바꾸지 않았다.
 
 ```yaml

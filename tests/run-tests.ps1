@@ -6,6 +6,7 @@ param(
     [string]$SkillsPath,
     [string]$StatePath,
     [string]$LogRoot,
+    [string[]]$TestName,
     [switch]$InstalledIntegration
 )
 
@@ -42,7 +43,9 @@ try {
             InstalledIntegration = $false
         }
     }
-    $result = Invoke-Pester -Script $spec -PassThru -Strict
+    $pesterArgs = @{ Script=$spec; PassThru=$true; Strict=$true }
+    if ($null -ne $TestName -and $TestName.Count -gt 0) { $pesterArgs.TestName = $TestName }
+    $result = Invoke-Pester @pesterArgs
 } catch {
     $fatal = $_
 } finally {
