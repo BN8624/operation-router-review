@@ -6,6 +6,53 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
+# v2.4.0 저장소 경계: 워커가 손대면 안 되는 저장소 밖 민감 경로. 명령 패턴이 아니라
+# "실제로 바뀌었는가"를 SHA-256으로 잡으므로 플래그 재배열·래퍼·동의어 우회에 강하다.
+function Get-BoundaryWatchPaths {
+    $userHome = $env:USERPROFILE
+    if ([string]::IsNullOrWhiteSpace($userHome)) { $userHome = $HOME }
+    return @(
+        (Join-Path $userHome '.gitconfig'),
+        (Join-Path $userHome '.claude\CLAUDE.md'),
+        (Join-Path $userHome '.codex\AGENTS.md'),
+        (Join-Path $userHome '.claude\operation-router\config\config.json'),
+        (Join-Path $userHome '.claude\operation-router\scripts\common.ps1')
+    )
+}
+
+# 경계 스냅샷: 감시 경로별 SHA-256(없으면 ABSENT)을 JSON 안전한 레코드 배열로 반환한다.
+function Get-BoundarySnapshot {
+    param([string[]]$Paths)
+    if ($null -eq $Paths) { $Paths = Get-BoundaryWatchPaths }
+    $records = @()
+    foreach ($p in $Paths) {
+        $h = 'ABSENT'
+        if (Test-Path -LiteralPath $p) {
+            try { $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } catch { $h = 'READ_ERROR' }
+        }
+        $records += [pscustomobject]@{ path = $p; hash = $h }
+    }
+    return @($records)
+}
+
+# 경계 위반 판정(순수 함수): 시작 스냅샷 대비 현재 해시가 달라진 경로 목록을 반환한다.
+function Test-RepoBoundaryViolation {
+    param([Parameter(Mandatory)][AllowNull()]$BeforeSnapshot)
+    if ($null -eq $BeforeSnapshot) { return @() }
+    $violations = @()
+    foreach ($rec in @($BeforeSnapshot)) {
+        if ($null -eq $rec) { continue }
+        $p = [string]$rec.path
+        $before = [string]$rec.hash
+        $now = 'ABSENT'
+        if (Test-Path -LiteralPath $p) {
+            try { $now = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } catch { $now = 'READ_ERROR' }
+        }
+        if ($now -ne $before) { $violations += $p }
+    }
+    return @($violations)
+}
+
 function Get-StartSnapshot {
     param([Parameter(Mandatory)][string]$RepoPath)
     $branch = Get-GitCurrentBranch -Path $RepoPath
@@ -20,6 +67,7 @@ function Get-StartSnapshot {
         aheadBehindAvailable = [bool]$ab.Available
         ahead         = $ab.Ahead
         behind        = $ab.Behind
+        boundaryWatch = Get-BoundarySnapshot
     }
 }
 

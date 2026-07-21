@@ -20,14 +20,27 @@
         "Edit",
         "Bash(*)"
       ],
+      "_deny_note": "v2.4.0: first-line blocklist only. Pattern matching is brittle (flag reordering, wrappers, synonyms bypass it) and covers the Grok worker only. The uranium-backed guard is postflight repo-boundary detection (Test-RepoBoundaryViolation), which flags any change to watched out-of-repo sensitive files regardless of the command used.",
       "deny": [
         "Bash(git reset --hard*)",
+        "Bash(git reset --merge*)",
+        "Bash(git reset --keep*)",
         "Bash(git clean*)",
         "Bash(git push --force*)",
         "Bash(git push -f*)",
+        "Bash(git push*+*)",
         "Bash(rm -rf*)",
+        "Bash(rm -fr*)",
+        "Bash(rm -r -f*)",
+        "Bash(rm -f -r*)",
+        "Bash(rmdir /s*)",
+        "Bash(rd /s*)",
         "Bash(del /s*)",
-        "Bash(Remove-Item *-Recurse*)"
+        "Bash(Remove-Item *-Recurse*)",
+        "Bash(format *)",
+        "Bash(diskpart*)",
+        "Bash(shutdown*)",
+        "Bash(reg delete*)"
       ]
     }
   },

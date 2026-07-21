@@ -120,12 +120,20 @@ function Resolve-Postflight {
     $pushComplete = $false
     if ($ab.Available) { $pushComplete = ($ab.Ahead -eq 0 -and $ab.Behind -eq 0) }
 
-    # 상태 우선순위: worker 실패 -> quota -> no_commit -> dirty -> push -> ci
+    # v2.4.0 저장소 경계 위반: 시작 스냅샷 대비 감시 경로(저장소 밖 민감 파일)가 바뀌었는가.
+    # 명령 패턴 매칭(deny)을 우회해도 결과 변경은 여기서 잡힌다. 보안 신호이므로 최우선으로 보고한다.
+    $boundaryViolations = @()
+    if ($StartSnapshot.PSObject.Properties.Name -contains 'boundaryWatch') {
+        $boundaryViolations = @(Test-RepoBoundaryViolation -BeforeSnapshot $StartSnapshot.boundaryWatch)
+    }
+
+    # 상태 우선순위: boundary -> worker 실패 -> quota -> no_commit -> dirty -> push -> ci
     # v2.3: Git·커밋·push 게이트가 전부 통과한 뒤에만 CI를 조회한다.
     # worker_failed/quota_exhausted/no_commit 등 이미 실패가 확정된 경우 CI polling(최대 60초)을 하지 않고
     # ciStatus를 'not-checked'로 남긴다 (not-requested로 위장하지 않는다).
     $status = $null
-    if (-not $WorkerResult.Success) {
+    if ($boundaryViolations.Count -gt 0) { $status = 'repo_boundary_violation' }
+    elseif (-not $WorkerResult.Success) {
         if ($WorkerResult.QuotaExhausted) { $status = 'quota_exhausted' } else { $status = 'worker_failed' }
     }
     elseif ((-not $headChanged -or $commitCount -eq 0)) {
@@ -158,5 +166,6 @@ function Resolve-Postflight {
         pushComplete  = [bool]$pushComplete
         ciStatus      = $ci
         workerExitCode = $WorkerResult.ExitCode
+        boundaryViolations = @($boundaryViolations)
     }
 }

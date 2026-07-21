@@ -35,8 +35,10 @@ blocked:
   V11_V12_V13_V15_sol: "gpt-5.6-sol이 2026-07-21 models_cache에서 제거됨 — 사용자 결정 필요"
 usageState:
   note: "V03/V04/V08 성공 후 주문서에 따라 /operation reset 실행"
-next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. 남은 것:
-  - security_and_install_verification        # ⑤ deny 프로브, 저장소 경계, secret, 신규 설치/업그레이드/롤백
+next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. ⑤ 일부 착수:
+  - security_repo_boundary_done              # ⑤-1 완료(2026-07-21): deny 확장(9-1 위험명령) + postflight 저장소 경계 탐지(Test-RepoBoundaryViolation, status repo_boundary_violation 최우선). 테스트 177/177
+  - security_secret_and_install_remaining    # ⑤-2 남음: secret 마스킹 재확인+고엔트로피 스캔, 신규 설치/업그레이드(v2.3.x→최종)/롤백을 격리 임시 HOME에서
+  - deny_pattern_grok_probe_optional         # ⑤-3 선택: deny 중간 와일드카드(git push*+*) 실제 발동은 grok 프로브 필요 — 경계 탐지가 실질 방어라 후순위
   - v2_4_0_policy_changes_ABC                # ⑤.5 자연어 호출+확인게이트(A), 작전1 claude-only high(B), 고위험 경고(C) — 아래 절차 3 참조
   - reverify_after_policy_changes            # A/B/C 적용 후 작전1 claude-only(V14계열)+자연어 호출 경로 재검증
   - v2_4_0_final_docs                        # ⑥ CHANGELOG, VERIFICATION_MATRIX, SECURITY, INSTALL, ROLLBACK

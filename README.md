@@ -4,6 +4,11 @@ Claude Code 전역 작전 라우터. GitHub 이슈를 작전 1/2/3으로 Grok CL
 
 모델 ID·CLI 옵션·Skill frontmatter 지원은 설치본에서 실측했다. Grok 기본 경로의 Operation 3 mechanical/logic과 Operation 2는 Controlled E2E를 통과했고, GPT Plan B 경로는 v2.3.5 정적 검토 뒤 별도 승인 순서로 검증한다. v2.3.5 수리 자체는 실제 작업자 CLI를 호출하지 않고 source-tree 테스트로 검증한다.
 
+## v2.4.0에서 실제 구현된 것 (진행 중)
+
+- **저장소 경계 탐지 (실질 방어)**: `Get-StartSnapshot`이 저장소 밖 민감 경로(전역 `.gitconfig`, `CLAUDE.md`, `AGENTS.md`, 라우터 `config.json`·`common.ps1`)의 SHA-256을 시작 시 스냅샷하고, postflight의 `Test-RepoBoundaryViolation`이 실행 후 재검사한다. 하나라도 바뀌면 `status: repo_boundary_violation`으로 **최우선** 보고하고 CI를 조회하지 않는다. 명령 패턴이 아니라 "결과적으로 경계를 넘었는가"를 잡으므로 플래그 재배열·래퍼·동의어 우회에 강하다.
+- **deny 1차 차단 확장**: Grok 헤드리스 `--deny` 목록을 사양서 위험 명령까지 확장했다(reset --merge/--keep, `+main` 강제 push refspec, `rm` 플래그 분리형, rmdir/rd /s, format, diskpart, shutdown, reg delete 등). 단, 패턴 블록리스트는 근본적으로 취약하고 Grok 워커에만 적용되므로 1차 차단이며, 실질 방어는 위의 경계 탐지다(config `_deny_note`에 명시).
+
 ## v2.3.5에서 실제 구현된 것 (v2.3.4 대비)
 
 - **최종 작업자 식별**: 고정 실행 계약의 첫 줄을 ASCII 마커 `[OPERATION_ROUTER_FINAL_WORKER]`로 고정한다. 마커가 있는 세션은 라우터가 이미 선택한 최종 작업자이며 Grok·Codex·Claude 등 다른 CLI를 점검·호출·재위임하지 않는다.

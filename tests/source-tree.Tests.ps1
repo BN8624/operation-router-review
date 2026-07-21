@@ -302,6 +302,75 @@ Describe '17-20. fallback 규칙 (run 수준)' {
     }
 }
 
+Describe 'v2.4.0 저장소 경계 탐지 (postflight)' {
+    It 'Test-RepoBoundaryViolation: 스냅샷 없음/변화 없음은 위반 0' {
+        @(Test-RepoBoundaryViolation -BeforeSnapshot $null).Count | Should Be 0
+        $f = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $f -Value 'original' -Encoding utf8
+        $snap = @([pscustomobject]@{ path = $f; hash = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash })
+        @(Test-RepoBoundaryViolation -BeforeSnapshot $snap).Count | Should Be 0
+        Remove-Item -LiteralPath $f -Force
+    }
+    It 'Test-RepoBoundaryViolation: 내용 변경·삭제를 위반으로 탐지' {
+        $f = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $f -Value 'original' -Encoding utf8
+        $snap = @([pscustomobject]@{ path = $f; hash = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash })
+        Set-Content -LiteralPath $f -Value 'TAMPERED' -Encoding utf8
+        @(Test-RepoBoundaryViolation -BeforeSnapshot $snap).Count | Should Be 1
+        Remove-Item -LiteralPath $f -Force
+        @(Test-RepoBoundaryViolation -BeforeSnapshot $snap).Count | Should Be 1  # 삭제도 변화
+    }
+    It 'Get-BoundarySnapshot: 없는 경로는 ABSENT, 실제 파일은 SHA-256' {
+        $f = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $f -Value 'x' -Encoding utf8
+        $missing = Join-Path $TestWorkRoot ("nope-" + [guid]::NewGuid().ToString('N') + '.txt')
+        $rec = @(Get-BoundarySnapshot -Paths @($f, $missing))
+        ($rec | Where-Object { $_.path -eq $f }).hash | Should Match '^[A-Fa-f0-9]{64}$'
+        ($rec | Where-Object { $_.path -eq $missing }).hash | Should Be 'ABSENT'
+        Remove-Item -LiteralPath $f -Force
+    }
+    It 'Resolve-Postflight: 감시 경로 변경 시 status=repo_boundary_violation (최우선)' {
+        $repo = New-FakeRepo -WithRemote
+        $watch = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $watch -Value 'original' -Encoding utf8
+        try {
+            $snap = [pscustomobject]@{
+                startHead = (Get-GitHead -Path $repo)
+                boundaryWatch = @([pscustomobject]@{ path = $watch; hash = (Get-FileHash -LiteralPath $watch -Algorithm SHA256).Hash })
+            }
+            Set-Content -LiteralPath $watch -Value 'TAMPERED-BY-WORKER' -Encoding utf8
+            $wr = [pscustomobject]@{ ExitCode = 0; Success = $true; QuotaExhausted = $false }
+            $pf = Resolve-Postflight -RepoPath $repo -StartSnapshot $snap -WorkerResult $wr -CiProbe $ciNone
+            $pf.status | Should Be 'repo_boundary_violation'
+            @($pf.boundaryViolations).Count | Should Be 1
+            $pf.ciStatus | Should Be 'not-checked'   # 보안 위반은 CI 조회하지 않는다
+        } finally { Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $watch -Force -ErrorAction SilentlyContinue }
+    }
+    It 'Resolve-Postflight: 감시 경로 불변이면 boundary로 막지 않는다' {
+        $repo = New-FakeRepo -WithRemote
+        $watch = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $watch -Value 'original' -Encoding utf8
+        try {
+            $snap = [pscustomobject]@{
+                startHead = (Get-GitHead -Path $repo)
+                boundaryWatch = @([pscustomobject]@{ path = $watch; hash = (Get-FileHash -LiteralPath $watch -Algorithm SHA256).Hash })
+            }
+            $wr = [pscustomobject]@{ ExitCode = 0; Success = $true; QuotaExhausted = $false }
+            $pf = Resolve-Postflight -RepoPath $repo -StartSnapshot $snap -WorkerResult $wr -CiProbe $ciNone
+            $pf.status | Should Not Be 'repo_boundary_violation'
+            @($pf.boundaryViolations).Count | Should Be 0
+        } finally { Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $watch -Force -ErrorAction SilentlyContinue }
+    }
+    It 'Get-StartSnapshot이 boundaryWatch를 포함한다' {
+        $repo = New-FakeRepo
+        try {
+            $snap = Get-StartSnapshot -RepoPath $repo
+            ($snap.PSObject.Properties.Name -contains 'boundaryWatch') | Should Be $true
+            @($snap.boundaryWatch).Count | Should BeGreaterThan 0
+        } finally { Remove-Item -Recurse -Force $repo }
+    }
+}
+
 Describe '21-24. postflight 상태' {
     It '21. 종료코드 0 + 커밋 0 → no_commit' {
         Invoke-ResetCommand | Out-Null
@@ -1498,10 +1567,16 @@ Describe 'v2.3.2-1~7. grok 헤드리스 권한 인수 (acceptEdits 제거, v2.3.
             $cap = { param($fp,$al) [pscustomobject]@{ ExitCode=0; Output='{"stopReason":"EndTurn"}' } }
             $r = Invoke-GrokWorker -Cwd $HOME -Model 'grok-4.5' -Effort 'low' -MaxTurns 40 -PromptFilePath $tmp -Runner $cap
             $denyCount = @($r.ArgumentList | Where-Object { $_ -eq '--deny' }).Count
-            $denyCount | Should Be 7
+            $denyCount | Should Be 19
             $allowCount = @($r.ArgumentList | Where-Object { $_ -eq '--allow' }).Count
             $allowCount | Should Be 4
         } finally { Remove-TempOrderFile -Path $tmp }
+    }
+    It 'v2.4.0: deny 목록이 사양서 9-1 위험 명령을 1차 차단으로 포함한다' {
+        $deny = @((Get-Config).grok.headlessPermissions.deny)
+        foreach ($needle in @('git reset --merge','git reset --keep','git push*+*','rm -r -f','rmdir /s','rd /s','format ','diskpart','shutdown','reg delete')) {
+            (@($deny | Where-Object { $_ -like "*$needle*" }).Count) | Should BeGreaterThan 0
+        }
     }
 }
 
