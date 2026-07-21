@@ -17,17 +17,18 @@ verified:
   V04: PASS                # 이슈#5, Terra medium, slug max_length + 테스트 3개, 커밋 d3f2c6d, 테스트 8/8, CI success
   V07: CONDITIONAL_PASS    # 종료 검토 모델이 설계상 Sonnet 5가 아닌 Fable 5였음
   V08: CONDITIONAL_PASS    # 이슈#6, 작전2 Terra medium, 파일 3개, 커밋 c0c9bc5, 테스트 11/11, CI success, branch/PR 없음 — 시작·종료 검토자가 Sonnet 5가 아닌 Fable 5 (V07과 동일 편차)
+  V41_sonnet_reverify: PASS  # 2026-07-21 이슈#7. 시작·종료 검토 모두 Sonnet 5 서브에이전트(agentId ab09331…/a8eae06…, 자기보고 claude-sonnet-5), Grok 4.5 medium 구현(grok-primary), 커밋 5fa030b, 테스트 13/13, CI success. Fable은 지휘·전달만. V07/V08의 검토 모델 편차 해소 — canon(Sonnet 검토자)은 유지
+  V05: PASS                # 이슈#8. grok exhausted+gpt80, op3 mechanical → claude_execute(haiku). Haiku 4.5 직접 한 줄 수정, 커밋 061aa85, push·CI success, 외부 CLI 0
+  V06: PASS                # 이슈#9. op3 logic → Haiku claude_only_required 비구현 정지(파일 0) → Sonnet 전용 흐름 -ClaudeOnly resume → claude_execute, 파일 2, 테스트 15/15, 커밋 deba2a0, CI success, 재귀 0
+  V09: PASS                # 이슈#10. op2 → claude_only_required → 같은 Sonnet 세션 -ClaudeOnly 1회 → claude_execute, 파일 3, 테스트 17/17, 커밋 c5bc458, CI success, 외부 CLI 0, 재귀 0
 notApproved:
   operationRouter_v2_3_5_full: true
 blocked:
   V11_V12_V13_V15_sol: "gpt-5.6-sol이 2026-07-21 models_cache에서 제거됨 — 사용자 결정 필요"
 usageState:
   note: "V03/V04/V08 성공 후 주문서에 따라 /operation reset 실행"
-next:   # 2026-07-21 사용자 확정 순서
-  - static_defects_4_repair_and_full_tests   # 이번 사이클 범위는 여기까지
-  - V07_V08_sonnet5_reverify                 # 4-1 결정: Fable 공식화 금지, Sonnet 5로 작은 작전 2 1회 재검증. Sonnet 실행 불가 시 BLOCKED_BY_REVIEWER_AVAILABILITY로 남기고 다음으로
-  - V05_V06_V09_claude_only
-  - V10_repair_required_fixture
+next:   # 2026-07-21 사용자 확정 순서 (①정적4건 ②Sonnet재검증 ③V05/V06/V09 완료)
+  - V10_repair_required_fixture              # 테스트 저장소에서 통제된 결함 fixture로 검증
   - security_and_install_verification
   - v2_4_0_final_docs
   - operation1_V11_V15_hold                  # sol 제거. 임의 모델 치환·canon 변경 금지
