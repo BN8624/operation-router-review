@@ -29,16 +29,19 @@ Codex는 `-s workspace-write`(작업 디렉터리 밖 쓰기 차단) + `approval
 ### 6. 검수 독립성
 GPT가 구현한 작전 1 결과는 sol 자기검수를 하지 않는다(`review_not_eligible`). 유효한 Grok 완료 영수증, 정상 result envelope, review 가능한 provenance, 동일 owner/root 저장소, HEAD 일치가 모두 필요하다. result 유실 recover는 unverified 진단 receipt만 남고 GPT review를 호출하지 않는다. 검수 JSON은 fail-closed 엄격 검증한다.
 
+### 7. repair receipt 불변식
+review와 repair는 같은 verified run provenance helper를 사용한다. repair는 정상 Grok run receipt와 비어 있지 않은 엄격 findings를 가진 REPAIR_REQUIRED review receipt가 모두 있어야 하며, 두 receipt의 저장소·worker·HEAD 연결을 core 함수에서 다시 검증한다. 수동 `PostReviewHead`·`FindingsFile`·`Target`은 receipt assertion일 뿐 대체값이 아니며 불일치는 worker 호출 전에 차단한다. provenance 필드가 없는 legacy receipt도 추측하지 않는다.
+
 ## 강제 방어층이 아닌 것 — 자연어 호출 soft confirmation policy
 
-operation-1/2/3의 `disable-model-invocation: false`로 모델이 자연어 지시로 Skill을 호출할 수 있다. 이때 실행 전에 예상 워커·비용을 한 줄로 확인받는 절차는 **모델이 따르는 사용성·오작동 방지 정책(soft policy)이며, 라우터 코드가 강제하는 보안 게이트가 아니다.** 별도 확인 토큰·`-Confirmed` 인수 시스템은 두지 않는다. 슬래시 명령 직접 입력은 명시적 실행으로 간주해 확인을 생략한다. 이 정책은 위 6개 강제 방어층에 포함되지 않는다.
+operation-1/2/3의 `disable-model-invocation: false`로 모델이 자연어 지시로 Skill을 호출할 수 있다. 이때 실행 전에 예상 워커·비용을 한 줄로 확인받는 절차는 **모델이 따르는 사용성·오작동 방지 정책(soft policy)이며, 라우터 코드가 강제하는 보안 게이트가 아니다.** 별도 확인 토큰·`-Confirmed` 인수 시스템은 두지 않는다. 슬래시 명령 직접 입력은 명시적 실행으로 간주해 확인을 생략한다. 이 정책은 위 7개 강제 방어층에 포함되지 않는다.
 
 ## Secret 보호
 
 - **마스킹**(`Protect-SecretText`): gh/sk/xai/AWS 키, `key=value` 형태, Bearer, Authorization 헤더(임의 스킴), 고엔트로피 토큰(Shannon 엔트로피). git SHA·UUID·순수 숫자는 오탐 제외.
 - active execution 동안만 worker 입력용 `prompt.txt`와 raw stdout/stderr를 둔다. terminal finalization은 마스킹된 `stdout.log`·`stderr.log`를 만든 뒤 raw와 prompt 원문을 삭제하고 receipt에는 `promptHash`와 삭제 사실만 남긴다.
 - 모든 runtime log, workerSummary, verification 문자열, recover 요약과 sanitization 오류에 마스킹을 적용한다. 변환·삭제 실패는 `artifact_sanitization_failed`, retention 실패는 `artifact_retention_failed`로 성공과 구분한다.
-- terminal execution generation은 canonical-root namespace별 최근 10개만 보존한다. active와 최신 receipt 참조 generation은 제외하고, 삭제 전 artifact root 경계를 검증한다.
+- 모든 최신 execution receipt가 참조하는 generation, active generation, marker가 없거나 terminal 여부가 불명확한 generation은 retention에서 보호한다. `executionRetentionCount=10`은 보호되지 않은 terminal generation의 추가 보존 수이며 보호 항목 때문에 실제 보존 수가 10을 초과할 수 있다. receipt 보호 집합을 완전히 계산·검증할 수 없으면 아무것도 삭제하지 않고 `artifact_retention_failed`로 보고한다.
 - 환경변수 전체 덤프 코드 없음(개별 참조만).
 - 검토 ZIP·저장소에 실제 usage-state·인증 정보·원본 모델 세션 JSONL 미포함. manifest 검토 대상에 secret 형태 없음(테스트로 강제).
 

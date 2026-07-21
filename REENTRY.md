@@ -1,16 +1,17 @@
-# REENTRY — operation-router v2.4.5 영속 실행·복구 보안 강화
+# REENTRY — operation-router v2.4.6 receipt 불변식 강화
 
 ## 현재 버전과 승인 상태
 
-- source tree 목표 버전은 v2.4.5다. v2.4.4의 라우팅을 유지하면서 clone별 root-hash namespace, unverified recover 차단, terminal artifact sanitization/retention, watched critical-tree 사후 검사를 추가했다.
+- source tree 목표 버전은 v2.4.6이다. v2.4.5 라우팅을 유지하면서 모든 repair 경로의 verified run/review receipt 자격과 execution retention의 namespace 전체 최신 receipt 참조 보호를 강제했다.
 - 정상 result가 없는 recover는 `recovered_*_unverified`, `resultEnvelopePresent=false`, `localVerificationComplete=false`이며 작전 1 review/repair 불가다. recover의 worker 호출은 계속 0회다.
-- active 동안만 prompt/raw가 존재하고 terminal 후 마스킹 보존본으로 전환한다. terminal generation은 namespace별 10개를 보존한다.
+- repair 수동 인수는 receipt를 대체하지 않고 일치 assertion으로만 동작한다. run provenance 기본값은 fail-closed다.
+- active 동안만 prompt/raw가 존재하고 terminal 후 마스킹 보존본으로 전환한다. 모든 최신 execution receipt 참조와 active·불완전 marker generation을 보호하며 retention 10은 미참조 terminal에만 적용한다.
 - 전역 Claude 설정과 저장소 밖 설치본은 이 변경에서 수정하지 않는다. 설치본 일치 검증은 격리된 임시 설치 fixture로 수행한다.
-- 실제 전역 설치 런타임 버전은 이 저장소 작업에서 변경하거나 단정하지 않는다. v2.4.5 설치 정합성은 격리 사용자 홈 fixture로만 검증한다.
+- 실제 전역 설치 런타임 버전은 이 저장소 작업에서 변경하거나 단정하지 않는다. v2.4.6 설치 정합성은 격리 사용자 홈 fixture로만 검증한다.
 - v2.3.3 전체 백업은 `~/.claude/backups/operation-router.bak.v2.3.3.20260721-000909/`에 있다.
 - v2.3.4 전체 백업은 `~/.claude/backups/operation-router.bak.v2.3.4.20260721-004357/`에 있다.
 - v2.3.4는 로그 격리와 검토본 재현성을 수리했고 166/166 source-tree 테스트를 통과했다.
-- v2.3.5의 최종 작업자 예외·UTF-8 stdin 수리는 v2.4.5에서도 회귀 테스트로 유지한다.
+- v2.3.5의 최종 작업자 예외·UTF-8 stdin 수리는 v2.4.6에서도 회귀 테스트로 유지한다.
 - 라우팅·모델·effort·권한·fallback 정책은 바꾸지 않았다.
 
 ```yaml
@@ -40,6 +41,8 @@ blocked:
 usageState:
   note: "V03/V04/V08 성공 후 주문서에 따라 /operation reset 실행"
 next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. ⑤ 일부 착수:
+  - repair_receipt_invariants_done          # v2.4.6: verified Grok run + REPAIR_REQUIRED review 필수, 수동 인수 assertion, core 재검증, legacy provenance fail-closed
+  - execution_retention_references_done     # v2.4.6: namespace 전체 최신 execution receipt 참조 보호, 미참조 terminal에만 count 적용, 보호 집합 실패 시 삭제 0
   - security_watched_file_done               # v2.4.5: 선택 critical tree의 추가·수정·삭제 사후 탐지. 호환 status repo_boundary_violation, OS sandbox 아님
   - security_secret_done                     # ⑤-2 완료(2026-07-21): Authorization(임의 스킴)/AWS/고엔트로피 마스킹 추가, git SHA·UUID 오탐 제외, env 전체 덤프 없음 확인. 178/178
   - install_lifecycle_EXCLUDED               # 사용자 결정 2026-07-21: 1인 사용이라 install.ps1/업그레이드/롤백 및 INSTALL.md/ROLLBACK.md는 범위 제외. 롤백은 ~/.claude/backups 폴더 복원으로 충분. 다음 세션은 설치기를 만들지 말 것.

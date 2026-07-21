@@ -2466,7 +2466,8 @@ Describe 'v2.4.5-4. watched critical tree 사후 무결성 검사' {
             $script:v245ReviewCalls=0;$review=Invoke-OperationReview -OperationNumber 1 -IssueNumber 423 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner ({param($p,$o,$r)$script:v245ReviewCalls++;throw 'must not run'})
             $review.status|Should Be 'review_not_eligible';$script:v245ReviewCalls|Should Be 0
             (Test-Path -LiteralPath (Get-ReviewReceiptPath -Operation 1 -IssueNumber 423 -RepoPath $repo))|Should Be $false
-            (Invoke-RepairCommand -OperationNumber 1 -IssueNumber 423 -RepoPath $repo).status|Should Be 'repair_receipt_missing'
+            $repair=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 423 -RepoPath $repo
+            $repair.status|Should Be 'repair_not_eligible';$repair.reason|Should Be 'run_unverified_or_ineligible';$repair.repairAttempted|Should Be $false
         } finally {$Script:RuntimeRoot=$savedRuntime;Remove-Item -LiteralPath $repo -Recurse -Force;if(Test-Path -LiteralPath $tree){Remove-Item -LiteralPath $tree -Recurse -Force};Invoke-ResetCommand|Out-Null}
     }
 }
@@ -2594,9 +2595,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v2.4.5를 현재 버전으로 기록한다' {
+    It '12. README는 v2.4.6을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v2\.4\.5\)'
+        $readme | Should Match '^# operation-router \(v2\.4\.6\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {

@@ -2,6 +2,14 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
+## v2.4.6 (2026-07-22)
+
+- review와 repair가 같은 verified run provenance helper를 사용한다. repair core는 정상 Grok run receipt와 유효한 REPAIR_REQUIRED review receipt를 다시 검증하며, unverified recover·legacy provenance 누락·receipt 부재 상태는 어떤 수동 인수 조합으로도 worker를 호출하지 않는다.
+- `-PostReviewHead`, `-FindingsFile`, `-Target`을 receipt override에서 assertion으로 변경했다. 명시 값이 HEAD·worker·엄격 findings와 일치하지 않으면 `repair_argument_receipt_mismatch`로 fail-closed 한다.
+- `Save-RunReceipt`의 기본값을 `resultEnvelopePresent=false`, `interrupted=true`, `verificationProvenance=unknown`으로 바꿔 새 호출자의 인수 누락이 review·repair 자격을 암묵적으로 만들지 않게 했다.
+- execution retention은 namespace의 모든 최신 `*-execution.json`을 읽어 참조 generation을 보호한다. `executionRetentionCount`는 미참조 terminal에만 적용되고 보호 수가 count를 초과해도 유지된다. receipt 파싱·identity·경로 보호 집합을 완성할 수 없으면 삭제 없이 `artifact_retention_failed`로 보고한다.
+- 라우팅·모델·effort·사용량 임계값·fallback·Claude-only·recover worker 0회 정책은 변경하지 않았다. 검증은 mock/fake Git/격리 OS process와 installed fixture이며 유료 Grok·GPT·Claude live 호출은 0회다.
+
 ## v2.4.5 (2026-07-22)
 
 - 실행 namespace에 canonical repository root의 SHA-256 앞 16자를 추가했다. 새 receipt는 ownerRepo와 canonical root/hash를 모두 검증하며, 동일 origin의 복수 clone이 execution·lock·run/review receipt를 공유하지 않는다. exact root가 확인된 비활성 legacy receipt만 원자 이전한다.

@@ -1,10 +1,10 @@
-operation-router v2.4.5 source-tree test result
+operation-router v2.4.6 source-tree test result
 Date: 2026-07-22 (KST)
 Runner: Windows PowerShell 5.1, Pester 3.4 (-Strict)
 
 Final full run:
   Command: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
-  Passed: 219  Failed: 0  Skipped: 0  Pending: 0  Inconclusive: 0
+  Passed: 226  Failed: 0  Skipped: 0  Pending: 0  Inconclusive: 0
   sourceTreeTests: executed
   installedIntegrationTests: executed
   installedIntegrationFailures: 0
@@ -12,13 +12,11 @@ Final full run:
   statePath: isolated-temp-state
   logRoot: isolated-temp-logs
 
-Focused v2.4.5 security regressions added: 12
-  canonical-root namespace and legacy migration: 3
-  unverified recover and review eligibility: 3
-  execution artifact sanitization and retention: 3
-  watched critical-tree tamper detection: 3
+Focused v2.4.6 receipt invariant regressions added: 7
+  repair run/review eligibility and manual argument assertions: 4
+  namespace-wide execution receipt retention protection: 3
 
 The full suite uses Pester mocks, fake Git repositories, and isolated OS
 processes. It covers receipt generation, review/repair fail-closed, Plan B,
 quota/transient/provider errors, source-tree, manifest, log retention, UTF-8,
-and the v2.4.5 hardening regressions. Paid Grok/GPT live calls: 0.
+and the v2.4.6 receipt invariant regressions. Paid Grok/GPT/Claude live calls: 0.
