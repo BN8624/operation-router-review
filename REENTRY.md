@@ -104,7 +104,7 @@ logs/
 
 - 고정 실행 계약은 ASCII 첫 줄 `[OPERATION_ROUTER_FINAL_WORKER]`로 시작한다.
 - 전역 `~/.claude/CLAUDE.md`와 `~/.codex/AGENTS.md`에 마커 세션의 Operation 1/2/3 재위임 예외를 바이트 동일하게 추가했다.
-- 전역 규칙 두 파일의 현재 SHA-256은 모두 `62D2DF237E43C0E605BEEAFE89F5D85B50D7903B919A46219F51383EEA40C1B9`다.
+- (2026-07-21 갱신) 전역 규칙에서 수동 Operation Modes(§2·§3)를 전면 삭제했다. 이유: operation-router 스킬이 라우팅·구현을 자동화하므로 "Opus가 Bash로 grok 직접 호출" 등 수동 절차가 스킬과 상충했다. 남긴 것은 §1 Task Canon, §2 operation-router 최종 작업자 예외(수동 모드 참조 제거·재서술), §3 Common Git/보고다. 부수 효과로 워커 CLI가 AGENTS.md에서 "grok에 위임" 지시를 더는 발견하지 못해 V03 1차 실패(Luna가 전역 규칙 따라 grok 호출 시도)의 근본 원인이 규칙 차원에서 제거됐다. 두 파일 현재 SHA-256은 모두 `508EA6BEBF7959159CA73B0D5873761115256D3F82CECFDD28527D3ECB82D49B`. 삭제 전 백업은 `~/.claude/backups/global-rules.bak.20260721-162155/`.
 - (2026-07-21 재수리) `$OutputEncoding` 고정 방식은 BOM 누출을 막지 못하는 것이 바이트 실측으로 확인됐다. PS 5.1 파이프라인과 .NET Process 기본 stdin writer는 콘솔 CP 65001에서 자식 stdin 선두에 BOM(EF BB BF)을 삽입한다.
 - 최종 구현은 `System.Diagnostics.Process` 직접 실행이다. 주문서 파일의 원시 UTF-8 바이트(파일 BOM 제거)를 stdin에 기록하고 명시적으로 닫으며, `Console.InputEncoding`을 Start 전후 BOM 없는 UTF-8로 교체·원복하고, stdout·stderr·exit code를 각각 수집한다.
 - 한글 계약을 native 자식 프로세스에 보내 바이트를 역직렬화하는 회귀 테스트(ordinal 비교로 BOM 검출)와 마커 계약 테스트를 추가했다. 한글 경로·마커 첫 바이트·"다른 CLI에 위임하지 말고 직접 구현한다" 문구 보존을 바이트 단위로 확인했다.
