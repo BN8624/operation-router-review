@@ -139,11 +139,12 @@ Describe '2. disable-model-invocation (v2.4.0 정책 A)' {
             (Get-SkillFrontmatter -Path (Join-Path $SkillsRoot "$n\SKILL.md"))['disable-model-invocation'] | Should Be 'false'
         }
     }
-    It '실행 Skill에 실행 전 확인 게이트 계약이 있다' {
+    It '실행 Skill에 soft confirmation policy 문구가 있다(코드 강제 게이트 아님)' {
         foreach ($n in @('operation-1','operation-2','operation-3')) {
             $raw = Get-Content -LiteralPath (Join-Path $SkillsRoot "$n\SKILL.md") -Raw -Encoding UTF8
-            $raw | Should Match '실행 전 확인'
+            $raw | Should Match 'soft confirmation policy'
             $raw | Should Match '실행할까요'
+            $raw | Should Match '보안 토큰 게이트가 아니다'
         }
     }
     It 'Claude-only 전용 Skill은 disable-model-invocation=true 유지' {
@@ -334,7 +335,7 @@ Describe '17-20. fallback 규칙 (run 수준)' {
     }
 }
 
-Describe 'v2.4.0 저장소 경계 탐지 (postflight)' {
+Describe 'v2.4.0/v2.4.1 저장소 경계 탐지 + 공통 finalizer' {
     It 'Test-RepoBoundaryViolation: 스냅샷 없음/변화 없음은 위반 0' {
         @(Test-RepoBoundaryViolation -BeforeSnapshot $null).Count | Should Be 0
         $f = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
@@ -361,38 +362,6 @@ Describe 'v2.4.0 저장소 경계 탐지 (postflight)' {
         ($rec | Where-Object { $_.path -eq $missing }).hash | Should Be 'ABSENT'
         Remove-Item -LiteralPath $f -Force
     }
-    It 'Resolve-Postflight: 감시 경로 변경 시 status=repo_boundary_violation (최우선)' {
-        $repo = New-FakeRepo -WithRemote
-        $watch = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
-        Set-Content -LiteralPath $watch -Value 'original' -Encoding utf8
-        try {
-            $snap = [pscustomobject]@{
-                startHead = (Get-GitHead -Path $repo)
-                boundaryWatch = @([pscustomobject]@{ path = $watch; hash = (Get-FileHash -LiteralPath $watch -Algorithm SHA256).Hash })
-            }
-            Set-Content -LiteralPath $watch -Value 'TAMPERED-BY-WORKER' -Encoding utf8
-            $wr = [pscustomobject]@{ ExitCode = 0; Success = $true; QuotaExhausted = $false }
-            $pf = Resolve-Postflight -RepoPath $repo -StartSnapshot $snap -WorkerResult $wr -CiProbe $ciNone
-            $pf.status | Should Be 'repo_boundary_violation'
-            @($pf.boundaryViolations).Count | Should Be 1
-            $pf.ciStatus | Should Be 'not-checked'   # 보안 위반은 CI 조회하지 않는다
-        } finally { Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $watch -Force -ErrorAction SilentlyContinue }
-    }
-    It 'Resolve-Postflight: 감시 경로 불변이면 boundary로 막지 않는다' {
-        $repo = New-FakeRepo -WithRemote
-        $watch = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
-        Set-Content -LiteralPath $watch -Value 'original' -Encoding utf8
-        try {
-            $snap = [pscustomobject]@{
-                startHead = (Get-GitHead -Path $repo)
-                boundaryWatch = @([pscustomobject]@{ path = $watch; hash = (Get-FileHash -LiteralPath $watch -Algorithm SHA256).Hash })
-            }
-            $wr = [pscustomobject]@{ ExitCode = 0; Success = $true; QuotaExhausted = $false }
-            $pf = Resolve-Postflight -RepoPath $repo -StartSnapshot $snap -WorkerResult $wr -CiProbe $ciNone
-            $pf.status | Should Not Be 'repo_boundary_violation'
-            @($pf.boundaryViolations).Count | Should Be 0
-        } finally { Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $watch -Force -ErrorAction SilentlyContinue }
-    }
     It 'Get-StartSnapshot이 boundaryWatch를 포함한다' {
         $repo = New-FakeRepo
         try {
@@ -400,6 +369,119 @@ Describe 'v2.4.0 저장소 경계 탐지 (postflight)' {
             ($snap.PSObject.Properties.Name -contains 'boundaryWatch') | Should Be $true
             @($snap.boundaryWatch).Count | Should BeGreaterThan 0
         } finally { Remove-Item -Recurse -Force $repo }
+    }
+    It 'Complete-BoundaryFinalizer: null 결과/스냅샷은 그대로 반환' {
+        (Complete-BoundaryFinalizer -Result $null -BoundarySnapshot $null) | Should Be $null
+        $r = [pscustomobject]@{ status = 'completed' }
+        (Complete-BoundaryFinalizer -Result $r -BoundarySnapshot $null).status | Should Be 'completed'
+    }
+    It 'Complete-BoundaryFinalizer: 위반 없으면 스키마 불변(필드 추가 없음)' {
+        $f = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $f -Value 'x' -Encoding utf8
+        $bw = @([pscustomobject]@{ path = $f; hash = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash })
+        $r = [pscustomobject]@{ status = 'completed'; ciStatus = 'success' }
+        $out = Complete-BoundaryFinalizer -Result $r -BoundarySnapshot $bw
+        $out.status | Should Be 'completed'
+        ($out.PSObject.Properties.Name -contains 'underlyingStatus') | Should Be $false
+        ($out.PSObject.Properties.Name -contains 'boundaryViolations') | Should Be $false
+        Remove-Item -LiteralPath $f -Force
+    }
+    It 'Complete-BoundaryFinalizer: 위반 시 승격 + underlyingStatus 보존 + ciStatus not-checked + idempotent' {
+        $f = Join-Path $TestWorkRoot ("bw-" + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $f -Value 'original' -Encoding utf8
+        $bw = @([pscustomobject]@{ path = $f; hash = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash })
+        Set-Content -LiteralPath $f -Value 'TAMPERED' -Encoding utf8
+        $r = [pscustomobject]@{ status = 'worker_failed'; ciStatus = 'not-checked' }
+        $out = Complete-BoundaryFinalizer -Result $r -BoundarySnapshot $bw
+        $out.status | Should Be 'repo_boundary_violation'
+        $out.underlyingStatus | Should Be 'worker_failed'
+        @($out.boundaryViolations).Count | Should Be 1
+        $out.ciStatus | Should Be 'not-checked'
+        # idempotent: 다시 통과시켜도 underlyingStatus가 repo_boundary_violation으로 덮이지 않는다
+        $again = Complete-BoundaryFinalizer -Result $out -BoundarySnapshot $bw
+        $again.underlyingStatus | Should Be 'worker_failed'
+        Remove-Item -LiteralPath $f -Force
+    }
+
+    # --- Invoke-RunOperation 조기 반환 경로별 경계 finalizer (env seam으로 감시 경로 대체) ---
+    function New-BoundaryWatchSeam {
+        $wf = Join-Path $TestWorkRoot ("watch-" + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $wf -Value 'original' -Encoding utf8
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $wf
+        return $wf
+    }
+    It '감시 파일 변경 + worker 일반 실패 → repo_boundary_violation (underlying worker_failed)' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = New-BoundaryWatchSeam
+        try {
+            $gr = { param($r,$repo2,$prompt) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;Output='auth error 401' } }
+            $script:ciCalls = 0; $ciCount = { param($h) $script:ciCalls++; 'success' }
+            $res = Invoke-RunOperation -OperationNumber 2 -IssueNumber 40 -RepoPath $repo -IssueFetcher $issue -GrokRunner $gr -GptRunner ({ param($r,$repo2,$prompt) throw 'no gpt' }) -CiProbe $ciCount
+            $res.status | Should Be 'repo_boundary_violation'
+            $res.underlyingStatus | Should Be 'worker_failed'
+            @($res.boundaryViolations).Count | Should Be 1
+            $script:ciCalls | Should Be 0
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }
+    }
+    It '감시 파일 변경 + transient 실패 → repo_boundary_violation (underlying transient_rate_limited)' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = New-BoundaryWatchSeam
+        try {
+            $gr = { param($r,$repo2,$prompt) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;Output='rate limit exceeded' } }
+            $res = Invoke-RunOperation -OperationNumber 2 -IssueNumber 41 -RepoPath $repo -IssueFetcher $issue -GrokRunner $gr -GptRunner ({ param($r,$repo2,$prompt) throw 'no gpt' }) -CiProbe $ciNone
+            $res.status | Should Be 'repo_boundary_violation'
+            $res.underlyingStatus | Should Be 'transient_rate_limited'
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }
+    }
+    It '감시 파일 변경 + weekly 소진 후 부분 변경 → repo_boundary_violation (underlying partial_worker_changes)' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = New-BoundaryWatchSeam
+        try {
+            $gr = { param($r,$repo2,$prompt) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; Push-Location $repo2; "d" | Out-File c.txt -Encoding utf8; git add .; git commit -q -m c; Pop-Location; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$true;Output='weekly limit reached' } }
+            $res = Invoke-RunOperation -OperationNumber 2 -IssueNumber 42 -RepoPath $repo -IssueFetcher $issue -GrokRunner $gr -GptRunner ({ param($r,$repo2,$prompt) throw 'no gpt' }) -CiProbe $ciNone
+            $res.status | Should Be 'repo_boundary_violation'
+            $res.underlyingStatus | Should Be 'partial_worker_changes'
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }
+    }
+    It '감시 파일 변경 + GPT fallback 실패 → repo_boundary_violation' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = New-BoundaryWatchSeam
+        try {
+            $grWeekly = { param($r,$repo2,$prompt) [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$true;Output='weekly limit reached' } }
+            $gpFail = { param($r,$repo2,$prompt) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;Output='auth error 401' } }
+            $res = Invoke-RunOperation -OperationNumber 2 -IssueNumber 43 -RepoPath $repo -IssueFetcher $issue -GrokRunner $grWeekly -GptRunner $gpFail -CiProbe $ciNone
+            $res.status | Should Be 'repo_boundary_violation'
+            $res.underlyingStatus | Should Be 'worker_failed'
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }
+    }
+    It '감시 파일 변경 + review 실패 → repo_boundary_violation' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = New-BoundaryWatchSeam
+        try {
+            # 유효한 grok completed run 영수증을 심어 검수 자격을 만든다
+            $grOk = { param($r,$repo2,$prompt) Push-Location $repo2; "impl" | Out-File impl.txt -Encoding utf8; git add .; git commit -q -m impl; git push -q origin main; Pop-Location; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
+            (Invoke-SetCommand -Target grok -Value '10') | Out-Null
+            Invoke-RunOperation -OperationNumber 1 -IssueNumber 44 -RepoPath $repo -IssueFetcher $issue -GrokRunner $grOk -CiProbe ({ param($h) 'success' }) | Out-Null
+            $revFail = { param($repo2,$prompt,$r) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;Output='auth error 401' } }
+            $rv = Invoke-OperationReview -OperationNumber 1 -IssueNumber 44 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $revFail
+            $rv.status | Should Be 'repo_boundary_violation'
+            $rv.underlyingStatus | Should Be 'review_worker_failed'
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue; Invoke-ResetCommand | Out-Null }
+    }
+    It '감시 파일 변경 + repair 실패 → repo_boundary_violation' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = New-BoundaryWatchSeam
+        try {
+            $head = (Get-GitHead -Path $repo)
+            $findings = @([pscustomobject]@{ severity='high'; file='a.txt'; issue='x'; requiredFix='y' })
+            $repairFail = { param($r,$repo2,$prompt) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;Output='auth error 401' } }
+            $rr = Invoke-OperationRepair -OperationNumber 1 -IssueNumber 45 -RepoPath $repo -Findings $findings -OriginalWorker 'grok' -PostReviewHead $head -IssueFetcher $issue -RepairRunner $repairFail -CiProbe $ciNone
+            $rr.status | Should Be 'repo_boundary_violation'
+            $rr.underlyingStatus | Should Be 'repair_worker_failed'
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue; Invoke-ResetCommand | Out-Null }
+    }
+    It '위반 없으면 정상 상태와 스키마가 바뀌지 않는다' {
+        Invoke-ResetCommand | Out-Null; $repo = New-FakeRepo -WithRemote; $wf = New-BoundaryWatchSeam
+        try {
+            $grOk = { param($r,$repo2,$prompt) Push-Location $repo2; "d" | Out-File c.txt -Encoding utf8; git add .; git commit -q -m c; git push -q origin main; Pop-Location; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
+            $res = Invoke-RunOperation -OperationNumber 2 -IssueNumber 46 -RepoPath $repo -IssueFetcher $issue -GrokRunner $grOk -CiProbe ({ param($h) 'success' })
+            $res.status | Should Be 'completed'
+            ($res.PSObject.Properties.Name -contains 'underlyingStatus') | Should Be $false
+        } finally { $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE = $null; Remove-Item -Recurse -Force $repo; Remove-Item -LiteralPath $wf -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -1855,9 +1937,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v2.4.0을 현재 버전으로 기록한다' {
+    It '12. README는 v2.4.1을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v2\.4\.0\)'
+        $readme | Should Match '^# operation-router \(v2\.4\.1\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {
@@ -1889,6 +1971,35 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
             (Test-Path -LiteralPath $file) | Should Be $true
             (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash | Should Be $expected
         }
+    }
+
+    It '15b. v2.4.1: manifest가 모든 배포 대상 파일을 빠짐없이 포함한다(중복·누락 실패)' {
+        $manifest = Join-Path $RouterRoot 'manifest-sha256.txt'
+        $manifestPaths = @()
+        foreach($line in (Get-Content -LiteralPath $manifest -Encoding UTF8 | Where-Object { $_ -match '^[A-Fa-f0-9]{64}  (.+)$' })) {
+            $manifestPaths += (($line -split '  ',2)[1])
+        }
+        # 중복 경로 금지
+        @($manifestPaths | Group-Object | Where-Object { $_.Count -gt 1 }).Count | Should Be 0
+        # manifest 자신은 등록 대상에서 제외
+        ($manifestPaths -contains 'manifest-sha256.txt') | Should Be $false
+        # .gitattributes(EOL 변환 차단 → 바이트 재현성에 직접 영향)는 반드시 포함
+        ($manifestPaths -contains '.gitattributes') | Should Be $true
+        # 파일시스템 배포 대상 집합(런타임·백업 제외)과 manifest 경로 집합이 완전히 일치해야 한다.
+        $runtimeDirs = @('state','logs','temp')
+        $fsPaths = @()
+        foreach($f in (Get-ChildItem -LiteralPath $RouterRoot -Recurse -File)) {
+            $rel = $f.FullName.Substring($RouterRoot.Length).TrimStart('\','/') -replace '\\','/'
+            $top = ($rel -split '/',2)[0]
+            if ($runtimeDirs -contains $top) { continue }
+            if ($rel -eq 'manifest-sha256.txt') { continue }
+            if ($rel -like '*.bak' -or $rel -like '*.bak.*') { continue }
+            $fsPaths += $rel
+        }
+        # manifest에 있으나 파일시스템에 없는 경로 (등록됐지만 Git/배포에 없음)
+        @($manifestPaths | Where-Object { $fsPaths -notcontains $_ }).Count | Should Be 0
+        # 파일시스템에 있으나 manifest에 없는 배포 대상 (누락된 tracked file)
+        @($fsPaths | Where-Object { $manifestPaths -notcontains $_ }).Count | Should Be 0
     }
 
     It '16. manifest 검토 대상에 실제 secret 형태가 포함되지 않는다' {

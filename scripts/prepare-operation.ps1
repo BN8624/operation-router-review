@@ -9,6 +9,10 @@ $ErrorActionPreference = 'Stop'
 # v2.4.0 저장소 경계: 워커가 손대면 안 되는 저장소 밖 민감 경로. 명령 패턴이 아니라
 # "실제로 바뀌었는가"를 SHA-256으로 잡으므로 플래그 재배열·래퍼·동의어 우회에 강하다.
 function Get-BoundaryWatchPaths {
+    # 테스트 seam: 격리 환경에서 감시 목록을 임시 경로로 대체한다(세미콜론 구분). 실전에는 미설정.
+    if (-not [string]::IsNullOrWhiteSpace($env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)) {
+        return @($env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
     $userHome = $env:USERPROFILE
     if ([string]::IsNullOrWhiteSpace($userHome)) { $userHome = $HOME }
     return @(
@@ -51,6 +55,32 @@ function Test-RepoBoundaryViolation {
         if ($now -ne $before) { $violations += $p }
     }
     return @($violations)
+}
+
+# v2.4.1 공통 종료 finalizer: 워커/구현자를 호출한 뒤 반환되는 모든 결과가 이 함수를 통과한다.
+# 시작 시 캡처한 boundaryWatch 스냅샷과 현재 감시 파일을 비교해, 위반이 있으면 원래 status를
+# underlyingStatus로 보존하고 최종 status를 repo_boundary_violation으로 승격한다. CI는 조회하지 않는다.
+# 위반이 없으면 결과 스키마를 바꾸지 않고 그대로 반환한다(불필요한 필드 추가 없음).
+function Complete-BoundaryFinalizer {
+    param([Parameter(Mandatory)][AllowNull()]$Result, [AllowNull()]$BoundarySnapshot)
+    if ($null -eq $Result) { return $Result }
+    if ($null -eq $BoundarySnapshot) { return $Result }
+    $violations = @(Test-RepoBoundaryViolation -BeforeSnapshot $BoundarySnapshot)
+    if ($violations.Count -eq 0) { return $Result }
+    $props = $Result.PSObject.Properties.Name
+    $current = if ($props -contains 'status') { [string]$Result.status } else { $null }
+    if ($current -eq 'repo_boundary_violation') { return $Result }  # idempotent
+    Add-Member -InputObject $Result -NotePropertyName underlyingStatus -NotePropertyValue $current -Force
+    if ($props -contains 'status') { $Result.status = 'repo_boundary_violation' }
+    else { Add-Member -InputObject $Result -NotePropertyName status -NotePropertyValue 'repo_boundary_violation' -Force }
+    Add-Member -InputObject $Result -NotePropertyName boundaryViolations -NotePropertyValue @($violations) -Force
+    if ($props -contains 'ciStatus') { $Result.ciStatus = 'not-checked' }
+    else { Add-Member -InputObject $Result -NotePropertyName ciStatus -NotePropertyValue 'not-checked' -Force }
+    $rp = @('repo boundary violation: watched out-of-repo files changed')
+    if ($props -contains 'remainingProblems' -and $null -ne $Result.remainingProblems) { $rp += @($Result.remainingProblems) }
+    if ($props -contains 'remainingProblems') { $Result.remainingProblems = @($rp) }
+    else { Add-Member -InputObject $Result -NotePropertyName remainingProblems -NotePropertyValue @($rp) -Force }
+    return $Result
 }
 
 function Get-StartSnapshot {

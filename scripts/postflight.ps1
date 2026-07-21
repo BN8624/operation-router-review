@@ -120,20 +120,14 @@ function Resolve-Postflight {
     $pushComplete = $false
     if ($ab.Available) { $pushComplete = ($ab.Ahead -eq 0 -and $ab.Behind -eq 0) }
 
-    # v2.4.0 저장소 경계 위반: 시작 스냅샷 대비 감시 경로(저장소 밖 민감 파일)가 바뀌었는가.
-    # 명령 패턴 매칭(deny)을 우회해도 결과 변경은 여기서 잡힌다. 보안 신호이므로 최우선으로 보고한다.
-    $boundaryViolations = @()
-    if ($StartSnapshot.PSObject.Properties.Name -contains 'boundaryWatch') {
-        $boundaryViolations = @(Test-RepoBoundaryViolation -BeforeSnapshot $StartSnapshot.boundaryWatch)
-    }
-
-    # 상태 우선순위: boundary -> worker 실패 -> quota -> no_commit -> dirty -> push -> ci
+    # 상태 우선순위: worker 실패 -> quota -> no_commit -> dirty -> push -> ci
     # v2.3: Git·커밋·push 게이트가 전부 통과한 뒤에만 CI를 조회한다.
     # worker_failed/quota_exhausted/no_commit 등 이미 실패가 확정된 경우 CI polling(최대 60초)을 하지 않고
     # ciStatus를 'not-checked'로 남긴다 (not-requested로 위장하지 않는다).
+    # v2.4.1: 저장소 경계 위반 판정은 여기서 하지 않는다. New-FinalOutput/review·repair의 공통
+    #         Complete-BoundaryFinalizer가 모든 종료 경로에서 일괄 처리한다(조기 반환 포함).
     $status = $null
-    if ($boundaryViolations.Count -gt 0) { $status = 'repo_boundary_violation' }
-    elseif (-not $WorkerResult.Success) {
+    if (-not $WorkerResult.Success) {
         if ($WorkerResult.QuotaExhausted) { $status = 'quota_exhausted' } else { $status = 'worker_failed' }
     }
     elseif ((-not $headChanged -or $commitCount -eq 0)) {
@@ -145,11 +139,22 @@ function Resolve-Postflight {
 
     $ci = 'not-checked'
     if ($null -eq $status) {
-        $ci = Get-CiStatus -RepoPath $RepoPath -FinalHead $finalHead -CiProbe $CiProbe
-        if ($ci -eq 'pending') { $status = 'completed_ci_pending' }
-        elseif ($ci -eq 'failure') { $status = 'ci_failed' }
-        elseif ($ci -eq 'unavailable') { $status = 'completed_ci_unavailable' }  # API 오류를 completed로 합치지 않는다
-        else { $status = 'completed' }
+        # v2.4.1: git 게이트가 통과해도 저장소 경계 위반이면 CI를 조회하지 않는다(호출 0회).
+        # 최종 status를 repo_boundary_violation으로 승격하는 것은 공통 Complete-BoundaryFinalizer가 한다.
+        # 여기서는 underlying status만 'completed'로 두고 CI probe를 건너뛴다.
+        $boundaryViol = @()
+        if ($null -ne $StartSnapshot -and ($StartSnapshot.PSObject.Properties.Name -contains 'boundaryWatch')) {
+            $boundaryViol = @(Test-RepoBoundaryViolation -BeforeSnapshot $StartSnapshot.boundaryWatch)
+        }
+        if ($boundaryViol.Count -gt 0) {
+            $status = 'completed'
+        } else {
+            $ci = Get-CiStatus -RepoPath $RepoPath -FinalHead $finalHead -CiProbe $CiProbe
+            if ($ci -eq 'pending') { $status = 'completed_ci_pending' }
+            elseif ($ci -eq 'failure') { $status = 'ci_failed' }
+            elseif ($ci -eq 'unavailable') { $status = 'completed_ci_unavailable' }  # API 오류를 completed로 합치지 않는다
+            else { $status = 'completed' }
+        }
     }
 
     return [pscustomobject]@{
@@ -166,6 +171,5 @@ function Resolve-Postflight {
         pushComplete  = [bool]$pushComplete
         ciStatus      = $ci
         workerExitCode = $WorkerResult.ExitCode
-        boundaryViolations = @($boundaryViolations)
     }
 }

@@ -104,7 +104,12 @@ function New-FinalOutput {
         logPath = $LogPath
     }
     if ($Extra) { foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] } }
-    return [pscustomobject]$o
+    $obj = [pscustomobject]$o
+    # v2.4.1: 모든 종료 출력이 이 공통 경로를 지난다. 시작 스냅샷의 boundaryWatch로 경계 위반을
+    # 최종 판정한다(worker 실패·부분 변경·fallback·claude 실행 등 조기 반환 포함). 위반 없으면 무변경.
+    $bw = $null
+    if ($Snapshot -and ($Snapshot.PSObject.Properties.Name -contains 'boundaryWatch')) { $bw = $Snapshot.boundaryWatch }
+    return (Complete-BoundaryFinalizer -Result $obj -BoundarySnapshot $bw)
 }
 
 function Get-RemainingProblems {
@@ -514,6 +519,10 @@ function Invoke-OperationReview {
         [switch]$UseGptReviewReserve,
         [scriptblock]$IssueFetcher, [scriptblock]$GptReviewRunner
     )
+    # v2.4.1: 검수 워커 실행 후 경계 위반을 공통 finalizer로 판정한다. 진입 시 감시 스냅샷을 캡처하고
+    # 본문의 모든 반환을 하나의 결과로 모아 finalizer를 통과시킨다(자격 조기 반환 포함, 위반 없으면 무변경).
+    $__reviewBoundary = Get-BoundarySnapshot
+    $__reviewResult = & {
     $config = Get-Config
 
     # 0) v2.3 검수 실행 자격 강제: 작전 1이 아니면 GPT를 호출하지 않는다
@@ -682,6 +691,8 @@ $diff
     } finally {
         Remove-TempOrderFile -Path $promptPath
     }
+    }
+    return (Complete-BoundaryFinalizer -Result $__reviewResult -BoundarySnapshot $__reviewBoundary)
 }
 
 # ---------------- 작전 1: 단일 수리 (v2.2) ----------------
