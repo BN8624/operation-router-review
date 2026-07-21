@@ -29,6 +29,10 @@ Codex는 `-s workspace-write`(작업 디렉터리 밖 쓰기 차단) + `approval
 ### 6. 검수 독립성
 GPT가 구현한 작전 1 결과는 sol 자기검수를 하지 않는다(`review_not_eligible`). 유효한 grok 완료 영수증 + 같은 저장소 + HEAD 일치만 검수 자격. 검수 JSON은 fail-closed 엄격 검증(스키마 위반·PASS+findings 모순은 `review_parse_failed`, PASS 위장 없음). Opus는 구현자가 되지 않는다(자기검수 방지).
 
+## 강제 방어층이 아닌 것 — 자연어 호출 soft confirmation policy
+
+operation-1/2/3의 `disable-model-invocation: false`로 모델이 자연어 지시로 Skill을 호출할 수 있다. 이때 실행 전에 예상 워커·비용을 한 줄로 확인받는 절차는 **모델이 따르는 사용성·오작동 방지 정책(soft policy)이며, 라우터 코드가 강제하는 보안 게이트가 아니다.** 별도 확인 토큰·`-Confirmed` 인수 시스템은 두지 않는다. 슬래시 명령 직접 입력은 명시적 실행으로 간주해 확인을 생략한다. 이 정책은 위 6개 강제 방어층에 포함되지 않는다.
+
 ## Secret 보호
 
 - **마스킹**(`Protect-SecretText`): gh/sk/xai/AWS 키, `key=value` 형태, Bearer, Authorization 헤더(임의 스킴), 고엔트로피 토큰(Shannon 엔트로피). git SHA·UUID·순수 숫자는 오탐 제외.
@@ -45,4 +49,4 @@ GPT가 구현한 작전 1 결과는 sol 자기검수를 하지 않는다(`review
 
 ## 롤백
 
-버전 교체 전 전체 백업이 `~/.claude/backups/`에 타임스탬프로 쌓인다. 전역 규칙 백업은 `~/.claude/backups/global-rules.bak.<timestamp>/`. 롤백은 해당 폴더를 `~/.claude/operation-router` 및 스킬 경로로 복원하면 된다(별도 롤백 스크립트 없음 — 1인 사용).
+이 저장소는 자동 설치·업그레이드·백업·롤백 스크립트를 제공하지 않는다. 기존 작업 과정에서 **수동으로 생성된** `~/.claude/backups/` 백업이 있는 경우에만 해당 사본을 `~/.claude/operation-router` 및 스킬 경로로 복원할 수 있다. 백업이 없는 설치본은 자동 복구되지 않는다. 과거에 수동 생성된 예시(`operation-router.bak.<timestamp>`, `global-rules.bak.<timestamp>`)는 역사적 참고일 뿐, 현재 버전이 이런 백업을 자동 생성한다는 의미가 아니다.

@@ -16,19 +16,19 @@
 | V08 | 작전2 GPT Terra | gpt-5.6-terra medium | #6 | c0c9bc5 | 11/11 | success | CONDITIONAL_PASS¹ |
 | V09 | 작전2 Claude-only | claude-sonnet-5 medium | #10 | c5bc458 | 17/17 | success | PASS |
 | 4-1 | 작전2 Sonnet 검토자 재검증 | 검토 sonnet-5 ×2 / 구현 grok-4.5 medium | #7 | 5fa030b | 13/13 | success | PASS² |
-| V11 | 작전1 grok 구현 + sol 검수 PASS | grok-4.5 high / 검수 terra³ high | #13 | 58f544e | — | success | PASS |
-| V12 | 작전1 sol 검수 후 grok 수리 | repair grok-4.5 medium 1회 | #16 | (no_commit) | — | not-checked | PASS⁴ |
-| V13 | 작전1 GPT 구현 fallback | terra³ high, review_not_eligible | #14 | ad178c3 | — | success | PASS |
+| V11 | 작전1 grok 구현 + sol 검수 PASS | grok-4.5 high / 검수 terra³ high | #13 | 58f544e | — | success | PASS_PENDING_SOL_RETEST³ |
+| V12 | 작전1 sol 검수 후 grok 수리 | repair grok-4.5 medium 1회 | #16 | (no_commit) | — | not-checked | PASS_PENDING_SOL_RETEST³⁴ |
+| V13 | 작전1 GPT 구현 fallback | terra³ high, review_not_eligible | #14 | ad178c3 | — | success | PASS_PENDING_SOL_RETEST³ |
 | V14 | 작전1 Claude-only | claude-sonnet-5 medium⁵ | #15 | b50e285 | 22/22 | success | PASS |
-| V15 | 작전1 검수 예비분 off/on | off=claude_review_fallback / on=terra³ 검수 | #16 | 952d399 | — | success | PASS |
+| V15 | 작전1 검수 예비분 off/on | off=claude_review_fallback / on=terra³ 검수 | #16 | 952d399 | — | success | PASS_PENDING_SOL_RETEST³ |
 
 ¹ V07·V08: 최초 실행 시 검토자가 설계상 Sonnet 5가 아닌 Fable 5였음. 4-1에서 Sonnet 5 서브에이전트 검토자로 재검증하여 편차 해소.
 ² 4-1: 시작·종료 검토를 Claude Sonnet 5 서브에이전트가 수행(자기 보고 claude-sonnet-5), 구현은 원설계 grok-primary. Fable은 지휘·전달만.
-³ sol 역할이 `gpt-5.6-sol` 제거로 `gpt-5.6-terra`에 임시 매핑된 상태에서 검증. sol 복귀 시 재검증 필요(아래 pending).
-⁴ V12: repair가 grok/medium 1회·finding만 전달·HEAD 가드 통과·2차 검수 없음·no_commit을 `repair_postflight_failed`로 정직 반환하는 역학을 검증. 원 finding은 자동 해소 처리하지 않음.
+³ **PASS_PENDING_SOL_RETEST**: 작전 1의 sol 역할을 `gpt-5.6-terra`가 임시 수행한 상태로 검증했다. Terra 실행은 라우터·검수 파서·수리 역학을 확인한 **유효한 선행 검증**이며, 작전 1 canon의 Sol 역할 자체는 변경하지 않는다. 주 사용 계정은 Codex 한도 소진으로 Sol을 실행할 수 없었고, 별도 E2E 테스트 계정에서는 Sol이 models_cache에 노출되지 않아 doctor가 unresolved로 판정했다. 따라서 테스트 환경에서만 Sol을 Terra로 임시 매핑했다. 한도가 복구되고 Sol이 노출되는 계정에서 V11~V13·V15를 **동일 조건으로 재검증**하고, 그 통과 후에만 최종 PASS로 승격한다. V14는 Claude-only 경로라 Sol과 무관하므로 최종 PASS다.
+⁴ V12: repair가 grok/medium 1회·finding만 전달·HEAD 가드 통과·2차 검수 없음·no_commit을 `repair_postflight_failed`로 정직 반환하는 역학을 검증. 원 finding은 자동 해소 처리하지 않음. 검수 영수증이 Terra 검수에서 나왔으므로 Sol 재검증 대기에 포함한다.
 ⁵ V14 실행 시점 effort는 medium. v2.4.0에서 정책 B로 high로 상향(정적 테스트로 검증, 유료 재검증은 후순위).
 
-## 정적/격리 검증 (테스트 184/184 PASS)
+## 정적/격리 검증 (테스트 193/193 PASS, v2.4.1)
 
 | 영역 | 검증 |
 |------|------|
@@ -46,6 +46,6 @@
 
 | 항목 | 상태 |
 |------|------|
-| sol 실제 모델 재검증 | `gpt-5.6-sol` 복귀 시 config 매핑 원복 후 V11~V13·V15 재실행 |
+| sol 실제 모델 재검증 | 한도 복구 + Sol 노출 계정에서 config 매핑 원복 후 V11~V13·V15 재실행 → 통과 시 최종 PASS 승격 |
 | 작전 1 Claude-only high 유료 재검증 | 정책 B는 정적 검증 완료. effort high 실전 재확인은 선택 |
-| 외부 정적 검토 (v2.4.0) | 검토 저장소 `BN8624/operation-router-review` 링크로 1회 예정 |
+| 외부 정적 검토 | v2.4.0 검토에서 6개 정합·보안 지적 → v2.4.1에서 수리. v2.4.1 재검토 예정 |

@@ -11,11 +11,11 @@ effort: low
 
 이 Skill은 Claude Haiku 4.5 / low 세션에서만 실행된다 (frontmatter 고정).
 
-## 자동 호출 시 실행 전 확인 (v2.4.0)
-`disable-model-invocation: false`라서 사용자가 자연어로 지시하면 모델이 이 Skill을 호출할 수 있다. 단, `run`은 유료 워커 호출과 origin/main 직접 push로 이어지므로, 사용자가 `/operation-3 ...` 슬래시 명령을 직접 입력한 경우가 아니면 실행 전에 반드시 확인을 받는다.
+## 자연어 자동 호출 시 soft confirmation policy (v2.4.0)
+`disable-model-invocation: false`라서 사용자가 자연어로 지시하면 모델이 이 Skill을 호출할 수 있다. `run`은 유료 워커 호출과 origin/main 직접 push로 이어지므로, 자연어 자동 호출일 때는 아래 soft confirmation policy를 따른다.
 1. 먼저 `status`(읽기 전용, 무료)로 예상 워커를 파악한다.
 2. "작전 3 <kind>, 이슈 #<번호>, 예상 워커 <grok/gpt/claude·비용 발생 여부>. 실행할까요?"를 제시하고 사용자 확인(예)을 받은 뒤에만 `run`을 실행한다.
-슬래시 명령 직접 입력은 이미 명시적 실행이므로 이 확인을 생략한다.
+사용자가 `/operation-3 ...` 슬래시 명령을 직접 입력한 경우는 명시적 실행이므로 이 확인을 생략한다. 이 확인은 모델이 따르는 사용성·오작동 방지용 soft policy이며, 라우터 코드가 강제하는 보안 토큰 게이트가 아니다(별도 확인 토큰 시스템을 두지 않는다).
 이슈번호는 slash-command 첫 위치 인수 `$0`에서 읽는다. 실행기는 `operation-router.cmd`만 사용한다.
 PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 사용한다.
 
