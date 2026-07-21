@@ -21,17 +21,24 @@ verified:
   V05: PASS                # 이슈#8. grok exhausted+gpt80, op3 mechanical → claude_execute(haiku). Haiku 4.5 직접 한 줄 수정, 커밋 061aa85, push·CI success, 외부 CLI 0
   V06: PASS                # 이슈#9. op3 logic → Haiku claude_only_required 비구현 정지(파일 0) → Sonnet 전용 흐름 -ClaudeOnly resume → claude_execute, 파일 2, 테스트 15/15, 커밋 deba2a0, CI success, 재귀 0
   V09: PASS                # 이슈#10. op2 → claude_only_required → 같은 Sonnet 세션 -ClaudeOnly 1회 → claude_execute, 파일 3, 테스트 17/17, 커밋 c5bc458, CI success, 외부 CLI 0, 재귀 0
+  V10: PASS                # 이슈#12 단계형 fixture(테스트 저장소). 1단계 커밋 7cd33f4(의도적 테스트 미포함) → Sonnet 종료 검토 REPAIR_REQUIRED + 구조화 finding 2건, 자동 수리 0, 2차 작업자 0, 커밋 보존, 이슈 비개입. (2단계는 이슈#14=V13에서 완결)
+  V11_terra: PASS          # 이슈#13. Opus 지휘(agentId a756342…) → Grok 4.5 high 구현(58f544e) → sol역할(terra) high 검수 verdict PASS 정상 파싱 → Opus 최종 PASS. ※실전 결함 발굴·수리: 검수가 codex JSONL(agent_message.text 내 verdict)이라 review_parse_failed → 파서 수리+회귀 테스트(21), 170/170 PASS
+  V12_terra: PASS          # 이슈#16 영수증. repair grok/medium 1회, finding만 전달(로그 실증), postReviewHead 가드 통과, 2차 sol 검수 없음, no_commit→repair_postflight_failed 정직 반환, 자동 해소 간주 없음
+  V13_terra: PASS          # 이슈#14. grok exhausted → terra high 직접 구현(ad178c3) → review_not_eligible(worker_not_grok)로 자기검수 차단(GPT 미호출) → Opus 직접 종료 검토 PASS
+  V14: PASS                # 이슈#15. grok exhausted+gpt reserved → claude_only_required → /operation-1-claude Sonnet 구현(b50e285, 22/22) → Opus 종료 검토 PASS, 외부 CLI 0
+  V15: PASS                # 이슈#16. off: claude_review_fallback(GPT 미호출) / on(-UseGptReviewReserve): terra 검수 실호출 verdict 정상 파싱(REPAIR_REQUIRED+finding 1)
+solRetestPending:
+  note: "V11~V13·V15의 sol 역할은 사용자 지시로 gpt-5.6-terra 임시 매핑(config gpt.workers.sol). sol 복귀 시 매핑 원복 후 실제 sol로 재검증"
 notApproved:
   operationRouter_v2_3_5_full: true
 blocked:
   V11_V12_V13_V15_sol: "gpt-5.6-sol이 2026-07-21 models_cache에서 제거됨 — 사용자 결정 필요"
 usageState:
   note: "V03/V04/V08 성공 후 주문서에 따라 /operation reset 실행"
-next:   # 2026-07-21 사용자 확정 순서 (①정적4건 ②Sonnet재검증 ③V05/V06/V09 완료)
-  - V10_repair_required_fixture              # 테스트 저장소에서 통제된 결함 fixture로 검증
-  - security_and_install_verification
-  - v2_4_0_final_docs
-  - operation1_V11_V15_hold                  # sol 제거. 임의 모델 치환·canon 변경 금지
+next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. 남은 것:
+  - security_and_install_verification        # deny 프로브, 저장소 경계, secret, 신규 설치/업그레이드/롤백
+  - v2_4_0_final_docs                        # CHANGELOG, VERIFICATION_MATRIX, SECURITY, INSTALL, ROLLBACK
+  - sol_retest_when_available                # sol 복귀 시 config 매핑 원복 + V11~V13·V15 재검증
 ```
 
 ### 2026-07-21 정적 결함 4건 수리 (외부 검토 지적)
