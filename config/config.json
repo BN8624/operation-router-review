@@ -74,7 +74,7 @@
     "dispatcher": { "model": "claude-haiku-4-5-20251001", "effort": "low" }
   },
   "claudeOnly": {
-    "1": { "model": "claude-sonnet-5", "effort": "medium" },
+    "1": { "model": "claude-sonnet-5", "effort": "high", "_effort_note": "v2.4.0: medium→high. Operation 1 is high-risk and every other op1 slot (grok/sol/opus) is high; this was the sole outlier. Implementer↔reviewer separation kept (Opus end-reviews)." },
     "2": { "model": "claude-sonnet-5", "effort": "medium" },
     "3": {
       "logic": { "model": "claude-sonnet-5", "effort": "low" },

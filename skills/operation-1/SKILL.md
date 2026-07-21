@@ -2,7 +2,7 @@
 name: operation-1
 description: 작전 1 — 고위험 전체 지휘·검수. 현재 Opus 세션이 시작 위험 검토 → 작업자 구현 → GPT Sol 독립 검수 → 수리 1회 → 종료 판정을 수행한다. GitHub 이슈 번호를 인수로 받는다.
 argument-hint: <이슈번호> [--use-gpt-review-reserve] [--finish-current] [--claude-only]
-disable-model-invocation: true
+disable-model-invocation: false
 model: claude-opus-4-8
 effort: high
 ---
@@ -12,6 +12,12 @@ effort: high
 이 Skill은 Claude Opus 4.8 / high 세션에서만 실행된다 (frontmatter로 고정). 동적 모델 전환은 하지 않는다.
 이슈번호는 slash-command 첫 위치 인수 `$0`에서 읽는다. 실행기는 `operation-router.cmd`만 사용한다.
 PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 사용한다.
+
+## 자동 호출 시 실행 전 확인 (v2.4.0)
+`disable-model-invocation: false`라서 사용자가 자연어로 지시하면 모델이 이 Skill을 호출할 수 있다. 작전 1은 고위험이고 `run`은 유료 워커 호출과 origin/main 직접 push로 이어지므로, 사용자가 `/operation-1 ...` 슬래시 명령을 직접 입력한 경우가 아니면 실행 전에 반드시 확인을 받는다.
+1. 먼저 `status`(읽기 전용, 무료)로 예상 워커를 파악한다.
+2. "작전 1, 이슈 #<번호>, 예상 워커 <grok/gpt/claude·비용 발생 여부>. 실행할까요?"를 제시하고 사용자 확인(예)을 받은 뒤에만 `run`을 실행한다.
+슬래시 명령 직접 입력은 이미 명시적 실행이므로 이 확인을 생략한다.
 
 ## 실제 실행 순서 (이 순서대로만 진행한다)
 

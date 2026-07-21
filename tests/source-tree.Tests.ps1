@@ -130,11 +130,43 @@ Describe '1. 네 개 Skill 등록 구조' {
     }
 }
 
-Describe '2. disable-model-invocation: true' {
-    It '네 Skill 모두 disable-model-invocation=true' {
-        foreach ($n in @('operation','operation-1','operation-2','operation-3')) {
+Describe '2. disable-model-invocation (v2.4.0 정책 A)' {
+    It '디스패처 operation은 disable-model-invocation=true 유지' {
+        (Get-SkillFrontmatter -Path (Join-Path $SkillsRoot "operation\SKILL.md"))['disable-model-invocation'] | Should Be 'true'
+    }
+    It '실행 Skill operation-1/2/3은 자연어 호출 허용(false)' {
+        foreach ($n in @('operation-1','operation-2','operation-3')) {
+            (Get-SkillFrontmatter -Path (Join-Path $SkillsRoot "$n\SKILL.md"))['disable-model-invocation'] | Should Be 'false'
+        }
+    }
+    It '실행 Skill에 실행 전 확인 게이트 계약이 있다' {
+        foreach ($n in @('operation-1','operation-2','operation-3')) {
+            $raw = Get-Content -LiteralPath (Join-Path $SkillsRoot "$n\SKILL.md") -Raw -Encoding UTF8
+            $raw | Should Match '실행 전 확인'
+            $raw | Should Match '실행할까요'
+        }
+    }
+    It 'Claude-only 전용 Skill은 disable-model-invocation=true 유지' {
+        foreach ($n in @('operation-1-claude','operation-3-claude')) {
             (Get-SkillFrontmatter -Path (Join-Path $SkillsRoot "$n\SKILL.md"))['disable-model-invocation'] | Should Be 'true'
         }
+    }
+}
+
+Describe 'v2.4.0 정책 B·C. 작전1 claude-only high + 고위험 경고' {
+    It 'B: config claudeOnly.1.effort = high (유일 outlier 제거)' {
+        (Get-Config).claudeOnly.'1'.effort | Should Be 'high'
+    }
+    It 'C: 작전1 claude_only_required는 고위험 경고를 포함한다' {
+        $r = Resolve-OperationRoute -OperationNumber 1 -GrokState (GS 'exhausted' 100) -GptState (GS 'reserved' 20) -Config $cfg
+        $r.status | Should Be 'claude_only_required'
+        ($r.PSObject.Properties.Name -contains 'highRiskWarning') | Should Be $true
+        $r.highRiskWarning | Should Match 'high-risk'
+    }
+    It 'C: 작전2 claude_only_required에는 고위험 경고가 없다' {
+        $r = Resolve-OperationRoute -OperationNumber 2 -GrokState (GS 'exhausted' 100) -GptState (GS 'reserved' 20) -Config $cfg
+        $r.status | Should Be 'claude_only_required'
+        ($r.PSObject.Properties.Name -contains 'highRiskWarning') | Should Be $false
     }
 }
 

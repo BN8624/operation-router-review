@@ -103,10 +103,16 @@ function New-ClaudeOnlyRoute {
         }
     }
     $c = $Config.claudeOnly.$opKey
-    return [pscustomobject]@{
+    $result = [pscustomobject]@{
         status = 'claude_only_required'; operation = $OperationNumber; kind = $Kind; worker = 'claude'
         requiredModel = $c.model; requiredEffort = $c.effort; reason = $Reason
     }
+    # v2.4.0-C: 작전 1을 외부 구현·독립 검수 파이프라인 없이 Claude 단일 모델로 진행하는 고위험 상황을
+    # 사용자에게 알린다. 차단하지 않고 판단 정보만 제공한다(effort는 이미 high).
+    if ($OperationNumber -eq 1) {
+        Add-Member -InputObject $result -NotePropertyName highRiskWarning -NotePropertyValue 'Operation 1 is high-risk and both Grok and GPT are unavailable, so there is no external implement + independent-review pipeline — only single-model Claude implementation with Opus end-review. For genuinely dangerous work (schema/save migration, core-engine surgery, data-loss risk), consider waiting for quota reset instead of proceeding via /operation-1-claude.'
+    }
+    return $result
 }
 
 function Resolve-OperationRoute {
