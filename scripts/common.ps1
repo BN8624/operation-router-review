@@ -31,7 +31,20 @@ function Initialize-RuntimeDirs {
 function Read-JsonFile {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { throw "JSON file not found: $Path" }
-    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    # 실행 세대 write와의 순간적 파일 잠금 경합(IOException) 대비: 최대 5회, 100ms 간격 재시도.
+    $raw = $null
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+            $lastError = $null
+            break
+        } catch [System.IO.IOException] {
+            $lastError = $_
+            if ($attempt -lt 5) { Start-Sleep -Milliseconds 100 }
+        }
+    }
+    if ($null -ne $lastError) { throw $lastError }
     if ([string]::IsNullOrWhiteSpace($raw)) { throw "JSON file is empty: $Path" }
     return $raw | ConvertFrom-Json
 }
