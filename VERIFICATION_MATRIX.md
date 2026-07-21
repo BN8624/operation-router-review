@@ -28,7 +28,7 @@
 ⁴ V12: repair가 grok/medium 1회·finding만 전달·HEAD 가드 통과·2차 검수 없음·no_commit을 `repair_postflight_failed`로 정직 반환하는 역학을 검증. 원 finding은 자동 해소 처리하지 않음. 검수 영수증이 Terra 검수에서 나왔으므로 Sol 재검증 대기에 포함한다.
 ⁵ V14 실행 시점 effort는 medium. v2.4.0에서 정책 B로 high로 상향(정적 테스트로 검증, 유료 재검증은 후순위).
 
-## 정적/격리 검증 (테스트 193/193 PASS, v2.4.1)
+## 정적/격리 검증 (테스트 195/195 PASS, v2.4.2)
 
 | 영역 | 검증 |
 |------|------|
@@ -38,7 +38,7 @@
 | 워커 오류 | stopReason 분류(Cancelled/MaxTurns/protocol), exit 0≠성공, usage 불변 |
 | 영수증 | 저장소 네임스페이스, review/repair 자격 강제, HEAD mismatch, repository mismatch |
 | 보안 | secret 마스킹(+오탐 제외), 저장소 경계 탐지, deny 목록, 임시파일 finally 삭제 |
-| 정책 A/B/C | disable-model-invocation, 실행 전 확인 게이트, claudeOnly.1 high, highRiskWarning |
+| 정책 A/B/C | disable-model-invocation, 자연어 호출 soft confirmation policy(코드 강제 게이트 아님), claudeOnly.1 high, highRiskWarning |
 | 격리 | 로그 runtime/test 분리, usage-state 임시 격리, 삭제 경로 검증 |
 | 재현성 | manifest-sha256 전수 일치, Skill 소스=설치본, secret 미포함 |
 

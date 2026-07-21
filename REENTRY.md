@@ -43,8 +43,9 @@ next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. ⑤ 일부 착수:
   - v2_4_0_policy_ABC_done                    # ⑤.5 완료(2026-07-21): A(operation-1/2/3 disable-model-invocation=false+실행 전 확인게이트, 디스패처·claude변형은 true 유지), B(claudeOnly.1.effort medium→high, operation-1-claude frontmatter도 high), C(작전1 claude_only_required에 highRiskWarning 필드). 184/184. 검토 저장소 6b48665. 주의: SKILL.md는 설치본(~/.claude/skills)과 소스(~/.claude/operation-router/skills) 양쪽 동기화 필수(테스트·manifest는 소스 사용)
   - reverify_policy_ABC_optional             # A/B/C는 정적 테스트로 검증됨. 실전 재검증은 선택: 자연어 호출은 이 세션에서 이미 operation-1/2/3 Skill 도구 노출 확인됨. 작전1 claude-only high는 유료라 후순위(V14는 medium으로 이미 PASS, effort만 상향)
   - v2_4_0_docs_done                         # ⑥ 완료: 버전 통일, CHANGELOG/VERIFICATION_MATRIX/SECURITY 작성
-  - v2_4_1_review_followup_done              # 완료(2026-07-21): 외부 검토 6개 지적 수리 — 경계 finalizer 전 종료경로 통합(underlyingStatus 보존), VERIFICATION V11/12/13/15=PASS_PENDING_SOL_RETEST, Sol 계정별 원인 정정, manifest 완전성(.gitattributes+파일시스템 대조), soft confirmation policy 표현, 백업 자동생성 표현 제거. 193/193
-  - external_review_v2_4_1                    # 남음: 검토 저장소 링크(태그 v2.4.1)로 외부 재검토 1회
+  - v2_4_1_review_followup_done              # 완료: 외부 검토 6개 지적 수리(finalizer 통합 등). 193/193
+  - v2_4_2_receipt_ordering_done             # 완료(2026-07-21): v2.4.1 재검토 REPAIR_REQUIRED 수리 — HIGH run 영수증 경계 승격(Save-RunReceipt -StatusOverride, 경계위반 run→review_not_eligible+GPT 0회), HIGH review 영수증 미저장(검수중 감시변경 시 REPAIR_REQUIRED 영수증 저장 안 함→repair 자격 차단), MEDIUM Invoke-PostflightCommand repository_receipt_mismatch도 finalizer 통과, LOW 문서(VERIFICATION 정책행 soft policy·README 머리말). 195/195. 검토저장소 태그 v2.4.2
+  - external_review_v2_4_2                    # 남음: 검토 저장소 링크(태그 v2.4.2)로 외부 재검토 1회
   - sol_retest_when_available                # sol 복귀(한도 복구+노출) 시 config 매핑 원복 + V11~V13·V15 재검증 → 최종 PASS 승격
 optional_considered_not_scheduled:          # 사용자 논의됨, 미확정 — 별도 지시 전까지 손대지 않음
   - provider_effort_consistency             # 3-logic effort가 grok=low/gpt=medium/sonnet=low로 공급자마다 다름(작업 난이도 무관). 통일 여부는 사용자 결정 대기

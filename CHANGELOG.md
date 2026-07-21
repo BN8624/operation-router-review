@@ -2,6 +2,15 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
+## v2.4.2 (2026-07-21)
+
+v2.4.1 외부 재검토에서 발견된 **영수증 저장 순서 결함**을 수리(REPAIR_REQUIRED → 해소). finalizer가 최종 출력만 고치고 영수증은 그 전에 저장돼, 보안 위반 run/review가 내부적으로 성공 영수증으로 남던 문제. v2.4.1 태그는 이동하지 않는다.
+
+- **HIGH — run 영수증 경계 승격**: 작전 1 run 영수증을 저장하기 전에 경계 위반을 확정한다. 위반이면 `Save-RunReceipt`에 `-StatusOverride repo_boundary_violation`을 넘겨 영수증 status도 승격한다. 이전에는 `completed`로 저장돼 review 자격 검사를 통과했다. 이제 경계 위반 run은 `review_not_eligible`로 거부되고 GPT 검수가 호출되지 않는다.
+- **HIGH — review 영수증 미저장**: 검수 실행 중 감시 파일이 변경되면 `REPAIR_REQUIRED` review 영수증을 저장하지 않는다(`Test-RepoBoundaryViolation`로 저장 직전 확인). 경계 위반 review 영수증으로 repair가 실행되는 경로를 원천 차단한다.
+- **MEDIUM — Claude-only postflight 조기 반환**: `Invoke-PostflightCommand`의 `repository_receipt_mismatch` 반환도 pending 스냅샷의 boundaryWatch로 finalizer를 통과시킨다.
+- **LOW — 문서 표현**: VERIFICATION_MATRIX 정책 행의 "실행 전 확인 게이트"를 "soft confirmation policy(코드 강제 게이트 아님)"로 정정. README 머리말의 v2.4.0 "진행 중"·"GPT Plan B 승인 전" 잔여 표현을 현재 상태로 갱신.
+
 ## v2.4.1 (2026-07-21)
 
 외부 정적 검토(v2.4.0 대상)에서 지적된 정합성·보안 결함을 좁게 수리. v2.4.0 태그는 이동하지 않고 이전 릴리스로 보존한다.
