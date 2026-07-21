@@ -20,7 +20,7 @@
         "Edit",
         "Bash(*)"
       ],
-      "_deny_note": "v2.4.0: first-line blocklist only. Pattern matching is brittle (flag reordering, wrappers, synonyms bypass it) and covers the Grok worker only. The uranium-backed guard is postflight repo-boundary detection (Test-RepoBoundaryViolation), which flags any change to watched out-of-repo sensitive files regardless of the command used.",
+      "_deny_note": "First-line blocklist only. Pattern matching is brittle and covers the Grok worker only. Test-RepoBoundaryViolation is a post-execution integrity check for selected critical files; it is not an OS sandbox and does not detect unwatched access, reads, creation, or exfiltration.",
       "deny": [
         "Bash(git reset --hard*)",
         "Bash(git reset --merge*)",

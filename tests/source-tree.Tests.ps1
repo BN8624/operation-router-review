@@ -2264,6 +2264,67 @@ Describe 'v2.4.5-3. execution artifact sanitization과 retention' {
     }
 }
 
+Describe 'v2.4.5-4. watched critical tree 사후 무결성 검사' {
+    It 'scripts tree의 수정·삭제·추가를 모두 결정론적으로 탐지한다' {
+        $tree=Join-Path $TestWorkRoot ('critical-tree-'+[guid]::NewGuid().ToString('N'))
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $tree 'scripts') -Force|Out-Null
+            Set-Content -LiteralPath (Join-Path $tree 'scripts\run-operation.ps1') -Value 'run' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $tree 'scripts\worker-host.ps1') -Value 'host' -Encoding utf8
+            $spec=[pscustomobject]@{kind='tree';root=$tree;patterns=@('^scripts/.+\.ps1$')}
+            $snap=Get-BoundarySnapshot -Specifications @($spec)
+            Set-Content -LiteralPath (Join-Path $tree 'scripts\run-operation.ps1') -Value 'changed' -Encoding utf8
+            Remove-Item -LiteralPath (Join-Path $tree 'scripts\worker-host.ps1') -Force
+            Set-Content -LiteralPath (Join-Path $tree 'scripts\new-helper.ps1') -Value 'new' -Encoding utf8
+            $viol=@(Test-RepoBoundaryViolation -BeforeSnapshot $snap)
+            $viol.Count|Should Be 3
+            $viol[0]|Should Match 'new-helper\.ps1$';$viol[1]|Should Match 'run-operation\.ps1$';$viol[2]|Should Match 'worker-host\.ps1$'
+        } finally {if(Test-Path -LiteralPath $tree){Remove-Item -LiteralPath $tree -Recurse -Force}}
+    }
+
+    It 'config와 operation Skill 변경은 탐지하지만 state·logs·executions 변경은 false positive가 아니다' {
+        $tree=Join-Path $TestWorkRoot ('critical-static-'+[guid]::NewGuid().ToString('N'))
+        try {
+            foreach($d in @('config','skills\operation-1','state','logs','executions')){New-Item -ItemType Directory -Path (Join-Path $tree $d) -Force|Out-Null}
+            Set-Content -LiteralPath (Join-Path $tree 'config\config.json') -Value '{}' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $tree 'skills\operation-1\SKILL.md') -Value 'skill' -Encoding utf8
+            $spec=[pscustomobject]@{kind='tree';root=$tree;patterns=@('^config/.+\.json$','^skills/[^/]+/SKILL\.md$','^scripts/.+\.ps1$','^operation-router\.cmd$')}
+            $snap=Get-BoundarySnapshot -Specifications @($spec)
+            Set-Content -LiteralPath (Join-Path $tree 'config\config.json') -Value '{"x":1}' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $tree 'skills\operation-1\SKILL.md') -Value 'changed' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $tree 'state\usage-state.json') -Value '{"ok":true}' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $tree 'logs\runtime.log') -Value 'log' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $tree 'executions\result.json') -Value '{}' -Encoding utf8
+            $viol=@(Test-RepoBoundaryViolation -BeforeSnapshot $snap)
+            $viol.Count|Should Be 2
+            ($viol -join "`n")|Should Match 'config\.json';($viol -join "`n")|Should Match 'SKILL\.md'
+            ($viol -join "`n")|Should Not Match 'usage-state|runtime\.log|executions'
+        } finally {if(Test-Path -LiteralPath $tree){Remove-Item -LiteralPath $tree -Recurse -Force}}
+    }
+
+    It 'critical tree violation은 CI를 조회하지 않고 성공 run/review/repair receipt를 만들지 않는다' {
+        Invoke-ResetCommand|Out-Null;$repo=New-FakeRepo -WithRemote;$tree=Join-Path $TestWorkRoot ('critical-flow-'+[guid]::NewGuid().ToString('N'));$savedRuntime=$Script:RuntimeRoot
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $tree 'scripts') -Force|Out-Null
+            New-Item -ItemType Directory -Path (Join-Path $tree 'config') -Force|Out-Null
+            New-Item -ItemType Directory -Path (Join-Path $tree 'skills\operation-1') -Force|Out-Null
+            Set-Content -LiteralPath (Join-Path $tree 'operation-router.cmd') -Value '@echo off' -Encoding ascii
+            Set-Content -LiteralPath (Join-Path $tree 'config\config.json') -Value '{}' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $tree 'scripts\run-operation.ps1') -Value 'original' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $tree 'skills\operation-1\SKILL.md') -Value 'skill' -Encoding utf8
+            $Script:RuntimeRoot=$tree;$script:v245CiCalls=0
+            $runner={param($r,$p,$o)Set-Content -LiteralPath (Join-Path $tree 'scripts\run-operation.ps1') -Value 'tampered' -Encoding utf8;Push-Location $p;'x'|Out-File x.txt -Encoding utf8;git add .;git commit -q -m x;git push -q origin main;Pop-Location;[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;ErrorClass='none';Output='ok'}}
+            $res=Invoke-RunOperation -OperationNumber 1 -IssueNumber 423 -RepoPath $repo -IssueFetcher $issue -GrokRunner $runner -CiProbe ({param($p)$script:v245CiCalls++;'success'})
+            $res.status|Should Be 'repo_boundary_violation';$script:v245CiCalls|Should Be 0
+            (Get-RunReceipt -Operation 1 -IssueNumber 423 -RepoPath $repo).status|Should Be 'repo_boundary_violation'
+            $script:v245ReviewCalls=0;$review=Invoke-OperationReview -OperationNumber 1 -IssueNumber 423 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner ({param($p,$o,$r)$script:v245ReviewCalls++;throw 'must not run'})
+            $review.status|Should Be 'review_not_eligible';$script:v245ReviewCalls|Should Be 0
+            (Test-Path -LiteralPath (Get-ReviewReceiptPath -Operation 1 -IssueNumber 423 -RepoPath $repo))|Should Be $false
+            (Invoke-RepairCommand -OperationNumber 1 -IssueNumber 423 -RepoPath $repo).status|Should Be 'repair_receipt_missing'
+        } finally {$Script:RuntimeRoot=$savedRuntime;Remove-Item -LiteralPath $repo -Recurse -Force;if(Test-Path -LiteralPath $tree){Remove-Item -LiteralPath $tree -Recurse -Force};Invoke-ResetCommand|Out-Null}
+    }
+}
+
 Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
     It '1. mock 로그는 현재 test-run 디렉터리에만 생성된다' {
         $path = Write-RouterLog -Name 'v234-mock-only' -Content 'mock'

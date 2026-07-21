@@ -105,8 +105,7 @@ function New-FinalOutput {
     }
     if ($Extra) { foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] } }
     $obj = [pscustomobject]$o
-    # v2.4.1: 모든 종료 출력이 이 공통 경로를 지난다. 시작 스냅샷의 boundaryWatch로 경계 위반을
-    # 최종 판정한다(worker 실패·부분 변경·fallback·claude 실행 등 조기 반환 포함). 위반 없으면 무변경.
+    # 선택한 critical file의 사후 무결성 변화를 모든 종료 경로에서 확인한다. OS sandbox가 아니다.
     $bw = $null
     if ($Snapshot -and ($Snapshot.PSObject.Properties.Name -contains 'boundaryWatch')) { $bw = $Snapshot.boundaryWatch }
     return (Complete-BoundaryFinalizer -Result $obj -BoundarySnapshot $bw)
@@ -424,7 +423,7 @@ function Invoke-RunOperation {
 
         # postflight
         $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -DeclaredNoCodeChange:$false -CiProbe $CiProbe
-        # v2.4.2: 영수증을 저장하기 전에 경계 위반을 먼저 확정한다. 위반이면 영수증 status도
+        # 영수증을 저장하기 전에 watched critical-file 위반을 확정한다. 위반이면 영수증 status도
         # repo_boundary_violation으로 저장해, 보안 위반 run이 completed 영수증으로 남아 review 자격을
         #통과하는 결함을 막는다(finalizer는 출력만 고쳤음).
         $runBoundaryViol = @()
@@ -754,7 +753,7 @@ function Invoke-OperationReview {
         [switch]$UseGptReviewReserve,
         [scriptblock]$IssueFetcher, [scriptblock]$GptReviewRunner
     )
-    # v2.4.1: 검수 워커 실행 후 경계 위반을 공통 finalizer로 판정한다. 진입 시 감시 스냅샷을 캡처하고
+    # 검수 워커 실행 후 watched critical-file 변화를 공통 finalizer로 판정한다. 진입 시 스냅샷을 캡처하고
     # 본문의 모든 반환을 하나의 결과로 모아 finalizer를 통과시킨다(자격 조기 반환 포함, 위반 없으면 무변경).
     $__reviewBoundary = Get-BoundarySnapshot
     $__reviewResult = & {

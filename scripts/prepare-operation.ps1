@@ -6,46 +6,94 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
-# v2.4.0 저장소 경계: 워커가 손대면 안 되는 저장소 밖 민감 경로. 명령 패턴이 아니라
-# "실제로 바뀌었는가"를 SHA-256으로 잡으므로 플래그 재배열·래퍼·동의어 우회에 강하다.
-function Get-BoundaryWatchPaths {
-    # 테스트 seam: 격리 환경에서 감시 목록을 임시 경로로 대체한다(세미콜론 구분). 실전에는 미설정.
+# v2.4.5 watched critical-file 사후 무결성 검사. 선택한 정적 파일의 실행 전후 변경만 탐지하며
+# OS sandbox가 아니고 비감시 파일 접근·읽기·생성·전송을 차단하지 않는다.
+function Get-BoundaryWatchSpecifications {
     if (-not [string]::IsNullOrWhiteSpace($env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)) {
-        return @($env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        return @($env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { [pscustomobject]@{ kind='file'; path=[System.IO.Path]::GetFullPath($_) } })
     }
     $userHome = $env:USERPROFILE
     if ([string]::IsNullOrWhiteSpace($userHome)) { $userHome = $HOME }
     return @(
-        (Join-Path $userHome '.gitconfig'),
-        (Join-Path $userHome '.claude\CLAUDE.md'),
-        (Join-Path $userHome '.codex\AGENTS.md'),
-        (Join-Path $userHome '.claude\operation-router\config\config.json'),
-        (Join-Path $userHome '.claude\operation-router\scripts\common.ps1')
+        [pscustomobject]@{ kind='file'; path=(Join-Path $userHome '.gitconfig') },
+        [pscustomobject]@{ kind='file'; path=(Join-Path $userHome '.claude\CLAUDE.md') },
+        [pscustomobject]@{ kind='file'; path=(Join-Path $userHome '.codex\AGENTS.md') },
+        [pscustomobject]@{ kind='tree'; root=$Script:RuntimeRoot; patterns=@(
+            '^operation-router\.cmd$','^config/.+\.json$','^scripts/.+\.ps1$','^skills/[^/]+/SKILL\.md$') },
+        [pscustomobject]@{ kind='tree'; root=(Join-Path $userHome '.claude\skills'); patterns=@('^operation[^/]*/SKILL\.md$') }
     )
 }
 
-# 경계 스냅샷: 감시 경로별 SHA-256(없으면 ABSENT)을 JSON 안전한 레코드 배열로 반환한다.
-function Get-BoundarySnapshot {
-    param([string[]]$Paths)
-    if ($null -eq $Paths) { $Paths = Get-BoundaryWatchPaths }
+function Get-BoundaryWatchPaths {
+    return @(Get-BoundaryWatchSpecifications | ForEach-Object { if ($_.kind -eq 'file') { $_.path } else { $_.root } })
+}
+
+function Get-CriticalTreeFiles {
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string[]]$Patterns)
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\','/')
+    if (-not (Test-Path -LiteralPath $rootFull -PathType Container)) { return @() }
     $records = @()
-    foreach ($p in $Paths) {
-        $h = 'ABSENT'
-        if (Test-Path -LiteralPath $p) {
-            try { $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } catch { $h = 'READ_ERROR' }
+    foreach ($file in @(Get-ChildItem -LiteralPath $rootFull -File -Recurse)) {
+        $relative = $file.FullName.Substring($rootFull.Length).TrimStart('\','/') -replace '\\','/'
+        $matched = $false
+        foreach ($pattern in $Patterns) { if ($relative -match $pattern) { $matched=$true; break } }
+        if (-not $matched) { continue }
+        $hash = 'READ_ERROR'
+        try { $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash } catch { }
+        $records += [pscustomobject]@{ relativePath=$relative; exists=$true; hash=$hash }
+    }
+    return @($records | Sort-Object relativePath)
+}
+
+# 고정 파일과 critical tree의 상대 경로·존재 여부·SHA-256을 결정론적으로 기록한다.
+function Get-BoundarySnapshot {
+    param([string[]]$Paths, [object[]]$Specifications)
+    $records = @()
+    $specs = if ($PSBoundParameters.ContainsKey('Specifications')) {
+        @($Specifications)
+    } elseif ($PSBoundParameters.ContainsKey('Paths')) {
+        @($Paths | ForEach-Object { [pscustomobject]@{ kind='file'; path=[System.IO.Path]::GetFullPath($_) } })
+    } else { @(Get-BoundaryWatchSpecifications) }
+    foreach ($spec in $specs) {
+        if ($spec.kind -eq 'tree') {
+            $root = [System.IO.Path]::GetFullPath([string]$spec.root).TrimEnd('\','/')
+            $patterns = @($spec.patterns | ForEach-Object { [string]$_ })
+            $records += [pscustomobject]@{ kind='tree'; root=$root; patterns=$patterns; files=@(Get-CriticalTreeFiles -Root $root -Patterns $patterns) }
+        } else {
+            $p = [System.IO.Path]::GetFullPath([string]$spec.path)
+            $h = 'ABSENT'; $exists = Test-Path -LiteralPath $p -PathType Leaf
+            if ($exists) {
+                try { $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } catch { $h = 'READ_ERROR' }
+            }
+            $records += [pscustomobject]@{ kind='file'; path=$p; exists=[bool]$exists; hash=$h }
         }
-        $records += [pscustomobject]@{ path = $p; hash = $h }
     }
     return @($records)
 }
 
-# 경계 위반 판정(순수 함수): 시작 스냅샷 대비 현재 해시가 달라진 경로 목록을 반환한다.
+# watched file의 추가·수정·삭제를 비교한다. 결과는 절대 경로 오름차순으로 고정한다.
 function Test-RepoBoundaryViolation {
     param([Parameter(Mandatory)][AllowNull()]$BeforeSnapshot)
     if ($null -eq $BeforeSnapshot) { return @() }
     $violations = @()
     foreach ($rec in @($BeforeSnapshot)) {
         if ($null -eq $rec) { continue }
+        if (($rec.PSObject.Properties.Name -contains 'kind') -and [string]$rec.kind -eq 'tree') {
+            $root = [System.IO.Path]::GetFullPath([string]$rec.root).TrimEnd('\','/')
+            $patterns = @($rec.patterns | ForEach-Object { [string]$_ })
+            $current = @(Get-CriticalTreeFiles -Root $root -Patterns $patterns)
+            $beforeMap=@{};$currentMap=@{}
+            foreach($item in @($rec.files)){$beforeMap[[string]$item.relativePath]=[string]$item.hash}
+            foreach($item in $current){$currentMap[[string]$item.relativePath]=[string]$item.hash}
+            $all=@((@($beforeMap.Keys)+@($currentMap.Keys))|Sort-Object -Unique)
+            foreach($relative in $all){
+                if(-not $beforeMap.ContainsKey($relative) -or -not $currentMap.ContainsKey($relative) -or $beforeMap[$relative] -ne $currentMap[$relative]){
+                    $violations += (Join-Path $root $relative.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+                }
+            }
+            continue
+        }
         $p = [string]$rec.path
         $before = [string]$rec.hash
         $now = 'ABSENT'
@@ -54,7 +102,7 @@ function Test-RepoBoundaryViolation {
         }
         if ($now -ne $before) { $violations += $p }
     }
-    return @($violations)
+    return @($violations | Sort-Object -Unique)
 }
 
 # v2.4.1 공통 종료 finalizer: 워커/구현자를 호출한 뒤 반환되는 모든 결과가 이 함수를 통과한다.
@@ -76,7 +124,7 @@ function Complete-BoundaryFinalizer {
     Add-Member -InputObject $Result -NotePropertyName boundaryViolations -NotePropertyValue @($violations) -Force
     if ($props -contains 'ciStatus') { $Result.ciStatus = 'not-checked' }
     else { Add-Member -InputObject $Result -NotePropertyName ciStatus -NotePropertyValue 'not-checked' -Force }
-    $rp = @('repo boundary violation: watched out-of-repo files changed')
+    $rp = @('watched critical-file post-execution integrity violation detected')
     if ($props -contains 'remainingProblems' -and $null -ne $Result.remainingProblems) { $rp += @($Result.remainingProblems) }
     if ($props -contains 'remainingProblems') { $Result.remainingProblems = @($rp) }
     else { Add-Member -InputObject $Result -NotePropertyName remainingProblems -NotePropertyValue @($rp) -Force }

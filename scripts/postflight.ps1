@@ -124,7 +124,7 @@ function Resolve-Postflight {
     # v2.3: Git·커밋·push 게이트가 전부 통과한 뒤에만 CI를 조회한다.
     # worker_failed/quota_exhausted/no_commit 등 이미 실패가 확정된 경우 CI polling(최대 60초)을 하지 않고
     # ciStatus를 'not-checked'로 남긴다 (not-requested로 위장하지 않는다).
-    # v2.4.1: 저장소 경계 위반 판정은 여기서 하지 않는다. New-FinalOutput/review·repair의 공통
+    # watched critical-file 위반의 최종 승격은 New-FinalOutput/review·repair의 공통
     #         Complete-BoundaryFinalizer가 모든 종료 경로에서 일괄 처리한다(조기 반환 포함).
     $status = $null
     if (-not $WorkerResult.Success) {
@@ -139,7 +139,7 @@ function Resolve-Postflight {
 
     $ci = 'not-checked'
     if ($null -eq $status) {
-        # v2.4.1: git 게이트가 통과해도 저장소 경계 위반이면 CI를 조회하지 않는다(호출 0회).
+        # git 게이트가 통과해도 watched critical-file 위반이면 CI를 조회하지 않는다(호출 0회).
         # 최종 status를 repo_boundary_violation으로 승격하는 것은 공통 Complete-BoundaryFinalizer가 한다.
         # 여기서는 underlying status만 'completed'로 두고 CI probe를 건너뛴다.
         $boundaryViol = @()
