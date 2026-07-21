@@ -2349,6 +2349,67 @@ Describe 'v2.4.5-3. execution artifact sanitization과 retention' {
     }
 }
 
+Describe 'v2.4.6-2. retention의 namespace 전체 최신 execution receipt 참조 보호' {
+    It '여러 이슈의 latest와 active generation은 count를 초과해도 모두 보호한다' {
+        $repo=New-FakeRepo
+        try {
+            $route=[pscustomobject]@{worker='gpt';model='fixture';effort='low'};$paths=@{}
+            foreach($item in @(@('A1',1,440),@('A2',2,440),@('B1',1,441),@('B2',2,441))) {
+                $rc=New-ExecutionGeneration -Operation 2 -IssueNumber $item[2] -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent $item[0]
+                $rc.remainingProblems=@();$rc=Complete-ExecutionTerminalArtifacts -Receipt $rc -RepoPath $repo -IntendedStatus 'completed';$paths[$item[0]]=$rc.artifactPath
+                Start-Sleep -Milliseconds 25
+            }
+            $active=New-ExecutionGeneration -Operation 3 -IssueNumber 442 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent 'C1'
+            $active.status='worker_running';Save-ExecutionReceipt -Receipt $active -RepoPath $repo|Out-Null
+            Invoke-ExecutionRetention -Receipt $active -RetentionCount 1|Out-Null
+            foreach($name in @('A2','B2')){(Test-Path -LiteralPath $paths[$name])|Should Be $true}
+            (Test-Path -LiteralPath $active.artifactPath)|Should Be $true;(Test-Path -LiteralPath $active.promptPath)|Should Be $true;(Test-Path -LiteralPath $active.rawStdoutPath)|Should Be $true
+            @(@($paths['A1'],$paths['B1'])|Where-Object{Test-Path -LiteralPath $_}).Count|Should Be 1
+            $namespace=Get-PendingNamespacePath -RepoPath $repo
+            foreach($file in @(Get-ChildItem -LiteralPath $namespace -File -Filter '*-execution.json')){$latest=Read-JsonFile -Path $file.FullName;(Test-Path -LiteralPath $latest.artifactPath -PathType Container)|Should Be $true}
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It 'execution receipt JSON을 읽을 수 없으면 삭제 0개이고 terminal finalization은 artifact_retention_failed다' {
+        $repo=New-FakeRepo
+        try {
+            $route=[pscustomobject]@{worker='gpt';model='fixture';effort='low'}
+            $old=New-ExecutionGeneration -Operation 2 -IssueNumber 443 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent 'old'
+            $old.remainingProblems=@();$old=Complete-ExecutionTerminalArtifacts -Receipt $old -RepoPath $repo -IntendedStatus 'completed'
+            $latest=New-ExecutionGeneration -Operation 2 -IssueNumber 443 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent 'latest'
+            $latest.remainingProblems=@();$latest=Complete-ExecutionTerminalArtifacts -Receipt $latest -RepoPath $repo -IntendedStatus 'completed'
+            $namespace=Get-PendingNamespacePath -RepoPath $repo;$badReceipt=Join-Path $namespace 'op2-issue999-execution.json';'{broken'|Set-Content -LiteralPath $badReceipt -Encoding utf8
+            {Invoke-ExecutionRetention -Receipt $latest -RetentionCount 0}|Should Throw
+            (Test-Path -LiteralPath $old.artifactPath)|Should Be $true;(Test-Path -LiteralPath $latest.artifactPath)|Should Be $true
+            $current=New-ExecutionGeneration -Operation 3 -IssueNumber 444 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent 'current'
+            $current.remainingProblems=@();$failed=Complete-ExecutionTerminalArtifacts -Receipt $current -RepoPath $repo -IntendedStatus 'completed'
+            $failed.status|Should Be 'artifact_retention_failed';(Test-Path -LiteralPath $old.artifactPath)|Should Be $true;(Test-Path -LiteralPath $latest.artifactPath)|Should Be $true
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It 'root 밖 receipt 참조는 삭제 전에 실패하고 marker 없는·malformed generation은 삭제하지 않는다' {
+        $repo=New-FakeRepo
+        try {
+            $route=[pscustomobject]@{worker='gpt';model='fixture';effort='low'}
+            $old=New-ExecutionGeneration -Operation 2 -IssueNumber 445 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent 'old'
+            $old.remainingProblems=@();$old=Complete-ExecutionTerminalArtifacts -Receipt $old -RepoPath $repo -IntendedStatus 'completed'
+            $latest=New-ExecutionGeneration -Operation 2 -IssueNumber 445 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent 'latest'
+            $latest.remainingProblems=@();$latest=Complete-ExecutionTerminalArtifacts -Receipt $latest -RepoPath $repo -IntendedStatus 'completed'
+            $namespace=Get-PendingNamespacePath -RepoPath $repo;$outside=Join-Path $TestWorkRoot 'outside-generation';New-Item -ItemType Directory -Path $outside -Force|Out-Null
+            $foreign=Read-JsonFile -Path (Get-ExecutionReceiptPath -Operation 2 -IssueNumber 445 -RepoPath $repo);$foreign.operation=3;$foreign.issueNumber=999;$foreign.artifactPath=$outside
+            $foreignPath=Join-Path $namespace 'op3-issue999-execution.json';Write-AtomicJsonFile -Path $foreignPath -Object $foreign
+            {Invoke-ExecutionRetention -Receipt $latest -RetentionCount 0}|Should Throw
+            (Test-Path -LiteralPath $old.artifactPath)|Should Be $true
+            Remove-Item -LiteralPath $foreignPath -Force
+            $markerless=Join-Path $latest.artifactRoot 'markerless-generation';$malformed=Join-Path $latest.artifactRoot 'malformed-generation'
+            New-Item -ItemType Directory -Path $markerless,$malformed -Force|Out-Null;'{bad'|Set-Content -LiteralPath (Join-Path $malformed 'generation.json') -Encoding utf8
+            Invoke-ExecutionRetention -Receipt $latest -RetentionCount 0|Out-Null
+            (Test-Path -LiteralPath $old.artifactPath)|Should Be $false;(Test-Path -LiteralPath $latest.artifactPath)|Should Be $true
+            (Test-Path -LiteralPath $markerless)|Should Be $true;(Test-Path -LiteralPath $malformed)|Should Be $true
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+}
+
 Describe 'v2.4.5-4. watched critical tree 사후 무결성 검사' {
     It 'scripts tree의 수정·삭제·추가를 모두 결정론적으로 탐지한다' {
         $tree=Join-Path $TestWorkRoot ('critical-tree-'+[guid]::NewGuid().ToString('N'))

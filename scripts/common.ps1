@@ -812,36 +812,100 @@ function Remove-ExecutionArtifactDirectory {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$ArtifactRoot)
     $safePath = Assert-PathWithinRoot -Path $Path -Root $ArtifactRoot
     if ($safePath.Equals([System.IO.Path]::GetFullPath($ArtifactRoot).TrimEnd('\','/'), [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing to remove the execution artifact root itself.' }
-    if (Test-Path -LiteralPath $safePath) { Remove-Item -LiteralPath $safePath -Recurse -Force }
+    if (Test-Path -LiteralPath $safePath) {
+        $item = Get-Item -LiteralPath $safePath -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Refusing to remove reparse-point execution artifact: $safePath" }
+        Remove-Item -LiteralPath $safePath -Recurse -Force
+    }
+}
+
+function Test-ExecutionReceiptNamespaceIdentity {
+    param([Parameter(Mandatory)]$Candidate, [Parameter(Mandatory)]$Anchor)
+    $candidateProps=@($Candidate.PSObject.Properties.Name);$anchorProps=@($Anchor.PSObject.Properties.Name)
+    foreach($field in @('ownerRepo','canonicalRepoRoot','repoRootHash','namespaceVersion')) {
+        if($candidateProps -notcontains $field -or $anchorProps -notcontains $field){return $false}
+    }
+    if(-not ([string]$Candidate.ownerRepo).Equals([string]$Anchor.ownerRepo,[System.StringComparison]::OrdinalIgnoreCase)){return $false}
+    if([string]$Candidate.repoRootHash -cne [string]$Anchor.repoRootHash -or [int]$Candidate.namespaceVersion -ne [int]$Anchor.namespaceVersion){return $false}
+    try {
+        return ((Get-NormalizedCanonicalRepoRoot -Path ([string]$Candidate.canonicalRepoRoot)) -ceq
+            (Get-NormalizedCanonicalRepoRoot -Path ([string]$Anchor.canonicalRepoRoot)))
+    } catch { return $false }
 }
 
 function Invoke-ExecutionRetention {
     param([Parameter(Mandatory)]$Receipt, [int]$RetentionCount = -1)
     $artifactPath = if ($Receipt.PSObject.Properties.Name -contains 'artifactPath' -and $Receipt.artifactPath) { [string]$Receipt.artifactPath } else { Split-Path -Parent ([string]$Receipt.resultPath) }
     $artifactRoot = if ($Receipt.PSObject.Properties.Name -contains 'artifactRoot' -and $Receipt.artifactRoot) { [string]$Receipt.artifactRoot } else { Split-Path -Parent $artifactPath }
-    Assert-PathWithinRoot -Path $artifactRoot -Root $Script:PendingDir | Out-Null
-    Assert-PathWithinRoot -Path $artifactPath -Root $artifactRoot | Out-Null
+    $artifactRoot = Assert-PathWithinRoot -Path $artifactRoot -Root $Script:PendingDir
+    $artifactPath = Assert-PathWithinRoot -Path $artifactPath -Root $artifactRoot
+    if ($artifactPath.Equals($artifactRoot,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Current execution receipt points to the artifact root itself.' }
+    if (-not (Test-Path -LiteralPath $artifactPath -PathType Container)) { throw 'Current execution receipt artifactPath is missing.' }
+    $namespaceRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $artifactRoot)).TrimEnd('\','/')
+    Assert-PathWithinRoot -Path $namespaceRoot -Root $Script:PendingDir | Out-Null
+    if ((Split-Path -Leaf $artifactRoot) -ne 'executions') { throw "Unexpected execution artifact root: $artifactRoot" }
+    if ($Receipt.PSObject.Properties.Name -notcontains 'canonicalRepoRoot' -or [string]::IsNullOrWhiteSpace([string]$Receipt.canonicalRepoRoot) -or
+        -not (Test-ReceiptRepoMatch -Receipt $Receipt -RepoPath ([string]$Receipt.canonicalRepoRoot))) { throw 'Current execution receipt repository identity is invalid.' }
+    $expectedNamespace = [System.IO.Path]::GetFullPath((Get-PendingNamespacePath -RepoPath ([string]$Receipt.canonicalRepoRoot))).TrimEnd('\','/')
+    if (-not $namespaceRoot.Equals($expectedNamespace,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Execution artifact namespace does not match the receipt repository identity.' }
     if ($RetentionCount -lt 0) {
         $RetentionCount = 10; $cfg = Get-Config
         if ($cfg.PSObject.Properties.Name -contains 'execution' -and $cfg.execution.PSObject.Properties.Name -contains 'executionRetentionCount') { $RetentionCount = [Math]::Max(0, [int]$cfg.execution.executionRetentionCount) }
     }
     if (-not (Test-Path -LiteralPath $artifactRoot)) { return @() }
-    $terminal = @()
+
+    # 삭제 전에 namespace의 모든 최신 execution receipt를 완전히 읽고 보호 집합을 확정한다.
+    $receiptFiles = @(Get-ChildItem -LiteralPath $namespaceRoot -File -Filter '*-execution.json' | Sort-Object Name)
+    $protected = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    [void]$protected.Add($artifactPath)
+    foreach ($receiptFile in $receiptFiles) {
+        $latest = Read-JsonFile -Path $receiptFile.FullName
+        if (-not (Test-ExecutionReceiptNamespaceIdentity -Candidate $latest -Anchor $Receipt)) { throw "Execution receipt repository identity mismatch: $($receiptFile.Name)" }
+        if ($latest.PSObject.Properties.Name -notcontains 'artifactPath' -or [string]::IsNullOrWhiteSpace([string]$latest.artifactPath)) { throw "Execution receipt artifactPath is missing: $($receiptFile.Name)" }
+        $referenced = Assert-PathWithinRoot -Path ([string]$latest.artifactPath) -Root $artifactRoot
+        if ($referenced.Equals($artifactRoot,[System.StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $referenced -PathType Container)) { throw "Execution receipt artifactPath is invalid or missing: $($receiptFile.Name)" }
+        [void]$protected.Add($referenced)
+    }
+
+    # marker가 없거나 불완전하거나 active/reparse-point인 디렉터리는 삭제 후보가 아니다.
+    $unreferencedTerminal = @()
     foreach ($dir in @(Get-ChildItem -LiteralPath $artifactRoot -Directory)) {
+        $dirPath = [System.IO.Path]::GetFullPath($dir.FullName).TrimEnd('\','/')
+        if (-not ([System.IO.Path]::GetFullPath((Split-Path -Parent $dirPath)).TrimEnd('\','/')).Equals($artifactRoot,[System.StringComparison]::OrdinalIgnoreCase)) { throw "Execution artifact is not a direct child: $dirPath" }
+        if (($dir.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $protected.Contains($dirPath)) { continue }
         $markerPath = Join-Path $dir.FullName 'generation.json'
         if (-not (Test-Path -LiteralPath $markerPath)) { continue }
         try {
             $marker = Read-JsonFile -Path $markerPath
-            if ([bool]$marker.terminal) { $terminal += [pscustomobject]@{ Directory=$dir; UpdatedAt=[DateTime]::Parse([string]$marker.updatedAt).ToUniversalTime() } }
+            $markerProps=@($marker.PSObject.Properties.Name)
+            if ($markerProps -notcontains 'terminal' -or $markerProps -notcontains 'updatedAt' -or -not [bool]$marker.terminal) { continue }
+            $updated=[DateTime]::Parse([string]$marker.updatedAt).ToUniversalTime()
+            $unreferencedTerminal += [pscustomobject]@{ Directory=$dir; Path=$dirPath; UpdatedAt=$updated }
         } catch { continue }
     }
-    $ordered = @($terminal | Sort-Object UpdatedAt -Descending)
-    $kept = 0; $removed = @()
-    foreach ($entry in $ordered) {
-        if ($entry.Directory.FullName.Equals([System.IO.Path]::GetFullPath($artifactPath), [System.StringComparison]::OrdinalIgnoreCase)) { $kept++; continue }
-        if ($kept -lt $RetentionCount) { $kept++; continue }
-        Remove-ExecutionArtifactDirectory -Path $entry.Directory.FullName -ArtifactRoot $artifactRoot
-        $removed += $entry.Directory.FullName
+
+    # count는 보호되지 않은 terminal generation에만 적용한다. 모든 후보를 검증한 뒤 삭제를 시작한다.
+    $ordered = @($unreferencedTerminal | Sort-Object -Property @{Expression='UpdatedAt';Descending=$true},@{Expression='Path';Descending=$false})
+    $deletePlan = @($ordered | Select-Object -Skip $RetentionCount)
+    foreach ($entry in $deletePlan) {
+        Assert-PathWithinRoot -Path $entry.Path -Root $artifactRoot | Out-Null
+        if ($protected.Contains($entry.Path) -or ($entry.Directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Unsafe execution retention candidate: $($entry.Path)" }
+        $marker = Read-JsonFile -Path (Join-Path $entry.Path 'generation.json')
+        if ($marker.PSObject.Properties.Name -notcontains 'terminal' -or -not [bool]$marker.terminal) { throw "Execution retention candidate is not terminal: $($entry.Path)" }
+    }
+    $removed = @()
+    foreach ($entry in $deletePlan) {
+        Remove-ExecutionArtifactDirectory -Path $entry.Path -ArtifactRoot $artifactRoot
+        $removed += $entry.Path
+    }
+
+    # 삭제 뒤에도 모든 최신 receipt가 가리키는 generation이 존재하는지 다시 읽어 검증한다.
+    foreach ($receiptFile in @(Get-ChildItem -LiteralPath $namespaceRoot -File -Filter '*-execution.json' | Sort-Object Name)) {
+        $latest = Read-JsonFile -Path $receiptFile.FullName
+        if (-not (Test-ExecutionReceiptNamespaceIdentity -Candidate $latest -Anchor $Receipt) -or
+            $latest.PSObject.Properties.Name -notcontains 'artifactPath' -or [string]::IsNullOrWhiteSpace([string]$latest.artifactPath)) { throw "Execution receipt post-retention validation failed: $($receiptFile.Name)" }
+        $referenced = Assert-PathWithinRoot -Path ([string]$latest.artifactPath) -Root $artifactRoot
+        if (-not (Test-Path -LiteralPath $referenced -PathType Container)) { throw "Execution receipt generation was lost during retention: $($receiptFile.Name)" }
     }
     return $removed
 }
