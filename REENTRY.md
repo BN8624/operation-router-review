@@ -42,8 +42,8 @@ next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. ⑤ 일부 착수:
   - deny_pattern_grok_probe_optional         # ⑤-3 선택: deny 중간 와일드카드(git push*+*) 실제 발동은 grok 프로브 필요 — 경계 탐지가 실질 방어라 후순위
   - v2_4_0_policy_ABC_done                    # ⑤.5 완료(2026-07-21): A(operation-1/2/3 disable-model-invocation=false+실행 전 확인게이트, 디스패처·claude변형은 true 유지), B(claudeOnly.1.effort medium→high, operation-1-claude frontmatter도 high), C(작전1 claude_only_required에 highRiskWarning 필드). 184/184. 검토 저장소 6b48665. 주의: SKILL.md는 설치본(~/.claude/skills)과 소스(~/.claude/operation-router/skills) 양쪽 동기화 필수(테스트·manifest는 소스 사용)
   - reverify_policy_ABC_optional             # A/B/C는 정적 테스트로 검증됨. 실전 재검증은 선택: 자연어 호출은 이 세션에서 이미 operation-1/2/3 Skill 도구 노출 확인됨. 작전1 claude-only high는 유료라 후순위(V14는 medium으로 이미 PASS, effort만 상향)
-  - v2_4_0_final_docs                        # ⑥ CHANGELOG, VERIFICATION_MATRIX, SECURITY, INSTALL, ROLLBACK
-  - external_review_v2_4_0                   # ⑤⑥ 완료 후 검토 저장소 링크로 1회
+  - v2_4_0_docs_done                         # ⑥ 완료(2026-07-21): 버전 v2.4.0 통일(README·config·테스트12), CHANGELOG/VERIFICATION_MATRIX/SECURITY 작성+manifest 등록(24항목). INSTALL/ROLLBACK 제외(1인). 184/184
+  - external_review_v2_4_0                    # 남음: 검토 저장소 링크로 외부 정적 검토 1회 → PASS면 v2.4.0 완성 판정
   - sol_retest_when_available                # sol 복귀 시 config 매핑 원복 + V11~V13·V15 재검증
 optional_considered_not_scheduled:          # 사용자 논의됨, 미확정 — 별도 지시 전까지 손대지 않음
   - provider_effort_consistency             # 3-logic effort가 grok=low/gpt=medium/sonnet=low로 공급자마다 다름(작업 난이도 무관). 통일 여부는 사용자 결정 대기

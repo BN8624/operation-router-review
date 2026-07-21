@@ -1,4 +1,4 @@
-# operation-router (v2.3.5)
+# operation-router (v2.4.0)
 
 Claude Code 전역 작전 라우터. GitHub 이슈를 작전 1/2/3으로 Grok CLI / Codex CLI(GPT) / Claude 중 하나에게 라우팅한다.
 
@@ -242,6 +242,10 @@ gh api repositories/<owner>/<repo>/commits/main
 가변 상태는 Skill 폴더 밖(runtime)에 둔다. `/operation reset`은 `state/usage-state.json`만 초기화하고 Skill·스크립트·config.json은 건드리지 않는다.
 
 기본 검증은 source tree만 대상으로 하며 사용자 홈의 상태·로그·설치 Skill을 사용하지 않는다.
+
+## 롤백 (1인 사용)
+
+버전 교체 전 전체 백업이 `~/.claude/backups/`에 타임스탬프 폴더로 쌓인다. 되돌리려면 해당 백업을 `~/.claude/operation-router`와 `~/.claude/skills/operation*`로 복원한다. 별도 설치·롤백 스크립트는 두지 않는다. 상세 문서: [CHANGELOG.md](CHANGELOG.md), [VERIFICATION_MATRIX.md](VERIFICATION_MATRIX.md), [SECURITY.md](SECURITY.md).
 
 ```
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
