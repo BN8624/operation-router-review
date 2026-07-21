@@ -124,14 +124,34 @@ function Assert-PathWithinRoot {
 }
 
 # ---------- 비밀값 마스킹 ----------
+# v2.4.0: 문자열이 알려진 secret 형태(접두)가 아니어도 고엔트로피 토큰이면 마스킹한다.
+# 단, git SHA(순수 16진)·UUID·순수 숫자는 로그에서 정상적으로 쓰이므로 제외해 오탐을 막는다.
+function Test-HighEntropyToken {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Token)
+    if ($Token.Length -lt 24) { return $false }
+    if ($Token -match '^[0-9a-fA-F]+$') { return $false }                                   # git SHA/hex 다이제스트
+    if ($Token -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return $false }  # UUID
+    if (-not ($Token -cmatch '[a-z]' -and $Token -cmatch '[A-Z]' -and $Token -match '[0-9]')) { return $false }  # 대/소/숫자 혼합만 후보
+    $len = $Token.Length; $H = 0.0
+    foreach ($g in ($Token.ToCharArray() | Group-Object)) { $p = $g.Count / $len; $H -= $p * [Math]::Log($p, 2) }
+    return ($H -ge 3.5)
+}
 function Protect-SecretText {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
     $m = $Text
     $m = [regex]::Replace($m, 'gh[pousr]_[A-Za-z0-9]{20,}', '***MASKED_GH_TOKEN***')
     $m = [regex]::Replace($m, 'sk-[A-Za-z0-9]{20,}', '***MASKED_API_KEY***')
     $m = [regex]::Replace($m, 'xai-[A-Za-z0-9]{20,}', '***MASKED_API_KEY***')
+    $m = [regex]::Replace($m, 'AKIA[0-9A-Z]{16}', '***MASKED_AWS_KEY***')
     $m = [regex]::Replace($m, '(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S+', '$1=***MASKED***')
     $m = [regex]::Replace($m, 'Bearer\s+[A-Za-z0-9\.\-_]{10,}', 'Bearer ***MASKED***')
+    # Authorization 헤더 전체(Bearer 외 Basic 등 임의 스킴 포함) 값 제거
+    $m = [regex]::Replace($m, '(?im)(Authorization\s*:\s*)\S.*$', '$1***MASKED***')
+    # 고엔트로피 토큰 마스킹 (알려진 접두가 없는 secret 대비). 토큰 경계로만 검사.
+    $m = [regex]::Replace($m, '[A-Za-z0-9+/_\-]{24,}', {
+        param($mm)
+        if (Test-HighEntropyToken -Token $mm.Value) { return '***MASKED_HIGH_ENTROPY***' } else { return $mm.Value }
+    })
     return $m
 }
 

@@ -451,6 +451,21 @@ Describe '29-30. 보안/임시파일' {
         (Protect-SecretText -Text 'api_key: sk-abcdefghijklmnopqrstuvwx') | Should Not Match 'sk-abcdefghijklmnopqrstuvwx'
         (Protect-SecretText -Text 'Authorization: Bearer abcdefghij1234567890') | Should Not Match 'abcdefghij1234567890'
     }
+    It '29b. v2.4.0: Authorization 임의 스킴·AWS·고엔트로피 마스킹, git SHA/UUID는 보존' {
+        # Authorization Basic (Bearer 아님) 값 제거
+        (Protect-SecretText -Text 'Authorization: Basic dXNlcjpwYXNzd29yZDEyMzQ1Ng==') | Should Not Match 'dXNlcjpwYXNzd29yZA'
+        # AWS 액세스 키
+        (Protect-SecretText -Text 'AKIAIOSFODNN7EXAMPLE here') | Should Not Match 'AKIAIOSFODNN7EXAMPLE'
+        # 알려진 접두 없는 고엔트로피 secret은 마스킹
+        $secret = 'Xk9mQ2vLpZ7aB3nR8tYw1Cd5Ef0Gh6J'
+        (Protect-SecretText -Text "value $secret end") | Should Not Match ([regex]::Escape($secret))
+        # git SHA(40 hex)와 짧은 SHA는 보존 (오탐 금지)
+        $sha = 'effe08c3bf15a067c186f68adaf346376ab61ce9'
+        (Protect-SecretText -Text "startHead=$sha") | Should Match ([regex]::Escape($sha))
+        # UUID 보존 (sessionId 등)
+        $uuid = '019f8235-b50a-7121-81d0-d25acc4b8199'
+        (Protect-SecretText -Text "sessionId $uuid") | Should Match ([regex]::Escape($uuid))
+    }
     It '30. 작업자 실패 시에도 임시 주문서 finally 삭제' {
         Invoke-ResetCommand | Out-Null
         $repo = New-FakeRepo -WithRemote
