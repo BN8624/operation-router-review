@@ -38,8 +38,26 @@ usageState:
 next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. 남은 것:
   - security_and_install_verification        # deny 프로브, 저장소 경계, secret, 신규 설치/업그레이드/롤백
   - v2_4_0_final_docs                        # CHANGELOG, VERIFICATION_MATRIX, SECURITY, INSTALL, ROLLBACK
+  - external_review_v2_4_0                   # ⑤⑥ 완료 후 검토 저장소 링크로 1회
   - sol_retest_when_available                # sol 복귀 시 config 매핑 원복 + V11~V13·V15 재검증
 ```
+
+## 다음 세션 시작 절차 (2026-07-21 준비)
+
+1. 상태 점검 (3분):
+   - `& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command status` → grok/gpt 모두 available/0이어야 함
+   - `& "$env:USERPROFILE\.claude\operation-router\tests\run-tests.ps1" -InstalledIntegration` → 170/170, 불일치 0/6 기대
+   - 검토 저장소 `C:\Users\USER\operation-router-build\review-repo` = github.com/BN8624/operation-router-review, HEAD 4d0f21a, clean/0-0 확인
+2. ⑤ 보안·설치 검증 (사용자 승인된 범위, mock/임시 환경 우선):
+   - deny 프로브: grok --deny 목록이 force-with-lease·+main push·reset --merge/--keep·rm -r -f·Remove-Item·cmd del/rd·rmdir /s·format·diskpart·shutdown·reg delete를 실제 패턴 매칭으로 막는지 (README 목록과 config 대조 후 무료 프로브)
+   - 저장소 경계: postflight에 repo 밖 변경 탐지 여부 확인, 없으면 좁게 추가 검토
+   - secret: 로그·evidence 마스킹 재확인 (기존 테스트 29·16 + 고엔트로피 스캔)
+   - 설치 lifecycle: 임시 사용자 프로필/임시 HOME에서 신규 설치 → status/doctor/테스트, v2.3.3→최종 업그레이드(백업·usage-state 보존), 롤백(백업 복원) — 실제 사용자 환경을 건드리지 않는 격리 방식만
+3. ⑥ v2.4.0 문서: CHANGELOG.md, VERIFICATION_MATRIX.md(V01~V15 + 4-1, 증거 커밋·CI 포함), SECURITY.md, INSTALL.md, ROLLBACK.md 작성 → 버전 v2.4.0 통일 → manifest 갱신 → 전체 테스트 → 검토 저장소 push·태그 v2.4.0
+4. 외부 검토 1회 (검토 저장소 링크) → PASS 시 완성 판정. 유료 워커 호출은 이 범위에 필요 없음.
+5. sol 복귀 확인 시: config `gpt.workers.sol`을 `gpt-5.6-sol`로 원복(+`_sol_note` 제거) → V11~V13·V15 재검증 후 †조건 해제.
+
+주의: 서브에이전트에 실행기를 위임할 때는 반드시 `Set-Location "<repo>"; <명령>`로 한 명령에 묶는다. E2E 저장소 이슈 #12(2단계 완결)·#16(검수 finding 1건)은 열린 상태가 정상이다.
 
 ### 2026-07-21 정적 결함 4건 수리 (외부 검토 지적)
 
