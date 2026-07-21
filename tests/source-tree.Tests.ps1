@@ -2076,6 +2076,69 @@ Describe 'v2.4.4. 실행 세대 영속화·중복 차단·recover' {
     }
 }
 
+Describe 'v2.4.5-1. canonical root namespace와 legacy receipt 안전 처리' {
+    It '같은 owner/repo의 복수 clone은 namespace·lock·receipt가 격리되고 owner만 같아도 mismatch다' {
+        $repoA=New-FakeRepo;$repoB=New-FakeRepo
+        try {
+            git -C $repoA remote add origin 'https://github.com/BN8624/shared-fixture.git'
+            git -C $repoB remote add origin 'https://github.com/BN8624/shared-fixture.git'
+            $idA=Get-RepoIdentity -RepoPath $repoA;$idB=Get-RepoIdentity -RepoPath $repoB
+            $idA.ownerRepo|Should Be $idB.ownerRepo
+            $idA.namespace|Should Not Be $idB.namespace
+            $idA.repoRootHash|Should Not Be $idB.repoRootHash
+            $lockA=Open-ExecutionLock -Operation 2 -IssueNumber 401 -RepoPath $repoA
+            $lockB=Open-ExecutionLock -Operation 2 -IssueNumber 401 -RepoPath $repoB
+            try {$lockA|Should Not Be $null;$lockB|Should Not Be $null} finally {$lockA.Dispose();$lockB.Dispose()}
+            Push-Location $repoA;'a2'|Out-File a2.txt -Encoding utf8;git add .;git commit -q -m a2;Pop-Location
+            Save-TestRunReceipt -Repo $repoA -IssueNum 401
+            (Get-RunReceipt -Operation 1 -IssueNumber 401 -RepoPath $repoB)|Should Be $null
+            $foreign=Get-RunReceipt -Operation 1 -IssueNumber 401 -RepoPath $repoA
+            Write-AtomicJsonFile -Path (Get-RunReceiptPath -Operation 1 -IssueNumber 402 -RepoPath $repoB) -Object $foreign
+            $loaded=Get-RunReceipt -Operation 1 -IssueNumber 402 -RepoPath $repoB
+            (Test-ReceiptRepoMatch -Receipt $loaded -RepoPath $repoB)|Should Be $false
+        } finally {Remove-Item -LiteralPath $repoA -Recurse -Force;Remove-Item -LiteralPath $repoB -Recurse -Force}
+    }
+
+    It 'exact canonical root legacy receipt만 새 namespace로 원자 이전하고 ambiguous legacy는 남겨 둔다' {
+        $repo=New-FakeRepo
+        try {
+            git -C $repo remote add origin 'https://github.com/BN8624/legacy-fixture.git'
+            $id=Get-RepoIdentity -RepoPath $repo
+            $legacyDir=Get-LegacyPendingNamespacePath -RepoPath $repo
+            New-Item -ItemType Directory -Path $legacyDir -Force|Out-Null
+            $legacyPath=Join-Path $legacyDir 'op1-issue403-run.json'
+            $legacy=[pscustomobject]@{operation=1;issueNumber=403;ownerRepo=$id.ownerRepo;repoRoot=$id.repoRoot;status='completed'}
+            Write-AtomicJsonFile -Path $legacyPath -Object $legacy
+            $migrated=Get-RunReceipt -Operation 1 -IssueNumber 403 -RepoPath $repo
+            $migrated.namespaceVersion|Should Be 2;$migrated.repoRootHash|Should Be $id.repoRootHash
+            (Test-Path -LiteralPath $legacyPath)|Should Be $false
+            (Test-Path -LiteralPath (Get-RunReceiptPath -Operation 1 -IssueNumber 403 -RepoPath $repo))|Should Be $true
+
+            $ambiguousPath=Join-Path $legacyDir 'op1-issue404-run.json'
+            Write-AtomicJsonFile -Path $ambiguousPath -Object ([pscustomobject]@{operation=1;issueNumber=404;ownerRepo=$id.ownerRepo;status='completed'})
+            $ambiguous=Get-RunReceipt -Operation 1 -IssueNumber 404 -RepoPath $repo
+            $ambiguous.legacyNamespaceBlocked|Should Be $true
+            (Test-Path -LiteralPath $ambiguousPath)|Should Be $true
+            (Test-Path -LiteralPath (Get-RunReceiptPath -Operation 1 -IssueNumber 404 -RepoPath $repo))|Should Be $false
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It 'legacy active execution은 자동 이전하지 않고 recover를 fail-closed 한다' {
+        $repo=New-FakeRepo
+        try {
+            git -C $repo remote add origin 'https://github.com/BN8624/legacy-active.git'
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 2 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
+            $rc=New-ExecutionGeneration -Operation 2 -IssueNumber 405 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
+            $rc.status='worker_running';$current=Get-ExecutionReceiptPath -Operation 2 -IssueNumber 405 -RepoPath $repo
+            $legacyDir=Get-LegacyPendingNamespacePath -RepoPath $repo;New-Item -ItemType Directory -Path $legacyDir -Force|Out-Null
+            $legacyPath=Join-Path $legacyDir 'op2-issue405-execution.json';Write-AtomicJsonFile -Path $legacyPath -Object $rc;Remove-Item -LiteralPath $current -Force
+            $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 405 -RepoPath $repo
+            $res.status|Should Be 'repository_receipt_mismatch';$res.reason|Should Be 'legacy_active_execution_migration_blocked'
+            (Test-Path -LiteralPath $legacyPath)|Should Be $true;(Test-Path -LiteralPath $current)|Should Be $false
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+}
+
 Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
     It '1. mock 로그는 현재 test-run 디렉터리에만 생성된다' {
         $path = Write-RouterLog -Name 'v234-mock-only' -Content 'mock'

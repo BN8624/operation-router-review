@@ -473,10 +473,18 @@ function ConvertFrom-StrictReviewJson {
     return [pscustomobject]@{ valid = $true; verdict = $obj.verdict; parseError = $null; findings = $findings }
 }
 
-# ---------- 저장소 식별 / 런타임 상태 네임스페이스 (v2.3) ----------
-# pending·run/review 영수증·주문서 파일을 owner/repo별 하위 폴더로 분리한다.
-# 예: state/pending/BN8624__kkk/op1-issue8-run.json
-# origin owner/repo를 알 수 없으면(로컬 전용 원격 등) canonical repo root 해시로 격리한다.
+# ---------- 저장소 식별 / 런타임 상태 네임스페이스 (v2.4.5) ----------
+# owner/repo와 canonical root의 SHA-256 단축값을 함께 사용해 같은 origin의 복수 clone도 격리한다.
+function Get-NormalizedCanonicalRepoRoot {
+    param([Parameter(Mandatory)][string]$Path)
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\','/')
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $full.ToLowerInvariant() }
+    return $full
+}
+function Get-RepoRootHash {
+    param([Parameter(Mandatory)][string]$CanonicalRepoRoot)
+    return (Get-Sha256Text -Text (Get-NormalizedCanonicalRepoRoot -Path $CanonicalRepoRoot)).Substring(0, 16)
+}
 function Get-RepoIdentity {
     param([Parameter(Mandatory)][string]$RepoPath)
     $root = $null
@@ -485,18 +493,40 @@ function Get-RepoIdentity {
         $root = [System.IO.Path]::GetFullPath($rootRes.Text).TrimEnd('\','/')
     }
     $ownerRepo = Get-GitOriginOwnerRepo -Path $RepoPath
+    $rootHash = $null
+    if ($root) { $rootHash = Get-RepoRootHash -CanonicalRepoRoot $root }
     $ns = 'unknown-repo'
     if ($ownerRepo) {
         $parts = $ownerRepo -split '/', 2
-        $ns = (($parts[0] -replace '[^a-zA-Z0-9_\.\-]', '_') + '__' + ($parts[1] -replace '[^a-zA-Z0-9_\.\-]', '_'))
-    } elseif ($root) {
+        $base = (($parts[0] -replace '[^a-zA-Z0-9_\.\-]', '_') + '__' + ($parts[1] -replace '[^a-zA-Z0-9_\.\-]', '_'))
+        if ($rootHash) { $ns = $base + '__' + $rootHash }
+    } elseif ($rootHash) {
+        $ns = 'local__' + $rootHash
+    }
+    return [pscustomobject]@{
+        ownerRepo = $ownerRepo; repoRoot = $root; canonicalRepoRoot = $root
+        repoRootHash = $rootHash; namespaceVersion = 2; namespace = $ns
+    }
+}
+function Get-LegacyPendingNamespacePath {
+    param([Parameter(Mandatory)][string]$RepoPath)
+    $id = Get-RepoIdentity -RepoPath $RepoPath
+    $legacy = 'unknown-repo'
+    if ($id.ownerRepo) {
+        $parts = $id.ownerRepo -split '/', 2
+        $legacy = (($parts[0] -replace '[^a-zA-Z0-9_\.\-]', '_') + '__' + ($parts[1] -replace '[^a-zA-Z0-9_\.\-]', '_'))
+    } elseif ($id.repoRoot) {
+        # v2.4.4 local namespace를 찾기 위한 호환 계산에만 사용한다.
         $md5 = [System.Security.Cryptography.MD5]::Create()
         try {
-            $hex = (($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant()))) | ForEach-Object { $_.ToString('x2') }) -join ''
-            $ns = 'local-' + $hex.Substring(0, 12)
+            $normalized = Get-NormalizedCanonicalRepoRoot -Path $id.repoRoot
+            $hex = (($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normalized)) | ForEach-Object { $_.ToString('x2') }) -join '')
+            $legacy = 'local-' + $hex.Substring(0, 12)
         } finally { $md5.Dispose() }
     }
-    return [pscustomobject]@{ ownerRepo = $ownerRepo; repoRoot = $root; namespace = $ns }
+    $dir = Join-Path $Script:PendingDir $legacy
+    Assert-PathWithinRoot -Path $dir -Root $Script:PendingDir | Out-Null
+    return $dir
 }
 function Get-PendingNamespacePath {
     param([Parameter(Mandatory)][string]$RepoPath)
@@ -517,11 +547,56 @@ function Test-ReceiptRepoMatch {
     param([Parameter(Mandatory)]$Receipt, [Parameter(Mandatory)][string]$RepoPath)
     $id = Get-RepoIdentity -RepoPath $RepoPath
     $props = $Receipt.PSObject.Properties.Name
-    $rOwner = $null; if ($props -contains 'ownerRepo') { $rOwner = $Receipt.ownerRepo }
-    $rRoot = $null;  if ($props -contains 'repoRoot')  { $rRoot = $Receipt.repoRoot }
-    if ($rOwner -and $id.ownerRepo) { return ($rOwner -eq $id.ownerRepo) }
-    if ($rRoot -and $id.repoRoot) { return ($rRoot.ToLowerInvariant().TrimEnd('\','/') -eq $id.repoRoot.ToLowerInvariant()) }
-    return $false
+    if (-not $id.repoRoot -or -not $id.repoRootHash) { return $false }
+    $rOwner = $null; if ($props -contains 'ownerRepo') { $rOwner = [string]$Receipt.ownerRepo }
+    if ($id.ownerRepo) {
+        if ([string]::IsNullOrWhiteSpace($rOwner) -or -not $rOwner.Equals([string]$id.ownerRepo, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    } elseif (-not [string]::IsNullOrWhiteSpace($rOwner)) { return $false }
+    $rRoot = $null
+    if ($props -contains 'canonicalRepoRoot') { $rRoot = [string]$Receipt.canonicalRepoRoot }
+    elseif ($props -contains 'repoRoot') { $rRoot = [string]$Receipt.repoRoot }
+    if ([string]::IsNullOrWhiteSpace($rRoot)) { return $false }
+    try {
+        if ((Get-NormalizedCanonicalRepoRoot -Path $rRoot) -cne (Get-NormalizedCanonicalRepoRoot -Path $id.repoRoot)) { return $false }
+    } catch { return $false }
+    if ($props -contains 'repoRootHash') {
+        if ([string]::IsNullOrWhiteSpace([string]$Receipt.repoRootHash) -or [string]$Receipt.repoRootHash -cne [string]$id.repoRootHash) { return $false }
+    } elseif ($props -contains 'namespaceVersion' -and [int]$Receipt.namespaceVersion -ge 2) { return $false }
+    return $true
+}
+
+function Get-ReceiptWithLegacyMigration {
+    param(
+        [Parameter(Mandatory)][string]$CurrentPath, [Parameter(Mandatory)][string]$LegacyPath,
+        [Parameter(Mandatory)][string]$RepoPath, [switch]$BlockActiveExecution
+    )
+    if (Test-Path -LiteralPath $CurrentPath) { return (Read-JsonFile -Path $CurrentPath) }
+    if ($LegacyPath -eq $CurrentPath -or -not (Test-Path -LiteralPath $LegacyPath)) { return $null }
+    $legacy = Read-JsonFile -Path $LegacyPath
+    $reason = $null
+    if (-not (Test-ReceiptRepoMatch -Receipt $legacy -RepoPath $RepoPath)) { $reason = 'legacy_repository_identity_ambiguous' }
+    elseif ($BlockActiveExecution -and (Test-ExecutionStatusActive -Status ([string]$legacy.status))) { $reason = 'legacy_active_execution_migration_blocked' }
+    if ($reason) {
+        Add-Member -InputObject $legacy -NotePropertyName legacyNamespaceBlocked -NotePropertyValue $true -Force
+        Add-Member -InputObject $legacy -NotePropertyName legacyNamespaceReason -NotePropertyValue $reason -Force
+        return $legacy
+    }
+    $parent = Split-Path -Parent $CurrentPath
+    Assert-PathWithinRoot -Path $CurrentPath -Root $Script:PendingDir | Out-Null
+    Assert-PathWithinRoot -Path $LegacyPath -Root $Script:PendingDir | Out-Null
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $id = Get-RepoIdentity -RepoPath $RepoPath
+    foreach ($field in @{
+        ownerRepo=$id.ownerRepo; repoRoot=$id.repoRoot; canonicalRepoRoot=$id.canonicalRepoRoot
+        repoRootHash=$id.repoRootHash; namespaceVersion=$id.namespaceVersion
+    }.GetEnumerator()) {
+        Add-Member -InputObject $legacy -NotePropertyName $field.Key -NotePropertyValue $field.Value -Force
+    }
+    Write-AtomicJsonFile -Path $CurrentPath -Object $legacy
+    $verified = Read-JsonFile -Path $CurrentPath
+    if (-not (Test-ReceiptRepoMatch -Receipt $verified -RepoPath $RepoPath)) { throw 'Legacy receipt migration verification failed.' }
+    Remove-Item -LiteralPath $LegacyPath -Force
+    return $verified
 }
 
 # ---------- v2.4.4 외부 구현 워커 실행 세대 ----------
@@ -548,8 +623,8 @@ function Open-ExecutionLock {
 function Get-ExecutionReceipt {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
     $path = Get-ExecutionReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    return (Read-JsonFile -Path $path)
+    $legacyPath = Join-Path (Get-LegacyPendingNamespacePath -RepoPath $RepoPath) "$(Get-ExecutionKey -Operation $Operation -IssueNumber $IssueNumber)-execution.json"
+    return (Get-ReceiptWithLegacyMigration -CurrentPath $path -LegacyPath $legacyPath -RepoPath $RepoPath -BlockActiveExecution)
 }
 function Save-ExecutionReceipt {
     param([Parameter(Mandatory)]$Receipt, [Parameter(Mandatory)][string]$RepoPath)
@@ -611,7 +686,8 @@ function New-ExecutionGeneration {
     Invoke-LogRetention -Scope ([string]$Script:RouterLogScope)
     $receipt = [pscustomobject]@{
         schemaVersion = 1; executionId = $executionId; runId = $RunId; generation = $generation
-        ownerRepo = $id.ownerRepo; repoRoot = $id.repoRoot; canonicalRepoRoot = $id.repoRoot
+        ownerRepo = $id.ownerRepo; repoRoot = $id.repoRoot; canonicalRepoRoot = $id.canonicalRepoRoot
+        repoRootHash = $id.repoRootHash; namespaceVersion = $id.namespaceVersion
         operation = $Operation; issueNumber = $IssueNumber; kind = $Kind; purpose = 'implement'
         startHead = $Snapshot.startHead; startSnapshot = $Snapshot; worker = $Route.worker; model = $Route.model; effort = $Route.effort
         status = 'worker_starting'; startedAt = $now; updatedAt = $now
@@ -676,7 +752,8 @@ function Save-PendingSnapshot {
     Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
     $payload = [pscustomobject]@{
         operation = $Operation; issueNumber = $IssueNumber; kind = $Kind
-        ownerRepo = $id.ownerRepo; repoRoot = $id.repoRoot
+        ownerRepo = $id.ownerRepo; repoRoot = $id.repoRoot; canonicalRepoRoot = $id.canonicalRepoRoot
+        repoRootHash = $id.repoRootHash; namespaceVersion = $id.namespaceVersion
         snapshot = $Snapshot; savedAt = (Get-Date).ToUniversalTime().ToString('o')
     }
     Write-JsonFile -Path $path -Object $payload
@@ -685,8 +762,20 @@ function Save-PendingSnapshot {
 function Get-PendingSnapshot {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
     $path = Get-PendingSnapshotPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    return (Read-JsonFile -Path $path)
+    $legacyPath = Join-Path (Get-LegacyPendingNamespacePath -RepoPath $RepoPath) "$(Get-PendingKey -Operation $Operation -IssueNumber $IssueNumber).json"
+    $receipt = Get-ReceiptWithLegacyMigration -CurrentPath $path -LegacyPath $legacyPath -RepoPath $RepoPath
+    if ($null -ne $receipt -and -not ($receipt.PSObject.Properties.Name -contains 'legacyNamespaceBlocked')) {
+        $legacyOrder = Join-Path (Get-LegacyPendingNamespacePath -RepoPath $RepoPath) "order-$(Get-PendingKey -Operation $Operation -IssueNumber $IssueNumber).txt"
+        $currentOrder = Get-PendingOrderPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+        if (-not (Test-Path -LiteralPath $currentOrder) -and (Test-Path -LiteralPath $legacyOrder)) {
+            Assert-PathWithinRoot -Path $legacyOrder -Root $Script:PendingDir | Out-Null
+            Assert-PathWithinRoot -Path $currentOrder -Root $Script:PendingDir | Out-Null
+            [System.IO.File]::WriteAllBytes($currentOrder, [System.IO.File]::ReadAllBytes($legacyOrder))
+            if ((Get-FileHash -LiteralPath $currentOrder -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $legacyOrder -Algorithm SHA256).Hash) { throw 'Legacy pending order migration verification failed.' }
+            Remove-Item -LiteralPath $legacyOrder -Force
+        }
+    }
+    return $receipt
 }
 function Remove-PendingSnapshot {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
@@ -727,6 +816,9 @@ function Save-RunReceipt {
         issueNumber = $IssueNumber
         ownerRepo   = $id.ownerRepo
         repoRoot    = $id.repoRoot
+        canonicalRepoRoot = $id.canonicalRepoRoot
+        repoRootHash = $id.repoRootHash
+        namespaceVersion = $id.namespaceVersion
         startHead   = $Snapshot.startHead
         finalHead   = $Postflight.finalHead
         worker      = $Route.worker
@@ -744,8 +836,8 @@ function Save-RunReceipt {
 function Get-RunReceipt {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
     $path = Get-RunReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    return (Read-JsonFile -Path $path)
+    $legacyPath = Join-Path (Get-LegacyPendingNamespacePath -RepoPath $RepoPath) "op$Operation-issue$IssueNumber-run.json"
+    return (Get-ReceiptWithLegacyMigration -CurrentPath $path -LegacyPath $legacyPath -RepoPath $RepoPath)
 }
 function Remove-RunReceipt {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
@@ -773,6 +865,9 @@ function Save-ReviewReceipt {
         issueNumber    = $IssueNumber
         ownerRepo      = $id.ownerRepo
         repoRoot       = $id.repoRoot
+        canonicalRepoRoot = $id.canonicalRepoRoot
+        repoRootHash   = $id.repoRootHash
+        namespaceVersion = $id.namespaceVersion
         verdict        = $Verdict
         findings       = @($Findings)
         postReviewHead = $PostReviewHead
@@ -785,8 +880,8 @@ function Save-ReviewReceipt {
 function Get-ReviewReceipt {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
     $path = Get-ReviewReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    return (Read-JsonFile -Path $path)
+    $legacyPath = Join-Path (Get-LegacyPendingNamespacePath -RepoPath $RepoPath) "op$Operation-issue$IssueNumber-review.json"
+    return (Get-ReceiptWithLegacyMigration -CurrentPath $path -LegacyPath $legacyPath -RepoPath $RepoPath)
 }
 function Remove-ReviewReceipt {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)

@@ -555,10 +555,18 @@ function Invoke-PersistentRouteWorker {
     if ($null -eq $lock) {
         $existing = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
         if ($null -eq $existing) { throw 'Execution lock is held but no receipt is readable.' }
+        if ($existing.PSObject.Properties.Name -contains 'legacyNamespaceBlocked') {
+            return [pscustomobject]@{ status='repository_receipt_mismatch'; workerCalls=0
+                reason=[string]$existing.legacyNamespaceReason; operation=$OperationNumber; issueNumber=$IssueNumber }
+        }
         return New-ExecutionPendingResult -Receipt $existing -AlreadyActive $true
     }
     try {
         $existing = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+        if ($null -ne $existing -and ($existing.PSObject.Properties.Name -contains 'legacyNamespaceBlocked')) {
+            return [pscustomobject]@{ status='repository_receipt_mismatch'; workerCalls=0
+                reason=[string]$existing.legacyNamespaceReason; operation=$OperationNumber; issueNumber=$IssueNumber }
+        }
         if ($null -ne $existing -and (Test-ExecutionStatusActive -Status ([string]$existing.status))) {
             return New-ExecutionPendingResult -Receipt $existing -AlreadyActive $true
         }
@@ -1099,6 +1107,10 @@ function Invoke-RecoverCommand {
     $receipt = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
     if ($null -eq $receipt) {
         return [pscustomobject]@{ operation=$OperationNumber; issueNumber=$IssueNumber; status='execution_receipt_missing'; workerCalls=0 }
+    }
+    if ($receipt.PSObject.Properties.Name -contains 'legacyNamespaceBlocked') {
+        return [pscustomobject]@{ operation=$OperationNumber; issueNumber=$IssueNumber; status='repository_receipt_mismatch'; workerCalls=0
+            reason=[string]$receipt.legacyNamespaceReason }
     }
     if (-not (Test-ReceiptRepoMatch -Receipt $receipt -RepoPath $RepoPath)) {
         return [pscustomobject]@{ operation=$OperationNumber; issueNumber=$IssueNumber; status='repository_receipt_mismatch'; workerCalls=0 }
