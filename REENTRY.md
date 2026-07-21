@@ -36,10 +36,15 @@ blocked:
 usageState:
   note: "V03/V04/V08 성공 후 주문서에 따라 /operation reset 실행"
 next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. 남은 것:
-  - security_and_install_verification        # deny 프로브, 저장소 경계, secret, 신규 설치/업그레이드/롤백
-  - v2_4_0_final_docs                        # CHANGELOG, VERIFICATION_MATRIX, SECURITY, INSTALL, ROLLBACK
+  - security_and_install_verification        # ⑤ deny 프로브, 저장소 경계, secret, 신규 설치/업그레이드/롤백
+  - v2_4_0_policy_changes_ABC                # ⑤.5 자연어 호출+확인게이트(A), 작전1 claude-only high(B), 고위험 경고(C) — 아래 절차 3 참조
+  - reverify_after_policy_changes            # A/B/C 적용 후 작전1 claude-only(V14계열)+자연어 호출 경로 재검증
+  - v2_4_0_final_docs                        # ⑥ CHANGELOG, VERIFICATION_MATRIX, SECURITY, INSTALL, ROLLBACK
   - external_review_v2_4_0                   # ⑤⑥ 완료 후 검토 저장소 링크로 1회
   - sol_retest_when_available                # sol 복귀 시 config 매핑 원복 + V11~V13·V15 재검증
+optional_considered_not_scheduled:          # 사용자 논의됨, 미확정 — 별도 지시 전까지 손대지 않음
+  - provider_effort_consistency             # 3-logic effort가 grok=low/gpt=medium/sonnet=low로 공급자마다 다름(작업 난이도 무관). 통일 여부는 사용자 결정 대기
+  - op2_vs_op3logic_gpt_collapse            # GPT 경로에서 작전2와 작전3-logic이 둘 다 terra/medium으로 구분 소실. 차등 여부 사용자 결정 대기
 ```
 
 ## 다음 세션 시작 절차 (2026-07-21 준비)
@@ -53,7 +58,13 @@ next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. 남은 것:
    - 저장소 경계: postflight에 repo 밖 변경 탐지 여부 확인, 없으면 좁게 추가 검토
    - secret: 로그·evidence 마스킹 재확인 (기존 테스트 29·16 + 고엔트로피 스캔)
    - 설치 lifecycle: 임시 사용자 프로필/임시 HOME에서 신규 설치 → status/doctor/테스트, v2.3.3→최종 업그레이드(백업·usage-state 보존), 롤백(백업 복원) — 실제 사용자 환경을 건드리지 않는 격리 방식만
-3. ⑥ v2.4.0 문서: CHANGELOG.md, VERIFICATION_MATRIX.md(V01~V15 + 4-1, 증거 커밋·CI 포함), SECURITY.md, INSTALL.md, ROLLBACK.md 작성 → 버전 v2.4.0 통일 → manifest 갱신 → 전체 테스트 → 검토 저장소 push·태그 v2.4.0
+3. ⑤.5 v2.4.0 정책 변경 3건 (사용자 확정 2026-07-21 — 라우팅 구조는 유지, 아래만 변경):
+   A. **자연어 호출 허용 + 실행 전 확인**: operation-1/2/3 SKILL.md의 `disable-model-invocation: true`를 해제(또는 false). 대신 각 실행 Skill 계약에 "실행 전 반드시 작전번호·이슈번호·예상 워커(비용 발생 여부)를 한 줄 요약하고 사용자 확인을 받은 뒤 실행"을 추가. 디스패처(/operation)는 판단 필요 없음. 영향: 테스트 '2. disable-model-invocation: true'(4 Skill 단언)와 doctor skillFrontmatter 기대를 새 정책에 맞게 수정, README 사용법 갱신. 목적: 슬래시 직접 입력과 "스킬 써" 명시 호출의 불일치 제거(현재 operation-3만 Skill 도구 로드되고 1·2는 disable-model-invocation로 거부됨).
+   B. **작전1 Claude-only 구현 effort medium→high** (3번 처방 1): config `claudeOnly.1.effort`와 `/operation-1-claude` frontmatter effort를 high로. 작전1의 다른 슬롯(grok/sol/opus 전부 high)과 일치시켜 유일 outlier 제거. 구현자↔검토자 분리(Opus 검토)는 유지. Opus를 구현자로 만들지 말 것(자기검수 재발).
+   C. **작전1 claude_only_required 고위험 경고** (3번 처방 2): 작전1의 claude_only_required 반환 메시지/resumeCommand 안내에 "고위험 작전을 외부 구현·독립 검수 파이프라인 없이 진행하는 상황 — 스키마 마이그레이션 등 진짜 위험 작업이면 한도 리셋 대기 고려" 문구 추가. 차단 로직 아님(메시지·문서만). effort로 못 닫는 잔여 격차를 사용자가 인지하고 대기/강행을 선택하게 함.
+   ※ A·B·C는 effort/모델/Skill 정책 변경이므로 적용 후 작전1 Claude-only 경로(V14 계열)와 자연어 호출 경로를 재검증한다. 라우팅·권한·fallback·로그/상태 격리는 건드리지 않는다.
+   ※ 보류했던 대안(3번의 전역 CLAUDE.md 우회안)은 채택 안 함 — 모델 고정 무력화 때문. A안(확인 게이트)으로 확정.
+4-docs. ⑥ v2.4.0 문서: CHANGELOG.md, VERIFICATION_MATRIX.md(V01~V15 + 4-1, 증거 커밋·CI 포함), SECURITY.md, INSTALL.md, ROLLBACK.md 작성 → 버전 v2.4.0 통일 → manifest 갱신 → 전체 테스트 → 검토 저장소 push·태그 v2.4.0
 4. 외부 검토 1회 (검토 저장소 링크) → PASS 시 완성 판정. 유료 워커 호출은 이 범위에 필요 없음.
 5. sol 복귀 확인 시: config `gpt.workers.sol`을 `gpt-5.6-sol`로 원복(+`_sol_note` 제거) → V11~V13·V15 재검증 후 †조건 해제.
 
