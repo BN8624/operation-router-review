@@ -196,6 +196,9 @@ Describe '3. 작전별 model/effort frontmatter' {
 }
 
 Describe '4. 작전 1 단계 상태 전이' {
+    It 'sol 역할은 임시 Terra가 아닌 gpt-5.6-sol에 매핑' {
+        $cfg.gpt.workers.sol | Should Be 'gpt-5.6-sol'
+    }
     It 'grok 가능 → 구현은 grok high' {
         $r = Resolve-OperationRoute -OperationNumber 1 -Purpose implement -GrokState (GS 'available' 0) -GptState (GS 'available' 0) -Config $cfg
         $r.worker | Should Be 'grok'; $r.effort | Should Be 'high'

@@ -2,6 +2,11 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
+## Unreleased (2026-07-22)
+
+- 작전 1의 `sol` 역할을 임시 `gpt-5.6-terra` 매핑에서 설계 모델인 `gpt-5.6-sol`로 원복했다. `codex-cli 0.144.5` models_cache에서 Sol/Terra/Luna 노출을 확인했으며 `_sol_note`를 제거했다.
+- 과거 Terra로 실행한 V11~V13·V15의 `PASS_PENDING_SOL_RETEST` 판정은 실제 Sol 재검증 전까지 유지한다.
+
 ## v2.4.3 (2026-07-21)
 
 v2.4.2 외부 재검토에서 발견된 **영수증 세대(generation) 결함**을 수리(REPAIR_REQUIRED → 해소). 영수증 키가 (작전+이슈+저장소)로 고정이라, 실패·경계 위반으로 조기 반환된 재실행이 이전 세대의 성공/REPAIR_REQUIRED 영수증을 남겨 review·repair가 재사용할 수 있었다. v2.4.2 이하 태그는 이동하지 않는다.

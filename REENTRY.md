@@ -28,11 +28,11 @@ verified:
   V14: PASS                # 이슈#15. grok exhausted+gpt reserved → claude_only_required → /operation-1-claude Sonnet 구현(b50e285, 22/22) → Opus 종료 검토 PASS, 외부 CLI 0
   V15: PASS                # 이슈#16. off: claude_review_fallback(GPT 미호출) / on(-UseGptReviewReserve): terra 검수 실호출 verdict 정상 파싱(REPAIR_REQUIRED+finding 1)
 solRetestPending:
-  note: "V11~V13·V15의 sol 역할은 사용자 지시로 gpt-5.6-terra 임시 매핑(config gpt.workers.sol). sol 복귀 시 매핑 원복 후 실제 sol로 재검증"
+  note: "2026-07-22 config gpt.workers.sol을 gpt-5.6-sol로 원복. V11~V13·V15는 실제 Sol 재검증 전까지 대기"
 notApproved:
   operationRouter_v2_3_5_full: true
 blocked:
-  V11_V12_V13_V15_sol: "gpt-5.6-sol이 2026-07-21 models_cache에서 제거됨 — 사용자 결정 필요"
+  V11_V12_V13_V15_sol: "Sol 매핑은 복구됨 — 실제 Sol E2E 재검증 미실행"
 usageState:
   note: "V03/V04/V08 성공 후 주문서에 따라 /operation reset 실행"
 next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. ⑤ 일부 착수:
@@ -47,7 +47,7 @@ next:   # ①~④ 및 작전1(V11~V15, terra 대체) 완료. ⑤ 일부 착수:
   - v2_4_2_receipt_ordering_done             # 완료: run/review 영수증을 finalizer 확정 후 저장. 195/195
   - v2_4_3_receipt_generation_done           # 완료(2026-07-21): v2.4.2 재검토 REPAIR_REQUIRED 수리 — 영수증 키가 (작전+이슈+저장소) 고정이라 이전 세대가 남던 문제. HIGH 작전1 worker 호출 직전 기존 run·review 영수증 삭제(Remove-RunReceipt/Remove-ReviewReceipt), GPT 검수 호출 직전 review 영수증 삭제, 성공 시에만 재저장. 실패·경계위반 재실행/재검수 후 과거 completed/REPAIR_REQUIRED 영수증 미잔존. 신규 테스트 2(재실행→run 영수증 null+review GPT 0회 / 재검수→review 영수증 삭제). 197/197. 검토저장소 태그 v2.4.3
   - external_review_v2_4_3                    # 남음: 검토 저장소 링크(태그 v2.4.3)로 외부 재검토 1회
-  - sol_retest_when_available                # sol 복귀(한도 복구+노출) 시 config 매핑 원복 + V11~V13·V15 재검증 → 최종 PASS 승격
+  - sol_retest_pending                       # 2026-07-22 config 매핑 원복 완료. V11~V13·V15 실제 Sol E2E 재검증 → 최종 PASS 승격 남음
 optional_considered_not_scheduled:          # 사용자 논의됨, 미확정 — 별도 지시 전까지 손대지 않음
   - provider_effort_consistency             # 3-logic effort가 grok=low/gpt=medium/sonnet=low로 공급자마다 다름(작업 난이도 무관). 통일 여부는 사용자 결정 대기
   - op2_vs_op3logic_gpt_collapse            # GPT 경로에서 작전2와 작전3-logic이 둘 다 terra/medium으로 구분 소실. 차등 여부 사용자 결정 대기
@@ -72,7 +72,7 @@ optional_considered_not_scheduled:          # 사용자 논의됨, 미확정 —
    ※ 보류했던 대안(3번의 전역 CLAUDE.md 우회안)은 채택 안 함 — 모델 고정 무력화 때문. A안(확인 게이트)으로 확정.
 4-docs. ⑥ v2.4.0 문서: CHANGELOG.md, VERIFICATION_MATRIX.md(V01~V15 + 4-1, 증거 커밋·CI 포함), SECURITY.md, INSTALL.md, ROLLBACK.md 작성 → 버전 v2.4.0 통일 → manifest 갱신 → 전체 테스트 → 검토 저장소 push·태그 v2.4.0
 4. 외부 검토 1회 (검토 저장소 링크) → PASS 시 완성 판정. 유료 워커 호출은 이 범위에 필요 없음.
-5. sol 복귀 확인 시: config `gpt.workers.sol`을 `gpt-5.6-sol`로 원복(+`_sol_note` 제거) → V11~V13·V15 재검증 후 †조건 해제.
+5. Sol 매핑 원복은 2026-07-22 완료. V11~V13·V15를 실제 Sol로 재검증한 후 †조건을 해제한다.
 
 주의: 서브에이전트에 실행기를 위임할 때는 반드시 `Set-Location "<repo>"; <명령>`로 한 명령에 묶는다. E2E 저장소 이슈 #12(2단계 완결)·#16(검수 finding 1건)은 열린 상태가 정상이다.
 

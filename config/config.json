@@ -1,5 +1,5 @@
 {
-  "_comment": "operation-router v2.4.3 config. Verified 2026-07-20 against installed CLIs: claude 2.1.212 (SKILL.md supports model/effort/disable-model-invocation/argument-hint; model IDs claude-opus-4-8/claude-sonnet-5/claude-haiku-4-5-20251001 recognized), grok 0.2.102 (only grok-4.5; grok --help confirms --always-approve, --allow, --deny; NO --no-auto-update flag/env/config exists), codex-cli 0.144.5 (gpt-5.6-terra/luna confirmed; gpt-5.6-sol not exposed in the E2E test account's models_cache 2026-07-21 so doctor reports unresolved there and invoke-gpt fail-closes - this reflects that test account plus primary-account usage-limit exhaustion, NOT a global Sol removal; Sol canon unchanged, re-verify when limits restore and Sol is exposed). v2.3.5 adds the final-worker marker and UTF-8 stdin preservation; routing, model, effort, permission, fallback, and v2.3.4 log/test/package isolation values are unchanged. Do not hand-edit model IDs without re-verifying.",
+  "_comment": "operation-router v2.4.3 config. Verified 2026-07-22 against codex-cli 0.144.5 models_cache: gpt-5.6-sol/terra/luna are exposed. The temporary test-environment Sol-to-Terra substitution has been removed and Operation 1 now uses gpt-5.6-sol as designed. Claude and Grok CLI capabilities remain as verified 2026-07-20: claude 2.1.212 (SKILL.md supports model/effort/disable-model-invocation/argument-hint; model IDs claude-opus-4-8/claude-sonnet-5/claude-haiku-4-5-20251001 recognized), grok 0.2.102 (only grok-4.5; grok --help confirms --always-approve, --allow, --deny; NO --no-auto-update flag/env/config exists). Do not hand-edit model IDs without re-verifying.",
   "grok": {
     "model": "grok-4.5",
     "operations": {
@@ -46,8 +46,7 @@
   },
   "gpt": {
     "workers": {
-      "sol": "gpt-5.6-terra",
-      "_sol_note": "TEMPORARY 2026-07-21 (test env only): user-directed substitution. The primary Codex accounts were at their usage limit and could not run Sol; the separate E2E test account did not expose gpt-5.6-sol in models_cache so doctor reported unresolved. Sol role therefore maps to gpt-5.6-terra IN THE TEST ENVIRONMENT ONLY. This is not evidence Sol was globally removed or deprecated, and Terra is not an official Sol replacement. Sol canon is unchanged. Restore this mapping to gpt-5.6-sol and re-verify V11-V13/V15 on an account where limits are restored and Sol is exposed.",
+      "sol": "gpt-5.6-sol",
       "terra": "gpt-5.6-terra",
       "luna": "gpt-5.6-luna"
     },
