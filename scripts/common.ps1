@@ -371,6 +371,24 @@ function ConvertFrom-StrictReviewJson {
         return [pscustomobject]@{ valid = $false; verdict = $null; parseError = $reason; findings = @() }
     }
     if ([string]::IsNullOrWhiteSpace($Text)) { return (& $fail 'empty_review_output') }
+    # v2.3.5: codex --json은 단일 JSON이 아니라 JSONL 이벤트 스트림을 출력하고, verdict JSON은
+    # item.completed 이벤트의 item(type=agent_message).text 안에 문자열로 들어 있다
+    # (2026-07-21 op1-issue13 검수 실측). agent_message text가 있으면 마지막 것을 검수 본문으로 쓴다.
+    # 평문 JSON 입력(mock·비스트리밍)은 agent_message가 없으므로 기존 동작 그대로다.
+    $agentTexts = @()
+    foreach ($line in ($Text -split "`r?`n")) {
+        $lt = $line.Trim()
+        if ($lt.Length -lt 2 -or -not $lt.StartsWith('{')) { continue }
+        $evt = $null
+        try { $evt = $lt | ConvertFrom-Json } catch { continue }
+        if ($null -eq $evt -or -not ($evt.PSObject.Properties.Name -contains 'item')) { continue }
+        $it = $evt.item
+        if ($null -ne $it -and ($it.PSObject.Properties.Name -contains 'type') -and $it.type -eq 'agent_message' -and
+            ($it.PSObject.Properties.Name -contains 'text') -and -not [string]::IsNullOrWhiteSpace([string]$it.text)) {
+            $agentTexts += [string]$it.text
+        }
+    }
+    if ($agentTexts.Count -gt 0) { $Text = [string]$agentTexts[$agentTexts.Count - 1] }
     # 첫 '{' 부터 마지막 '}' 까지 추출 (Sol이 앞뒤 설명을 붙였을 수 있음)
     $start = $Text.IndexOf('{'); $end = $Text.LastIndexOf('}')
     if ($start -lt 0 -or $end -le $start) { return (& $fail 'no_json_object_found') }

@@ -33,7 +33,8 @@
   },
   "gpt": {
     "workers": {
-      "sol": "gpt-5.6-sol",
+      "sol": "gpt-5.6-terra",
+      "_sol_note": "TEMPORARY 2026-07-21: user-directed substitution — gpt-5.6-sol removed from models_cache; role 'sol' maps to gpt-5.6-terra until sol returns, then re-verify V11-V15 with real sol",
       "terra": "gpt-5.6-terra",
       "luna": "gpt-5.6-luna"
     },

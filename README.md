@@ -116,8 +116,10 @@ Claude Code 2.1.212의 SKILL.md frontmatter는 `model`·`effort`를 **정적(로
 
 | 작전 | Grok 가능 | Grok 소진 + GPT 작업 허용 | GPT 차단(80%+/reserved/exhausted) |
 |---|---|---|---|
-| 1 구현 | grok-4.5 high | gpt-5.6-sol high | claude_only_required (claude-sonnet-5) |
-| 1 검수 | — | gpt-5.6-sol high | claude_review_fallback (Opus 직접) / 예비분은 `--use-gpt-review-reserve`만 |
+| 1 구현 | grok-4.5 high | sol 역할 high† | claude_only_required (claude-sonnet-5) |
+| 1 검수 | — | sol 역할 high† | claude_review_fallback (Opus 직접) / 예비분은 `--use-gpt-review-reserve`만 |
+
+† sol 역할의 설계 모델은 `gpt-5.6-sol`이나, 2026-07-21 models_cache에서 제거되어 사용자 지시로 **임시로 `gpt-5.6-terra`에 매핑**되어 있다 (config `gpt.workers.sol` 및 `_sol_note`). sol 복귀 시 매핑을 되돌리고 V11~V15를 실제 sol로 재검증한다.
 | 2 구현 | grok-4.5 medium | gpt-5.6-terra medium | claude_only_required (claude-sonnet-5) |
 | 3 logic | grok-4.5 low | gpt-5.6-terra medium | claude_only_required (claude-sonnet-5 low) |
 | 3 mechanical | grok-4.5 low | gpt-5.6-luna low | claude_direct (claude-haiku, 기계적 작업만) |

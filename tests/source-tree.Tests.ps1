@@ -1814,6 +1814,24 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         $received.Substring($payload.Length) | Should Match '^(\r?\n)?$'
     }
 
+    It '21. codex JSONL 이벤트 스트림에서 agent_message의 verdict를 추출한다' {
+        # 2026-07-21 op1-issue13 검수 실측 원문 형태 그대로.
+        $jsonl = '{"type":"turn.started"}' + "`n" +
+            '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"verdict\":\"PASS\",\"findings\":[]}"}}' + "`n" +
+            '{"type":"turn.completed","usage":{"input_tokens":17645,"cached_input_tokens":10496,"output_tokens":223}}'
+        $r = ConvertFrom-StrictReviewJson -Text $jsonl
+        $r.valid | Should Be $true
+        $r.verdict | Should Be 'PASS'
+        $inner = '{"verdict":"REPAIR_REQUIRED","findings":[{"severity":"high","file":"a.ps1","issue":"x","requiredFix":"y"}]}'
+        $line = '{"type":"item.completed","item":{"type":"agent_message","text":' + (ConvertTo-Json $inner) + '}}'
+        $r2 = ConvertFrom-StrictReviewJson -Text ('{"type":"turn.started"}' + "`n" + $line)
+        $r2.valid | Should Be $true
+        $r2.verdict | Should Be 'REPAIR_REQUIRED'
+        @($r2.findings).Count | Should Be 1
+        # 평문 JSON 입력은 기존 동작 유지
+        (ConvertFrom-StrictReviewJson -Text '{"verdict":"PASS","findings":[]}').valid | Should Be $true
+    }
+
     It '20. 비ASCII 인수 전경 실행도 NUL 고정 래퍼를 유지한다 (P1)' {
         # 명령줄에 한글이 있으면 env-var 래퍼 경로를 타며, stdin은 NUL(즉시 EOF)이어야 한다.
         $cmd = '$i=[Console]::In.ReadToEnd(); Write-Output (''STDINLEN='' + $i.Length); Write-Output ''한글인수확인'''
