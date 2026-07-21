@@ -99,12 +99,25 @@ try {
         $success = $classification.Success; $errorClass = $classification.ErrorClass
         $stopReason = $classification.StopReason; $quota = $classification.QuotaExhausted
     }
+    $sanitized = Complete-ExecutionArtifactSanitization -Receipt $receipt
+    $receipt = $sanitized.receipt
+    if (-not $sanitized.success) {
+        $receipt.status = 'artifact_sanitization_failed'
+        $receipt.remainingProblems = @('execution artifact sanitization failed: ' + [string]$sanitized.error)
+        Save-ExecutionReceipt -Receipt $receipt -RepoPath ([string]$receipt.repoRoot) | Out-Null
+        Write-ExecutionGenerationMarker -Receipt $receipt -Status $receipt.status
+        try { Invoke-ExecutionRetention -Receipt $receipt | Out-Null } catch {
+            $receipt.remainingProblems += ('execution retention failed: ' + (Protect-SecretText -Text ([string]$_.Exception.Message)))
+            Save-ExecutionReceipt -Receipt $receipt -RepoPath ([string]$receipt.repoRoot) | Out-Null
+        }
+        throw 'Execution artifact sanitization failed.'
+    }
     $envelope = [pscustomobject]@{
         schemaVersion = 1; executionId = $receipt.executionId; generation = $receipt.generation
         worker = $receipt.worker; exitCode = $proc.ExitCode; success = [bool]$success
         quotaExhausted = [bool]$quota; errorClass = $errorClass; workerStopReason = $stopReason
         workerReportedVerification = $null; localVerificationComplete = $false
-        stdoutPath = $receipt.rawStdoutPath; stderrPath = $receipt.rawStderrPath
+        stdoutPath = $receipt.stdoutPath; stderrPath = $receipt.stderrPath
         completedAt = (Get-Date).ToUniversalTime().ToString('o')
     }
     Write-AtomicJsonFile -Path ([string]$receipt.resultPath) -Object $envelope
@@ -114,10 +127,10 @@ try {
     Save-ExecutionReceipt -Receipt $receipt -RepoPath ([string]$receipt.repoRoot) | Out-Null
 } catch {
     $receipt = Get-ExecutionReceipt -Operation ([int]$receipt.operation) -IssueNumber ([int]$receipt.issueNumber) -RepoPath ([string]$receipt.repoRoot)
-    if ($null -ne $receipt -and [string]$receipt.executionId -eq [string]$invocation.executionId) {
+    if ($null -ne $receipt -and [string]$receipt.executionId -eq [string]$invocation.executionId -and [string]$receipt.status -ne 'artifact_sanitization_failed') {
         $receipt.status = 'interrupted_postflight_pending'
         $receipt.interruptedReason = 'worker_host_failure'
-        $receipt.remainingProblems = @($_.Exception.Message)
+        $receipt.remainingProblems = @(Protect-SecretText -Text ([string]$_.Exception.Message))
         Save-ExecutionReceipt -Receipt $receipt -RepoPath ([string]$receipt.repoRoot) | Out-Null
     }
     throw

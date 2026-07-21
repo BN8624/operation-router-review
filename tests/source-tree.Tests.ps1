@@ -2062,7 +2062,11 @@ Describe 'v2.4.4. 실행 세대 영속화·중복 차단·recover' {
             }
             $hostProcess.WaitForExit();$hostProcess.ExitCode|Should Be 0;$sawPartial|Should Be $true
             (Test-Path -LiteralPath $rc.resultPath)|Should Be $true
-            (Get-ExecutionReceipt -Operation 2 -IssueNumber 323 -RepoPath $repo).status|Should Be 'worker_exited_postflight_pending'
+            $hostReceipt=Get-ExecutionReceipt -Operation 2 -IssueNumber 323 -RepoPath $repo
+            $hostReceipt.status|Should Be 'worker_exited_postflight_pending'
+            (Test-Path -LiteralPath $rc.rawStdoutPath)|Should Be $false
+            (Test-Path -LiteralPath $rc.promptPath)|Should Be $false
+            (Test-Path -LiteralPath $hostReceipt.stdoutPath)|Should Be $true
         } finally {
             if ($null -ne $hostProcess -and -not $hostProcess.HasExited) { $hostProcess.WaitForExit(5000) | Out-Null }
             $removed=$false
@@ -2194,6 +2198,69 @@ Describe 'v2.4.5-2. result 유실 recover의 review 자격 차단' {
                 $review.status|Should Be 'review_not_eligible';$review.reason|Should Be 'recovered_result_missing_or_unverified';$script:v245ReviewCalls|Should Be 0
             } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
         }
+    }
+}
+
+Describe 'v2.4.5-3. execution artifact sanitization과 retention' {
+    It 'active raw partial은 관찰 가능하고 terminal 후 raw·prompt가 사라지며 보존본과 receipt만 마스킹된다' {
+        $repo=New-FakeRepo
+        try {
+            git -C $repo remote add origin 'https://github.com/BN8624/artifact-fixture.git'
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='gpt';model='fixture';effort='low'}
+            $promptSecret='PromptSecretAbC1234567890XyZ987654321'
+            $ghSecret='ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456'
+            $authSecret='dXNlcjpwYXNzd29yZDEyMzQ1Njc4OTA='
+            $awsSecret='AKIA1234567890ABCDEF'
+            $entropySecret='AbCdEfGhIjKlMnOpQrStUvWxYz123456'
+            $rc=New-ExecutionGeneration -Operation 2 -IssueNumber 420 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent ("order " + $promptSecret)
+            $partial="token=$ghSecret`nAuthorization: Basic $authSecret`n$awsSecret`n$entropySecret"
+            [System.IO.File]::WriteAllText([string]$rc.rawStdoutPath,$partial,(New-Object System.Text.UTF8Encoding($false)))
+            (Read-SharedTextFile -Path $rc.rawStdoutPath)|Should Match ([regex]::Escape($ghSecret))
+            (Test-Path -LiteralPath $rc.promptPath)|Should Be $true
+            $rc.status='completed';$rc.workerReportedVerification=$partial;$rc.remainingProblems=@()
+            $rc=Complete-ExecutionTerminalArtifacts -Receipt $rc -RepoPath $repo -IntendedStatus 'completed'
+            $rc.status|Should Be 'completed';$rc.artifactSanitizationStatus|Should Be 'completed';$rc.promptPresent|Should Be $false
+            (Test-Path -LiteralPath (Join-Path $rc.artifactPath 'stdout.raw'))|Should Be $false
+            (Test-Path -LiteralPath (Join-Path $rc.artifactPath 'stderr.raw'))|Should Be $false
+            (Test-Path -LiteralPath (Join-Path $rc.artifactPath 'prompt.txt'))|Should Be $false
+            $saved=Read-SharedTextFile -Path $rc.stdoutPath;$saved|Should Match 'MASKED'
+            foreach($secret in @($ghSecret,$authSecret,$awsSecret,$entropySecret,$promptSecret)) {
+                $hits=@(Get-ChildItem -LiteralPath (Get-PendingNamespacePath -RepoPath $repo) -File -Recurse|Where-Object{(Get-Content -LiteralPath $_.FullName -Raw -Encoding utf8) -match [regex]::Escape($secret)})
+                $hits.Count|Should Be 0
+            }
+            $persisted=Get-ExecutionReceipt -Operation 2 -IssueNumber 420 -RepoPath $repo
+            $persisted.promptHash|Should Not Be $null;$persisted.promptPath|Should Be $null;$persisted.rawStdoutPath|Should Be $null
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It 'retention은 namespace별 오래된 terminal generation만 지우고 active와 최신 receipt generation을 보존한다' {
+        $repo=New-FakeRepo
+        try {
+            $route=[pscustomobject]@{worker='gpt';model='fixture';effort='low'};$terminalPaths=@()
+            foreach($n in 1..3) {
+                $rc=New-ExecutionGeneration -Operation 2 -IssueNumber 421 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent "p$n"
+                $rc.remainingProblems=@();$rc=Complete-ExecutionTerminalArtifacts -Receipt $rc -RepoPath $repo -IntendedStatus 'completed';$terminalPaths+=$rc.artifactPath
+                Start-Sleep -Milliseconds 25
+            }
+            $active=New-ExecutionGeneration -Operation 2 -IssueNumber 421 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent 'active'
+            $active.status='worker_running';Save-ExecutionReceipt -Receipt $active -RepoPath $repo|Out-Null
+            Invoke-ExecutionRetention -Receipt $active -RetentionCount 2|Out-Null
+            (Test-Path -LiteralPath $active.artifactPath)|Should Be $true
+            @($terminalPaths|Where-Object{Test-Path -LiteralPath $_}).Count|Should Be 2
+            (Test-Path -LiteralPath $active.promptPath)|Should Be $true
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It 'execution root 밖 삭제를 거부하고 sanitization 실패를 성공 상태로 남기지 않는다' {
+        $repo=New-FakeRepo;$lock=$null
+        try {
+            $route=[pscustomobject]@{worker='gpt';model='fixture';effort='low'};$rc=New-ExecutionGeneration -Operation 2 -IssueNumber 422 -RepoPath $repo -Kind logic -Snapshot (Get-StartSnapshot -RepoPath $repo) -Route $route -PromptContent 'x'
+            {Remove-ExecutionArtifactDirectory -Path (Join-Path $TestWorkRoot 'outside-artifact') -ArtifactRoot $rc.artifactRoot}|Should Throw
+            $lock=[System.IO.File]::Open([string]$rc.rawStdoutPath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+            $rc.remainingProblems=@();$failed=Complete-ExecutionTerminalArtifacts -Receipt $rc -RepoPath $repo -IntendedStatus 'completed'
+            $failed.status|Should Be 'artifact_sanitization_failed';$failed.artifactSanitizationStatus|Should Be 'failed'
+            @($failed.remainingProblems).Count|Should BeGreaterThan 0
+        } finally {if($null -ne $lock){$lock.Dispose()};Remove-Item -LiteralPath $repo -Recurse -Force}
     }
 }
 

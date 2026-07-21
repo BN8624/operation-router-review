@@ -141,6 +141,8 @@ function Get-RemainingProblems {
         'recovered_ci_pending_unverified' { $probs += 'commit recovered but worker result is missing and CI is pending; review is not eligible' }
         'recovered_ci_failed_unverified' { $probs += 'commit recovered but worker result is missing and CI failed; review is not eligible' }
         'recovered_ci_unavailable_unverified' { $probs += 'commit recovered but worker result is missing and CI status is unavailable; review is not eligible' }
+        'artifact_sanitization_failed' { $probs += 'execution artifacts could not be sanitized; completion is not trusted' }
+        'artifact_retention_failed' { $probs += 'execution artifact retention failed; completion is not trusted' }
         'repair_worker_failed'    { $probs += 'repair worker returned non-zero exit (not a quota error)' }
         'repair_quota_exhausted'  { $probs += 'repair worker hit quota' }
         'repair_transient_rate_limited' { $probs += 'repair worker hit a transient rate limit; usage-state unchanged' }
@@ -430,15 +432,7 @@ function Invoke-RunOperation {
             $runBoundaryViol = @(Test-RepoBoundaryViolation -BeforeSnapshot $snapshot.boundaryWatch)
         }
         $receiptStatus = if ($runBoundaryViol.Count -gt 0) { 'repo_boundary_violation' } else { $pf.status }
-        # 작전 1 실행 영수증 자동 저장 (v2.2): review가 -StartHead 재입력 없이 자동으로 읽는다.
-        if ($OperationNumber -eq 1 -and $effectiveRoute.worker -in @('grok','gpt')) {
-            $runLocalVerification = if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false}
-            $rcPath = Save-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $snapshot -Postflight $pf `
-                -Route $effectiveRoute -WorkerResult $result -StatusOverride $receiptStatus -RemainingProblems (Get-RemainingProblems -Status $receiptStatus -Postflight $pf) `
-                -ResultEnvelopePresent $true -Interrupted $false -LocalVerificationComplete $runLocalVerification `
-                -RecoveredByPostflight $false -VerificationProvenance 'valid_worker_result_envelope'
-            $log.Add("op1 run receipt saved: $rcPath (status=$receiptStatus)")
-        }
+        $executionRemaining = @(Get-RemainingProblems -Status $receiptStatus -Postflight $pf)
         if ($result.PSObject.Properties.Name -contains 'ExecutionReceipt' -and $null -ne $result.ExecutionReceipt) {
             $er = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
             if ($null -ne $er -and [string]$er.executionId -eq [string]$result.ExecutionReceipt.executionId) {
@@ -449,16 +443,26 @@ function Invoke-RunOperation {
                 $er.localVerificationComplete = if ($result.PSObject.Properties.Name -contains 'LocalVerificationComplete') { [bool]$result.LocalVerificationComplete } else { $false }
                 $er.resultEnvelopePresent = $true; $er.verificationProvenance = 'valid_worker_result_envelope'
                 $er.remainingProblems = @(Get-RemainingProblems -Status $receiptStatus -Postflight $pf)
-                Save-ExecutionReceipt -Receipt $er -RepoPath $RepoPath | Out-Null
+                $er = Complete-ExecutionTerminalArtifacts -Receipt $er -RepoPath $RepoPath -IntendedStatus $receiptStatus
+                $receiptStatus = [string]$er.status; $executionRemaining = @($er.remainingProblems)
             }
         }
+        # 작전 1 실행 영수증은 artifact finalization까지 성공한 정상 결과에만 review 자격과 함께 저장한다.
+        if ($OperationNumber -eq 1 -and $effectiveRoute.worker -in @('grok','gpt') -and $receiptStatus -notin @('artifact_sanitization_failed','artifact_retention_failed')) {
+            $runLocalVerification = if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false}
+            $rcPath = Save-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $snapshot -Postflight $pf `
+                -Route $effectiveRoute -WorkerResult $result -StatusOverride $receiptStatus -RemainingProblems $executionRemaining `
+                -ResultEnvelopePresent $true -Interrupted $false -LocalVerificationComplete $runLocalVerification `
+                -RecoveredByPostflight $false -VerificationProvenance 'valid_worker_result_envelope'
+            $log.Add("op1 run receipt saved: $rcPath (status=$receiptStatus)")
+        }
         $lp = Write-RouterLog -Name "op$OperationNumber-issue$IssueNumber" -Content ($log -join "`n")
-        return New-FinalOutput -Operation $OperationNumber -RouteLabel (New-RouteLabel -Route $effectiveRoute) -Status $pf.status `
+        return New-FinalOutput -Operation $OperationNumber -RouteLabel (New-RouteLabel -Route $effectiveRoute) -Status $receiptStatus `
             -Worker $effectiveRoute.worker -Model $effectiveRoute.model -Effort $effectiveRoute.effort `
             -Snapshot $snapshot -Postflight $pf -IssueNumber $IssueNumber -LogPath $lp `
-            -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
+            -RemainingProblems $executionRemaining `
             -Extra @{ interrupted=$false; recoveredByPostflight=$false
-                workerReportedVerification=if($result.PSObject.Properties.Name -contains 'WorkerReportedVerification'){$result.WorkerReportedVerification}else{$null}
+                workerReportedVerification=if($result.PSObject.Properties.Name -contains 'WorkerReportedVerification' -and $null -ne $result.WorkerReportedVerification){Protect-SecretText -Text ([string]$result.WorkerReportedVerification)}else{$null}
                 localVerificationComplete=if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false}
                 resultEnvelopePresent=$true; verificationProvenance='valid_worker_result_envelope' }
     }
@@ -473,7 +477,11 @@ function ConvertFrom-ExecutionResult {
     if (-not (Test-Path -LiteralPath ([string]$Receipt.resultPath))) { return $null }
     $envelope = Read-JsonFile -Path ([string]$Receipt.resultPath)
     if ([string]$envelope.executionId -ne [string]$Receipt.executionId -or [int]$envelope.generation -ne [int]$Receipt.generation) { return $null }
-    $output = (Read-SharedTextFile -Path ([string]$Receipt.rawStdoutPath)) + (Read-SharedTextFile -Path ([string]$Receipt.rawStderrPath))
+    $stdoutPath = if ($envelope.PSObject.Properties.Name -contains 'stdoutPath' -and $envelope.stdoutPath) { [string]$envelope.stdoutPath } elseif ($Receipt.PSObject.Properties.Name -contains 'stdoutPath' -and $Receipt.stdoutPath) { [string]$Receipt.stdoutPath } elseif ($Receipt.PSObject.Properties.Name -contains 'rawStdoutPath') { [string]$Receipt.rawStdoutPath } else { $null }
+    $stderrPath = if ($envelope.PSObject.Properties.Name -contains 'stderrPath' -and $envelope.stderrPath) { [string]$envelope.stderrPath } elseif ($Receipt.PSObject.Properties.Name -contains 'stderrPath' -and $Receipt.stderrPath) { [string]$Receipt.stderrPath } elseif ($Receipt.PSObject.Properties.Name -contains 'rawStderrPath') { [string]$Receipt.rawStderrPath } else { $null }
+    $output = ''
+    if ($stdoutPath) { $output += Read-SharedTextFile -Path $stdoutPath }
+    if ($stderrPath) { $output += Read-SharedTextFile -Path $stderrPath }
     $workerResult = [pscustomobject]@{
         Worker = $Receipt.worker; ExitCode = [int]$envelope.exitCode; Success = [bool]$envelope.success
         QuotaExhausted = [bool]$envelope.quotaExhausted; ErrorClass = [string]$envelope.errorClass
@@ -484,7 +492,7 @@ function ConvertFrom-ExecutionResult {
     if (-not $workerResult.Success) {
         $Receipt.status = if ([string]::IsNullOrWhiteSpace($workerResult.ErrorClass)) { 'worker_failed' } else { [string]$workerResult.ErrorClass }
         $Receipt.workerExitCode = $workerResult.ExitCode; $Receipt.workerStopReason = $workerResult.WorkerStopReason
-        Save-ExecutionReceipt -Receipt $Receipt -RepoPath $RepoPath | Out-Null
+        $Receipt = Complete-ExecutionTerminalArtifacts -Receipt $Receipt -RepoPath $RepoPath -IntendedStatus ([string]$Receipt.status)
     }
     return $workerResult
 }
@@ -512,14 +520,29 @@ function Write-InjectedExecutionResult {
     $quota = ($errorClass -eq 'weekly_exhausted')
     if ($WorkerResult.PSObject.Properties.Name -contains 'QuotaExhausted') { $quota = [bool]$WorkerResult.QuotaExhausted }
     $verification = $null
-    if ($WorkerResult.PSObject.Properties.Name -contains 'WorkerReportedVerification') { $verification = $WorkerResult.WorkerReportedVerification }
+    if ($WorkerResult.PSObject.Properties.Name -contains 'WorkerReportedVerification' -and $null -ne $WorkerResult.WorkerReportedVerification) {
+        $verification = Protect-SecretText -Text ([string]$WorkerResult.WorkerReportedVerification)
+    }
     $localVerificationComplete = $false
     if ($WorkerResult.PSObject.Properties.Name -contains 'LocalVerificationComplete') { $localVerificationComplete = [bool]$WorkerResult.LocalVerificationComplete }
+    $sanitized = Complete-ExecutionArtifactSanitization -Receipt $Receipt
+    $Receipt = $sanitized.receipt
+    if (-not $sanitized.success) {
+        $Receipt.status = 'artifact_sanitization_failed'
+        $Receipt.remainingProblems = @('execution artifact sanitization failed: ' + [string]$sanitized.error)
+        Save-ExecutionReceipt -Receipt $Receipt -RepoPath $RepoPath | Out-Null
+        Write-ExecutionGenerationMarker -Receipt $Receipt -Status $Receipt.status
+        try { Invoke-ExecutionRetention -Receipt $Receipt | Out-Null } catch {
+            $Receipt.remainingProblems += ('execution retention failed: ' + (Protect-SecretText -Text ([string]$_.Exception.Message)))
+            Save-ExecutionReceipt -Receipt $Receipt -RepoPath $RepoPath | Out-Null
+        }
+        throw 'Execution artifact sanitization failed.'
+    }
     $envelope = [pscustomobject]@{
         schemaVersion = 1; executionId = $Receipt.executionId; generation = $Receipt.generation; worker = $Receipt.worker
         exitCode = $WorkerResult.ExitCode; success = [bool]$WorkerResult.Success; quotaExhausted = [bool]$quota
         errorClass = $errorClass; workerStopReason = $stopReason; workerReportedVerification = $verification
-        localVerificationComplete = $localVerificationComplete; stdoutPath = $Receipt.rawStdoutPath; stderrPath = $Receipt.rawStderrPath
+        localVerificationComplete = $localVerificationComplete; stdoutPath = $Receipt.stdoutPath; stderrPath = $Receipt.stderrPath
         completedAt = (Get-Date).ToUniversalTime().ToString('o')
     }
     Write-AtomicJsonFile -Path ([string]$Receipt.resultPath) -Object $envelope
@@ -1188,8 +1211,10 @@ function Invoke-RecoverCommand {
             if ($receipt.PSObject.Properties.Name -contains $item[0]) { $receipt.($item[0]) = $item[1] }
             else { Add-Member -InputObject $receipt -NotePropertyName $item[0] -NotePropertyValue $item[1] }
         }
-        Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
-        if ($OperationNumber -eq 1 -and $receipt.worker -in @('grok','gpt') -and ($null -eq $result -or $result.Success)) {
+        $receipt = Complete-ExecutionTerminalArtifacts -Receipt $receipt -RepoPath $RepoPath -IntendedStatus $finalStatus
+        $finalStatus = [string]$receipt.status
+        if ($OperationNumber -eq 1 -and $receipt.worker -in @('grok','gpt') -and ($null -eq $result -or $result.Success) -and
+            $finalStatus -notin @('artifact_sanitization_failed','artifact_retention_failed')) {
             if ($null -eq $result) { Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath }
             Save-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $snapshot -Postflight $pf `
                 -Route $route -WorkerResult $result -StatusOverride $finalStatus -RemainingProblems $receipt.remainingProblems `

@@ -74,6 +74,20 @@ function Write-AtomicJsonFile {
     }
 }
 
+function Write-AtomicTextFile {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $temp = Join-Path $parent ('.atomic-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [System.IO.File]::WriteAllText($temp, $Text, (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+        [System.IO.File]::Move($temp, $Path)
+    } finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+    }
+}
+
 function Get-Config { return Read-JsonFile -Path $Script:ConfigPath }
 function Get-UsageState { return Read-JsonFile -Path $Script:UsageStatePath }
 
@@ -671,8 +685,10 @@ function New-ExecutionGeneration {
     $resultPath = Join-Path $artifactDir 'result.json'
     $stdoutPath = Join-Path $artifactDir 'stdout.raw'
     $stderrPath = Join-Path $artifactDir 'stderr.raw'
+    $sanitizedStdoutPath = Join-Path $artifactDir 'stdout.log'
+    $sanitizedStderrPath = Join-Path $artifactDir 'stderr.log'
     $invocationPath = Join-Path $artifactDir 'invocation.json'
-    foreach ($path in @($promptPath,$resultPath,$stdoutPath,$stderrPath,$invocationPath)) { Assert-PathWithinRoot -Path $path -Root $artifactDir | Out-Null }
+    foreach ($path in @($promptPath,$resultPath,$stdoutPath,$stderrPath,$sanitizedStdoutPath,$sanitizedStderrPath,$invocationPath)) { Assert-PathWithinRoot -Path $path -Root $artifactDir | Out-Null }
     [System.IO.File]::WriteAllText($promptPath, $PromptContent, (New-Object System.Text.UTF8Encoding($false)))
     [System.IO.File]::WriteAllText($stdoutPath, '', (New-Object System.Text.UTF8Encoding($false)))
     [System.IO.File]::WriteAllText($stderrPath, '', (New-Object System.Text.UTF8Encoding($false)))
@@ -692,7 +708,10 @@ function New-ExecutionGeneration {
         startHead = $Snapshot.startHead; startSnapshot = $Snapshot; worker = $Route.worker; model = $Route.model; effort = $Route.effort
         status = 'worker_starting'; startedAt = $now; updatedAt = $now
         promptHash = (Get-Sha256Text -Text $PromptContent); promptPath = $promptPath; logPath = $logPath
-        resultPath = $resultPath; rawStdoutPath = $stdoutPath; rawStderrPath = $stderrPath; invocationPath = $invocationPath
+        promptPresent = $true; promptDeletedAt = $null; artifactRoot = $artifactRoot; artifactPath = $artifactDir
+        resultPath = $resultPath; rawStdoutPath = $stdoutPath; rawStderrPath = $stderrPath
+        stdoutPath = $null; stderrPath = $null; sanitizedStdoutPath = $sanitizedStdoutPath; sanitizedStderrPath = $sanitizedStderrPath
+        artifactSanitizationStatus = 'pending'; artifactSanitizedAt = $null; invocationPath = $invocationPath
         processId = $null; processStartedAt = $null; finalHead = $null; workerExitCode = $null
         workerStopReason = $null; interruptedReason = $null; workerReportedVerification = $null
         localVerificationComplete = $false; interrupted = $false; recoveredByPostflight = $false
@@ -727,6 +746,125 @@ function Read-SharedTextFile {
     $stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try { $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8, $true); try { return $reader.ReadToEnd() } finally { $reader.Dispose() } }
     finally { $stream.Dispose() }
+}
+
+function Complete-ExecutionArtifactSanitization {
+    param([Parameter(Mandatory)]$Receipt)
+    $errors = @()
+    try {
+        $artifactPath = if ($Receipt.PSObject.Properties.Name -contains 'artifactPath' -and $Receipt.artifactPath) {
+            [string]$Receipt.artifactPath
+        } else { Split-Path -Parent ([string]$Receipt.resultPath) }
+        Assert-PathWithinRoot -Path $artifactPath -Root $Script:PendingDir | Out-Null
+        $stdoutRaw = if ($Receipt.PSObject.Properties.Name -contains 'rawStdoutPath') { [string]$Receipt.rawStdoutPath } else { $null }
+        $stderrRaw = if ($Receipt.PSObject.Properties.Name -contains 'rawStderrPath') { [string]$Receipt.rawStderrPath } else { $null }
+        $stdoutSaved = if ($Receipt.PSObject.Properties.Name -contains 'sanitizedStdoutPath' -and $Receipt.sanitizedStdoutPath) { [string]$Receipt.sanitizedStdoutPath } else { Join-Path $artifactPath 'stdout.log' }
+        $stderrSaved = if ($Receipt.PSObject.Properties.Name -contains 'sanitizedStderrPath' -and $Receipt.sanitizedStderrPath) { [string]$Receipt.sanitizedStderrPath } else { Join-Path $artifactPath 'stderr.log' }
+        foreach ($path in @($stdoutSaved,$stderrSaved)) { Assert-PathWithinRoot -Path $path -Root $artifactPath | Out-Null }
+        if ($stdoutRaw) { Assert-PathWithinRoot -Path $stdoutRaw -Root $artifactPath | Out-Null }
+        if ($stderrRaw) { Assert-PathWithinRoot -Path $stderrRaw -Root $artifactPath | Out-Null }
+        $stdout = if ($stdoutRaw -and (Test-Path -LiteralPath $stdoutRaw)) { Read-SharedTextFile -Path $stdoutRaw } elseif (Test-Path -LiteralPath $stdoutSaved) { Read-SharedTextFile -Path $stdoutSaved } else { '' }
+        $stderr = if ($stderrRaw -and (Test-Path -LiteralPath $stderrRaw)) { Read-SharedTextFile -Path $stderrRaw } elseif (Test-Path -LiteralPath $stderrSaved) { Read-SharedTextFile -Path $stderrSaved } else { '' }
+        Write-AtomicTextFile -Path $stdoutSaved -Text (Protect-SecretText -Text $stdout)
+        Write-AtomicTextFile -Path $stderrSaved -Text (Protect-SecretText -Text $stderr)
+        foreach ($raw in @($stdoutRaw,$stderrRaw)) {
+            if ($raw -and (Test-Path -LiteralPath $raw)) { Remove-Item -LiteralPath $raw -Force }
+        }
+        $promptPath = if ($Receipt.PSObject.Properties.Name -contains 'promptPath') { [string]$Receipt.promptPath } else { $null }
+        if ($promptPath) {
+            Assert-PathWithinRoot -Path $promptPath -Root $artifactPath | Out-Null
+            if (Test-Path -LiteralPath $promptPath) { Remove-Item -LiteralPath $promptPath -Force }
+        }
+        $now = (Get-Date).ToUniversalTime().ToString('o')
+        foreach ($item in @(
+            @('rawStdoutPath',$null),@('rawStderrPath',$null),@('stdoutPath',$stdoutSaved),@('stderrPath',$stderrSaved),
+            @('promptPath',$null),@('promptPresent',$false),@('promptDeletedAt',$now),
+            @('artifactSanitizationStatus','completed'),@('artifactSanitizedAt',$now))) {
+            Add-Member -InputObject $Receipt -NotePropertyName $item[0] -NotePropertyValue $item[1] -Force
+        }
+        if ($Receipt.PSObject.Properties.Name -contains 'workerReportedVerification' -and $null -ne $Receipt.workerReportedVerification) {
+            $Receipt.workerReportedVerification = Protect-SecretText -Text ([string]$Receipt.workerReportedVerification)
+        }
+        if ($Receipt.PSObject.Properties.Name -contains 'remainingProblems' -and $null -ne $Receipt.remainingProblems) {
+            $Receipt.remainingProblems = @($Receipt.remainingProblems | ForEach-Object { Protect-SecretText -Text ([string]$_) })
+        }
+        return [pscustomobject]@{ success=$true; receipt=$Receipt; error=$null }
+    } catch {
+        $safe = Protect-SecretText -Text ([string]$_.Exception.Message)
+        Add-Member -InputObject $Receipt -NotePropertyName artifactSanitizationStatus -NotePropertyValue 'failed' -Force
+        return [pscustomobject]@{ success=$false; receipt=$Receipt; error=$safe }
+    }
+}
+
+function Write-ExecutionGenerationMarker {
+    param([Parameter(Mandatory)]$Receipt, [Parameter(Mandatory)][string]$Status)
+    $artifactPath = if ($Receipt.PSObject.Properties.Name -contains 'artifactPath' -and $Receipt.artifactPath) { [string]$Receipt.artifactPath } else { Split-Path -Parent ([string]$Receipt.resultPath) }
+    Assert-PathWithinRoot -Path $artifactPath -Root $Script:PendingDir | Out-Null
+    $markerPath = Join-Path $artifactPath 'generation.json'
+    Assert-PathWithinRoot -Path $markerPath -Root $artifactPath | Out-Null
+    Write-AtomicJsonFile -Path $markerPath -Object ([pscustomobject]@{
+        executionId=[string]$Receipt.executionId; generation=[int]$Receipt.generation; status=$Status
+        terminal=(-not (Test-ExecutionStatusActive -Status $Status)); updatedAt=(Get-Date).ToUniversalTime().ToString('o')
+    })
+}
+
+function Remove-ExecutionArtifactDirectory {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$ArtifactRoot)
+    $safePath = Assert-PathWithinRoot -Path $Path -Root $ArtifactRoot
+    if ($safePath.Equals([System.IO.Path]::GetFullPath($ArtifactRoot).TrimEnd('\','/'), [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing to remove the execution artifact root itself.' }
+    if (Test-Path -LiteralPath $safePath) { Remove-Item -LiteralPath $safePath -Recurse -Force }
+}
+
+function Invoke-ExecutionRetention {
+    param([Parameter(Mandatory)]$Receipt, [int]$RetentionCount = -1)
+    $artifactPath = if ($Receipt.PSObject.Properties.Name -contains 'artifactPath' -and $Receipt.artifactPath) { [string]$Receipt.artifactPath } else { Split-Path -Parent ([string]$Receipt.resultPath) }
+    $artifactRoot = if ($Receipt.PSObject.Properties.Name -contains 'artifactRoot' -and $Receipt.artifactRoot) { [string]$Receipt.artifactRoot } else { Split-Path -Parent $artifactPath }
+    Assert-PathWithinRoot -Path $artifactRoot -Root $Script:PendingDir | Out-Null
+    Assert-PathWithinRoot -Path $artifactPath -Root $artifactRoot | Out-Null
+    if ($RetentionCount -lt 0) {
+        $RetentionCount = 10; $cfg = Get-Config
+        if ($cfg.PSObject.Properties.Name -contains 'execution' -and $cfg.execution.PSObject.Properties.Name -contains 'executionRetentionCount') { $RetentionCount = [Math]::Max(0, [int]$cfg.execution.executionRetentionCount) }
+    }
+    if (-not (Test-Path -LiteralPath $artifactRoot)) { return @() }
+    $terminal = @()
+    foreach ($dir in @(Get-ChildItem -LiteralPath $artifactRoot -Directory)) {
+        $markerPath = Join-Path $dir.FullName 'generation.json'
+        if (-not (Test-Path -LiteralPath $markerPath)) { continue }
+        try {
+            $marker = Read-JsonFile -Path $markerPath
+            if ([bool]$marker.terminal) { $terminal += [pscustomobject]@{ Directory=$dir; UpdatedAt=[DateTime]::Parse([string]$marker.updatedAt).ToUniversalTime() } }
+        } catch { continue }
+    }
+    $ordered = @($terminal | Sort-Object UpdatedAt -Descending)
+    $kept = 0; $removed = @()
+    foreach ($entry in $ordered) {
+        if ($entry.Directory.FullName.Equals([System.IO.Path]::GetFullPath($artifactPath), [System.StringComparison]::OrdinalIgnoreCase)) { $kept++; continue }
+        if ($kept -lt $RetentionCount) { $kept++; continue }
+        Remove-ExecutionArtifactDirectory -Path $entry.Directory.FullName -ArtifactRoot $artifactRoot
+        $removed += $entry.Directory.FullName
+    }
+    return $removed
+}
+
+function Complete-ExecutionTerminalArtifacts {
+    param([Parameter(Mandatory)]$Receipt, [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$IntendedStatus)
+    $Receipt.status = $IntendedStatus
+    $sanitized = Complete-ExecutionArtifactSanitization -Receipt $Receipt
+    $Receipt = $sanitized.receipt
+    if (-not $sanitized.success) {
+        $Receipt.status = 'artifact_sanitization_failed'
+        $Receipt.remainingProblems = @($Receipt.remainingProblems) + @('execution artifact sanitization failed: ' + [string]$sanitized.error)
+    }
+    Write-ExecutionGenerationMarker -Receipt $Receipt -Status ([string]$Receipt.status)
+    try { Invoke-ExecutionRetention -Receipt $Receipt | Out-Null } catch {
+        $underlying = [string]$Receipt.status
+        $Receipt.status = 'artifact_retention_failed'
+        Add-Member -InputObject $Receipt -NotePropertyName artifactFinalizationUnderlyingStatus -NotePropertyValue $underlying -Force
+        $Receipt.remainingProblems = @($Receipt.remainingProblems) + @('execution retention failed: ' + (Protect-SecretText -Text ([string]$_.Exception.Message)))
+        Write-ExecutionGenerationMarker -Receipt $Receipt -Status ([string]$Receipt.status)
+    }
+    Save-ExecutionReceipt -Receipt $Receipt -RepoPath $RepoPath | Out-Null
+    return $Receipt
 }
 
 # ---------- claude-only 2단계용 pending 상태 (state/pending/<namespace>) ----------

@@ -87,7 +87,8 @@
     "schemaVersion": 1,
     "foregroundWaitSeconds": 480,
     "pollIntervalMilliseconds": 500,
-    "staleHeartbeatSeconds": 15
+    "staleHeartbeatSeconds": 15,
+    "executionRetentionCount": 10
   },
   "logRetentionCount": 20,
   "weeklyExhaustedPatterns": [
