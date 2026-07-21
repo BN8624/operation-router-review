@@ -936,10 +936,10 @@ function Save-RunReceipt {
         [Parameter(Mandatory)][string]$RepoPath,
         [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)]$Postflight,
         [Parameter(Mandatory)]$Route, $WorkerResult, $RemainingProblems = @(),
-        [string]$StatusOverride, [bool]$ResultEnvelopePresent = $true,
-        [bool]$Interrupted = $false, [string]$InterruptedReason,
+        [string]$StatusOverride, [bool]$ResultEnvelopePresent = $false,
+        [bool]$Interrupted = $true, [string]$InterruptedReason,
         [bool]$LocalVerificationComplete = $false, [bool]$RecoveredByPostflight = $false,
-        [string]$VerificationProvenance = 'valid_worker_result_envelope'
+        [string]$VerificationProvenance = 'unknown'
     )
     Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
     $id = Get-RepoIdentity -RepoPath $RepoPath
@@ -991,6 +991,42 @@ function Get-RunReceipt {
     $path = Get-RunReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     $legacyPath = Join-Path (Get-LegacyPendingNamespacePath -RepoPath $RepoPath) "op$Operation-issue$IssueNumber-run.json"
     return (Get-ReceiptWithLegacyMigration -CurrentPath $path -LegacyPath $legacyPath -RepoPath $RepoPath)
+}
+function Test-RunReceiptVerificationEligible {
+    param([AllowNull()]$Receipt, [Parameter(Mandatory)][string]$RepoPath)
+    $fail = {
+        param([string]$Status, [string]$Reason, [string]$Note)
+        return [pscustomobject]@{ eligible=$false; status=$Status; reason=$Reason; note=$Note }
+    }
+    if ($null -eq $Receipt) {
+        return (& $fail 'run_receipt_missing' 'run_receipt_missing' 'run 영수증이 없어 검증 자격을 확인할 수 없다.')
+    }
+    if (-not (Test-ReceiptRepoMatch -Receipt $Receipt -RepoPath $RepoPath)) {
+        return (& $fail 'run_receipt_repository_mismatch' 'run_receipt_repository_mismatch' '현재 저장소와 run 영수증의 저장소가 다르다.')
+    }
+    $props = @($Receipt.PSObject.Properties.Name)
+    foreach ($required in @('operation','worker','status','finalHead','resultEnvelopePresent','interrupted','verificationProvenance')) {
+        if ($props -notcontains $required) {
+            return (& $fail 'run_result_unverified' 'run_result_unverified' "run 영수증에 필수 provenance 필드가 없다: $required")
+        }
+    }
+    if ([int]$Receipt.operation -ne 1) {
+        return (& $fail 'run_not_eligible' 'run_operation_not_1' '작전 1 run 영수증만 review와 repair 자격이 있다.')
+    }
+    if ([string]$Receipt.worker -ne 'grok') {
+        return (& $fail 'run_not_eligible' ("worker_not_grok:" + [string]$Receipt.worker) 'Grok이 구현한 작전 1 run만 독립 review와 repair 자격이 있다.')
+    }
+    if (-not [bool]$Receipt.resultEnvelopePresent -or [bool]$Receipt.interrupted -or
+        [string]$Receipt.verificationProvenance -notin @('valid_worker_result_envelope','valid_worker_result_envelope_recovered_postflight')) {
+        return (& $fail 'run_result_unverified' 'run_result_unverified' '정상 worker result envelope와 검증 provenance가 확인되지 않았다.')
+    }
+    if ([string]$Receipt.status -notin @('completed','completed_ci_pending','completed_ci_unavailable')) {
+        return (& $fail 'run_status_not_completed' ("run_not_completed:" + [string]$Receipt.status) '정상 완료 상태가 아닌 run은 review와 repair 자격이 없다.')
+    }
+    return [pscustomobject]@{
+        eligible=$true; status='eligible'; reason=$null; note='verified run receipt'
+        receipt=$Receipt; verificationProvenance=[string]$Receipt.verificationProvenance
+    }
 }
 function Remove-RunReceipt {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)

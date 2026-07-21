@@ -114,6 +114,34 @@ function Get-SkillFrontmatter {
 $issue = { param($n,$p) "Do the thing verbatim body." }
 $ciNone = { param($p) 'not-requested' }
 
+# v2.2+: 테스트용 verified run/review 영수증 생성
+function Save-TestRunReceipt {
+    param([Parameter(Mandatory)]$Repo, [Parameter(Mandatory)][int]$IssueNum,
+          [string]$Worker = 'grok', [string]$FinalHeadOverride, [string]$Status = 'completed')
+    Push-Location $Repo
+    try {
+        $heads = @(git rev-list --max-count=2 HEAD)
+        $final = ([string]$heads[0]).Trim()
+        $start = if ($heads.Count -gt 1) { ([string]$heads[1]).Trim() } else { $final }
+    } finally { Pop-Location }
+    if ($FinalHeadOverride) { $final = $FinalHeadOverride }
+    $snap = [pscustomobject]@{ startHead = $start }
+    $pf = [pscustomobject]@{ status=$Status; branch='main'; startHead=$start; finalHead=$final; headChanged=$true
+        commitCount=1; worktreeClean=$true; aheadBehindAvailable=$true; ahead=0; behind=0; pushComplete=$true
+        ciStatus='not-requested'; workerExitCode=0 }
+    $route = [pscustomobject]@{ worker=$Worker; model='grok-4.5'; effort='high' }
+    $wr = [pscustomobject]@{ Output = 'worker self-reported: tests passed (not re-run by router)' }
+    Save-RunReceipt -Operation 1 -IssueNumber $IssueNum -RepoPath $Repo -Snapshot $snap -Postflight $pf -Route $route -WorkerResult $wr -RemainingProblems @() `
+        -ResultEnvelopePresent $true -Interrupted $false -VerificationProvenance 'valid_worker_result_envelope' | Out-Null
+}
+function Save-TestRepairReceipts {
+    param([Parameter(Mandatory)]$Repo, [Parameter(Mandatory)][int]$IssueNum, [Parameter(Mandatory)]$Findings)
+    Save-TestRunReceipt -Repo $Repo -IssueNum $IssueNum -Worker 'grok'
+    Save-ReviewReceipt -Operation 1 -IssueNumber $IssueNum -RepoPath $Repo -Verdict 'REPAIR_REQUIRED' -Findings $Findings `
+        -PostReviewHead (Get-GitHead -Path $Repo) -OriginalWorker 'grok' | Out-Null
+}
+
+
 Describe '1. 네 개 Skill 등록 구조' {
     It '/operation, /operation-1, /operation-2, /operation-3 각각 SKILL.md 존재' {
         foreach ($n in @('operation','operation-1','operation-2','operation-3')) {
@@ -471,6 +499,7 @@ Describe 'v2.4.0/v2.4.1 저장소 경계 탐지 + 공통 finalizer' {
         try {
             $head = (Get-GitHead -Path $repo)
             $findings = @([pscustomobject]@{ severity='high'; file='a.txt'; issue='x'; requiredFix='y' })
+            Save-TestRepairReceipts -Repo $repo -IssueNum 45 -Findings $findings
             $repairFail = { param($r,$repo2,$prompt) Set-Content -LiteralPath $wf -Value 'HACKED' -Encoding utf8; [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;Output='auth error 401' } }
             $rr = Invoke-OperationRepair -OperationNumber 1 -IssueNumber 45 -RepoPath $repo -Findings $findings -OriginalWorker 'grok' -PostReviewHead $head -IssueFetcher $issue -RepairRunner $repairFail -CiProbe $ciNone
             $rr.status | Should Be 'repo_boundary_violation'
@@ -811,24 +840,6 @@ Describe 'v2.1-3. operation-3 claude_direct 실제 흐름' {
     }
 }
 
-# v2.2/v2.3: 테스트용 run 영수증 생성 (repo에 커밋 2개 필요: startHead=HEAD~1, finalHead=HEAD)
-function Save-TestRunReceipt {
-    param([Parameter(Mandatory)]$Repo, [Parameter(Mandatory)][int]$IssueNum,
-          [string]$Worker = 'grok', [string]$FinalHeadOverride, [string]$Status = 'completed')
-    Push-Location $Repo
-    $final = (git rev-parse HEAD).Trim()
-    $start = (git rev-parse "HEAD~1").Trim()
-    Pop-Location
-    if ($FinalHeadOverride) { $final = $FinalHeadOverride }
-    $snap = [pscustomobject]@{ startHead = $start }
-    $pf = [pscustomobject]@{ status=$Status; branch='main'; startHead=$start; finalHead=$final; headChanged=$true
-        commitCount=1; worktreeClean=$true; aheadBehindAvailable=$true; ahead=0; behind=0; pushComplete=$true
-        ciStatus='not-requested'; workerExitCode=0 }
-    $route = [pscustomobject]@{ worker=$Worker; model='grok-4.5'; effort='high' }
-    $wr = [pscustomobject]@{ Output = 'worker self-reported: tests passed (not re-run by router)' }
-    Save-RunReceipt -Operation 1 -IssueNumber $IssueNum -RepoPath $Repo -Snapshot $snap -Postflight $pf -Route $route -WorkerResult $wr -RemainingProblems @() | Out-Null
-}
-
 Describe 'v2.1-4. review 실제 mock GPT 호출 + 엄격 JSON (v2.2: 영수증 자동 복원)' {
     $repo = New-FakeRepo -WithRemote
     Push-Location $repo; "y" | Out-File b.txt -Encoding utf8; git add .; git commit -q -m b; Pop-Location
@@ -884,6 +895,7 @@ Describe 'v2.1-5. 수리 최대 1회 + 상태 가드' {
         try {
             $prh = Head-Of $repo
             $findings = @([pscustomobject]@{ severity='high'; file='a.txt'; issue='x'; requiredFix='y' })
+            Save-TestRepairReceipts -Repo $repo -IssueNum 5 -Findings $findings
             $script:rc = 0
             $rep = { param($r,$repo,$prompt) $script:rc++; Push-Location $repo; "fix" | Out-File fix.txt -Encoding utf8; git add .; git commit -q -m fix; git push -q origin main; Pop-Location; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
             $hr = Invoke-OperationRepair -OperationNumber 1 -IssueNumber 5 -RepoPath $repo -Findings $findings -OriginalWorker 'grok' -PostReviewHead $prh -IssueFetcher $issue -RepairRunner $rep -CiProbe $ciNone
@@ -893,15 +905,17 @@ Describe 'v2.1-5. 수리 최대 1회 + 상태 가드' {
             $hr.finalReviewRequired | Should Be $true
         } finally { Remove-Item -Recurse -Force $repo }
     }
-    It '수리 전 HEAD 불일치 → repair_state_mismatch (수리 실행 안 함)' {
+    It '명시 PostReviewHead가 receipt와 불일치하면 repair_argument_receipt_mismatch' {
         Invoke-ResetCommand | Out-Null
         $repo = New-FakeRepo -WithRemote
         try {
             $findings = @([pscustomobject]@{ severity='high'; file='a.txt'; issue='x'; requiredFix='y' })
+            Save-TestRepairReceipts -Repo $repo -IssueNum 5 -Findings $findings
             $script:rc2 = 0
             $rep = { param($r,$repo,$prompt) $script:rc2++; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
             $hr = Invoke-OperationRepair -OperationNumber 1 -IssueNumber 5 -RepoPath $repo -Findings $findings -OriginalWorker 'grok' -PostReviewHead '0000000000000000000000000000000000000000' -IssueFetcher $issue -RepairRunner $rep -CiProbe $ciNone
-            $hr.status | Should Be 'repair_state_mismatch'
+            $hr.status | Should Be 'repair_argument_receipt_mismatch'
+            $hr.reason | Should Be 'post_review_head_mismatch'
             $script:rc2 | Should Be 0
         } finally { Remove-Item -Recurse -Force $repo }
     }
@@ -1152,6 +1166,7 @@ Describe 'v2.2-11/12. 수리 결과 정직 판정 + 영수증 자동 복원' {
         $repo = New-FakeRepo -WithRemote
         try {
             $findings = @([pscustomobject]@{ severity='blocker'; file='a.txt'; issue='x'; requiredFix='y' })
+            Save-TestRepairReceipts -Repo $repo -IssueNum 78 -Findings $findings
             $rep = { param($r,$repo,$prompt) Push-Location $repo; "fix" | Out-File fix.txt -Encoding utf8; git add .; git commit -q -m fix; git push -q origin main; Pop-Location; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
             $hr = Invoke-OperationRepair -OperationNumber 1 -IssueNumber 78 -RepoPath $repo -Findings $findings -OriginalWorker 'grok' -PostReviewHead (Head-Of $repo) -IssueFetcher $issue -RepairRunner $rep -CiProbe $ciNone
             $hr.status | Should Be 'repair_completed_review_pending'
@@ -1179,6 +1194,7 @@ Describe 'v2.2-13. 수리 작업자 사용량 준수' {
         $repo = New-FakeRepo -WithRemote
         try {
             $findings = @([pscustomobject]@{ severity='high'; file='a.txt'; issue='x'; requiredFix='y' })
+            Save-TestRepairReceipts -Repo $repo -IssueNum 80 -Findings $findings
             $script:rc3 = 0
             $rep = { param($r,$repo,$prompt) $script:rc3++; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
             $hr = Invoke-OperationRepair -OperationNumber 1 -IssueNumber 80 -RepoPath $repo -Findings $findings -OriginalWorker 'grok' -PostReviewHead (Head-Of $repo) -IssueFetcher $issue -RepairRunner $rep -CiProbe $ciNone
@@ -1187,7 +1203,7 @@ Describe 'v2.2-13. 수리 작업자 사용량 준수' {
             $script:rc3 | Should Be 0
         } finally { Remove-Item -Recurse -Force $repo; Invoke-ResetCommand | Out-Null }
     }
-    It 'GPT 80%+/reserved/exhausted → gpt 수리 금지 (검수 예비분 사용 안 함)' {
+    It 'GPT 구현 run은 사용량 상태와 무관하게 repair 자격이 없다' {
         Invoke-ResetCommand | Out-Null
         $repo = New-FakeRepo -WithRemote
         try {
@@ -1196,8 +1212,10 @@ Describe 'v2.2-13. 수리 작업자 사용량 준수' {
             $rep = { param($r,$repo,$prompt) $script:rc4++; [pscustomobject]@{ ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok' } }
             foreach ($v in @('80','reserved','exhausted')) {
                 Invoke-SetCommand -Target gpt -Value $v | Out-Null
+                Save-TestRunReceipt -Repo $repo -IssueNum 81 -Worker 'gpt'
                 $hr = Invoke-OperationRepair -OperationNumber 1 -IssueNumber 81 -RepoPath $repo -Findings $findings -OriginalWorker 'gpt' -PostReviewHead (Head-Of $repo) -IssueFetcher $issue -RepairRunner $rep -CiProbe $ciNone
-                $hr.status | Should Be 'repair_worker_unavailable'
+                $hr.status | Should Be 'repair_not_eligible'
+                $hr.reason | Should Be 'run_unverified_or_ineligible'
             }
             $script:rc4 | Should Be 0
         } finally { Remove-Item -Recurse -Force $repo; Invoke-ResetCommand | Out-Null }
@@ -1669,6 +1687,7 @@ Describe 'v2.3.1-9~11. review·repair 공통 오류 정책' {
         $repo = New-FakeRepo -WithRemote
         try {
             $findings = @([pscustomobject]@{ severity='high'; file='a.txt'; issue='x'; requiredFix='y' })
+            Save-TestRepairReceipts -Repo $repo -IssueNum 110 -Findings $findings
             $runner = { param($r,$repo,$prompt) [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$true;ErrorClass='weekly_exhausted';Output='weekly limit reached' } }
             $res = Invoke-OperationRepair -OperationNumber 1 -IssueNumber 110 -RepoPath $repo -Findings $findings -OriginalWorker grok -PostReviewHead (Head-Of $repo) -IssueFetcher $issue -RepairRunner $runner -CiProbe $ciNone
             $res.status | Should Be 'repair_quota_exhausted'
@@ -1687,6 +1706,7 @@ Describe 'v2.3.1-9~11. review·repair 공통 오류 정책' {
             $review = Invoke-OperationReview -OperationNumber 1 -IssueNumber 111 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $reviewRunner
             $review.status | Should Be 'review_transient_rate_limited'
             $findings = @([pscustomobject]@{ severity='high'; file='a.txt'; issue='x'; requiredFix='y' })
+            Save-TestRepairReceipts -Repo $repo -IssueNum 112 -Findings $findings
             $repairRunner = { param($r,$repo,$prompt) [pscustomobject]@{ ExitCode=1;Success=$false;QuotaExhausted=$false;ErrorClass='transient_rate_limit';Output='HTTP 429' } }
             $repair = Invoke-OperationRepair -OperationNumber 1 -IssueNumber 112 -RepoPath $repo -Findings $findings -OriginalWorker grok -PostReviewHead (Head-Of $repo) -IssueFetcher $issue -RepairRunner $repairRunner -CiProbe $ciNone
             $repair.status | Should Be 'repair_transient_rate_limited'
@@ -2164,7 +2184,7 @@ Describe 'v2.4.5-2. result 유실 recover의 review 자격 차단' {
     }
 
     It 'result 없음 + commit/push 성공은 unverified 진단 receipt만 남기고 GPT review를 0회 호출한다' {
-        Invoke-ResetCommand|Out-Null;$repo=New-FakeRepo -WithRemote
+        Invoke-ResetCommand|Out-Null;$repo=New-FakeRepo -WithRemote;$manualFindings=$null
         try {
             $snap=Get-StartSnapshot -RepoPath $repo;$route=Resolve-OperationRoute -OperationNumber 1 -GrokState (GS available 0) -GptState (GS available 0) -Config $cfg
             $rc=New-ExecutionGeneration -Operation 1 -IssueNumber 411 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'x'
@@ -2178,8 +2198,13 @@ Describe 'v2.4.5-2. result 유실 recover의 review 자격 차단' {
             $script:v245ReviewCalls=0
             $review=Invoke-OperationReview -OperationNumber 1 -IssueNumber 411 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner ({param($p,$o,$r)$script:v245ReviewCalls++;throw 'must not run'})
             $review.status|Should Be 'review_not_eligible';$review.reason|Should Be 'recovered_result_missing_or_unverified';$script:v245ReviewCalls|Should Be 0
-            (Invoke-RepairCommand -OperationNumber 1 -IssueNumber 411 -RepoPath $repo).status|Should Be 'repair_receipt_missing'
-        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+            $manualFindings=Join-Path $TestWorkRoot 'unverified-repair-findings.json'
+            Set-Content -LiteralPath $manualFindings -Value '[{"severity":"high","file":"lost.txt","issue":"x","requiredFix":"y"}]' -Encoding utf8
+            $script:v246RepairCalls=0
+            $repair=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 411 -RepoPath $repo -PostReviewHead (Head-Of $repo) -FindingsFile $manualFindings -Target grok `
+                -RepairRunner ({param($r,$p,$o)$script:v246RepairCalls++;throw 'must not run'})
+            $repair.status|Should Be 'repair_not_eligible';$repair.reason|Should Be 'run_unverified_or_ineligible';$repair.repairAttempted|Should Be $false;$script:v246RepairCalls|Should Be 0
+        } finally {if($manualFindings){Remove-Item -LiteralPath $manualFindings -Force -ErrorAction SilentlyContinue};Remove-Item -LiteralPath $repo -Recurse -Force}
     }
 
     It 'result 없는 CI pending/failure/unavailable은 모두 unverified이며 review worker 호출은 0회다' {
@@ -2199,6 +2224,65 @@ Describe 'v2.4.5-2. result 유실 recover의 review 자격 차단' {
                 $review.status|Should Be 'review_not_eligible';$review.reason|Should Be 'recovered_result_missing_or_unverified';$script:v245ReviewCalls|Should Be 0
             } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
         }
+    }
+}
+
+Describe 'v2.4.6-1. 모든 repair 경로의 verified run/review receipt 자격 강제' {
+    It '정상 run만 있고 review receipt가 없으면 수동 인수 3개로 우회할 수 없다' {
+        $repo=New-FakeRepo -WithRemote;$findingsPath=Join-Path $TestWorkRoot 'missing-review-findings.json'
+        try {
+            $findings=@([pscustomobject]@{severity='high';file='a.txt';issue='x';requiredFix='y'})
+            Save-TestRunReceipt -Repo $repo -IssueNum 430
+            $findings|ConvertTo-Json -Depth 4|Set-Content -LiteralPath $findingsPath -Encoding utf8
+            $script:v246MissingReviewCalls=0
+            $res=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 430 -RepoPath $repo -PostReviewHead (Head-Of $repo) -FindingsFile $findingsPath -Target grok `
+                -RepairRunner ({param($r,$p,$o)$script:v246MissingReviewCalls++;throw 'must not run'})
+            $res.status|Should Be 'repair_receipt_missing';$res.reason|Should Be 'review_receipt_missing';$res.repairAttempted|Should Be $false;$script:v246MissingReviewCalls|Should Be 0
+        } finally {Remove-Item -LiteralPath $findingsPath -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It 'PostReviewHead Target FindingsFile 불일치는 각각 worker 호출 전에 차단한다' {
+        $repo=New-FakeRepo -WithRemote;$goodPath=Join-Path $TestWorkRoot 'receipt-findings.json';$badPath=Join-Path $TestWorkRoot 'changed-findings.json';$malformedPath=Join-Path $TestWorkRoot 'malformed-findings.json'
+        try {
+            $findings=@([pscustomobject]@{severity='high';file='a.txt';issue='x';requiredFix='y'})
+            Save-TestRepairReceipts -Repo $repo -IssueNum 431 -Findings $findings
+            '[{"requiredFix":"y","issue":"x","file":"a.txt","severity":"high"}]'|Set-Content -LiteralPath $goodPath -Encoding utf8
+            '[{"severity":"high","file":"a.txt","issue":"changed","requiredFix":"y"}]'|Set-Content -LiteralPath $badPath -Encoding utf8
+            '{bad json'|Set-Content -LiteralPath $malformedPath -Encoding utf8
+            $script:v246MismatchCalls=0;$runner={param($r,$p,$o)$script:v246MismatchCalls++;throw 'must not run'}
+            $headMismatch=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 431 -RepoPath $repo -PostReviewHead ('0'*40) -RepairRunner $runner
+            $targetMismatch=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 431 -RepoPath $repo -Target gpt -RepairRunner $runner
+            $findingsMismatch=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 431 -RepoPath $repo -FindingsFile $badPath -RepairRunner $runner
+            $malformed=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 431 -RepoPath $repo -FindingsFile $malformedPath -RepairRunner $runner
+            foreach($case in @(@($headMismatch,'post_review_head_mismatch'),@($targetMismatch,'repair_target_mismatch'),@($findingsMismatch,'findings_mismatch'),@($malformed,'findings_mismatch'))){$case[0].status|Should Be 'repair_argument_receipt_mismatch';$case[0].reason|Should Be $case[1];$case[0].repairAttempted|Should Be $false}
+            $script:v246MismatchCalls|Should Be 0
+            (Compare-ReviewFindings -Expected $findings -Actual @((Get-Content $goodPath -Raw|ConvertFrom-Json)))|Should Be $true
+        } finally {Remove-Item -LiteralPath $goodPath,$badPath,$malformedPath -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It '유효한 receipt와 의미상 같은 명시 인수는 core 재검증 후 repair runner를 1회 호출한다' {
+        Invoke-ResetCommand|Out-Null;$repo=New-FakeRepo -WithRemote;$findingsPath=Join-Path $TestWorkRoot 'matching-findings.json'
+        try {
+            $findings=@([pscustomobject]@{severity='medium';file='a.txt';issue='x';requiredFix='y'})
+            Save-TestRepairReceipts -Repo $repo -IssueNum 432 -Findings $findings
+            '[{"requiredFix":"y","issue":"x","file":"a.txt","severity":"medium"}]'|Set-Content -LiteralPath $findingsPath -Encoding utf8
+            $script:v246ValidRepairCalls=0
+            $res=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 432 -RepoPath $repo -PostReviewHead (Head-Of $repo) -FindingsFile $findingsPath -Target grok `
+                -IssueFetcher $issue -RepairRunner ({param($r,$p,$o)$script:v246ValidRepairCalls++;[pscustomobject]@{ExitCode=1;Success=$false;QuotaExhausted=$false;Output='fixture failure'}}) -CiProbe $ciNone
+            $res.status|Should Be 'repair_worker_failed';$res.repairAttempted|Should Be $true;$script:v246ValidRepairCalls|Should Be 1
+        } finally {Remove-Item -LiteralPath $findingsPath -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $repo -Recurse -Force;Invoke-ResetCommand|Out-Null}
+    }
+
+    It 'Save-RunReceipt 기본 provenance는 legacy 호출자를 review와 repair에 fail-closed 한다' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $final=Head-Of $repo;$snap=[pscustomobject]@{startHead=$final};$pf=[pscustomobject]@{status='completed';finalHead=$final};$route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            Save-RunReceipt -Operation 1 -IssueNumber 433 -RepoPath $repo -Snapshot $snap -Postflight $pf -Route $route|Out-Null
+            $receipt=Get-RunReceipt -Operation 1 -IssueNumber 433 -RepoPath $repo
+            $receipt.resultEnvelopePresent|Should Be $false;$receipt.interrupted|Should Be $true;$receipt.verificationProvenance|Should Be 'unknown'
+            (Test-RunReceiptVerificationEligible -Receipt $receipt -RepoPath $repo).eligible|Should Be $false
+            (Invoke-RepairCommand -OperationNumber 1 -IssueNumber 433 -RepoPath $repo).reason|Should Be 'run_unverified_or_ineligible'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
     }
 }
 

@@ -767,37 +767,21 @@ function Invoke-OperationReview {
 
     # 1) run 영수증 자동 복원 (StartHead 수동 인수 금지)
     $receipt = Get-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
-    if ($null -eq $receipt) {
-        return [pscustomobject]@{ status = 'review_receipt_missing'; verdict = $null; findings = @()
-            note = "run 영수증이 없다. 먼저 '-Command run -Operation $OperationNumber -IssueNumber $IssueNumber'를 완료해야 한다."
-            expectedReceiptPath = (Get-RunReceiptPath -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath) }
-    }
-    # 2) 현재 저장소 == 영수증 저장소
-    if (-not (Test-ReceiptRepoMatch -Receipt $receipt -RepoPath $RepoPath)) {
-        return [pscustomobject]@{ status = 'repository_receipt_mismatch'; verdict = $null; findings = @()
-            note = '현재 저장소와 run 영수증의 저장소가 다르다. 검수를 중단한다.' }
-    }
-    # 3) worker == grok (GPT가 구현한 작전 1은 Sol 자기검수 금지 — 현재 세션이 직접 종료 검토)
-    if ($receipt.worker -ne 'grok') {
+    $runEligibility = Test-RunReceiptVerificationEligible -Receipt $receipt -RepoPath $RepoPath
+    if (-not $runEligibility.eligible) {
+        if ($runEligibility.status -eq 'run_receipt_missing') {
+            return [pscustomobject]@{ status = 'review_receipt_missing'; verdict = $null; findings = @()
+                reason = $runEligibility.reason; note = $runEligibility.note
+                expectedReceiptPath = (Get-RunReceiptPath -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath) }
+        }
+        if ($runEligibility.status -eq 'run_receipt_repository_mismatch') {
+            return [pscustomobject]@{ status = 'repository_receipt_mismatch'; verdict = $null; findings = @()
+                reason = $runEligibility.reason; note = $runEligibility.note }
+        }
+        $reviewReason = [string]$runEligibility.reason
+        if ($runEligibility.status -eq 'run_result_unverified') { $reviewReason = 'recovered_result_missing_or_unverified' }
         return [pscustomobject]@{ status = 'review_not_eligible'; verdict = $null; findings = @()
-            reason = "worker_not_grok:$($receipt.worker)"
-            note = 'GPT가 구현한 결과는 Sol 자기검수를 하지 않는다. 현재 세션(Opus)이 직접 종료 검토한다.' }
-    }
-    # 4) 정상 worker result envelope와 검증 provenance가 없는 복구 결과는 독립 검수 자격이 없다.
-    $receiptProps = $receipt.PSObject.Properties.Name
-    $resultEnvelopePresent = ($receiptProps -contains 'resultEnvelopePresent' -and [bool]$receipt.resultEnvelopePresent)
-    $provenance = if ($receiptProps -contains 'verificationProvenance') { [string]$receipt.verificationProvenance } else { $null }
-    if (-not $resultEnvelopePresent -or $provenance -notin @('valid_worker_result_envelope','valid_worker_result_envelope_recovered_postflight') -or
-        ($receiptProps -contains 'interrupted' -and [bool]$receipt.interrupted)) {
-        return [pscustomobject]@{ status = 'review_not_eligible'; verdict = $null; findings = @()
-            reason = 'recovered_result_missing_or_unverified'
-            note = '정상 worker result envelope와 review 가능한 검증 provenance가 없어 Sol 검수를 호출하지 않는다. 로컬 검증 재실행 또는 수동 종료 검토가 필요하다.' }
-    }
-    # 5) run 상태가 정상 완료 계열이어야 검수 자격이 있다
-    if ($receipt.status -notin @('completed','completed_ci_pending','completed_ci_unavailable')) {
-        return [pscustomobject]@{ status = 'review_not_eligible'; verdict = $null; findings = @()
-            reason = "run_not_completed:$($receipt.status)"
-            note = '완료되지 않은 run 결과는 검수하지 않는다. run을 먼저 정상 완료해야 한다.' }
+            reason = $reviewReason; note = $runEligibility.note }
     }
     # 6) 현재 HEAD == 영수증 finalHead
     $currentHead = Get-GitHead -Path $RepoPath
@@ -954,23 +938,102 @@ $diff
 # - 수리 전 HEAD/worktree가 검수 직후 상태와 일치해야 한다. 재검수는 없다.
 # - 수리 성공은 "남은 findings 없음"이 아니라 repair_completed_review_pending이다.
 #   최종 PASS 판정은 현재 세션(Opus)의 종료 검토에서만 한다.
+function Test-RepairFindingsSchema {
+    param([AllowNull()]$Findings)
+    $items = @($Findings)
+    if ($items.Count -eq 0) { return [pscustomobject]@{ valid=$false; reason='findings_empty' } }
+    foreach ($finding in $items) {
+        if ($null -eq $finding) { return [pscustomobject]@{ valid=$false; reason='null_finding' } }
+        $props = @($finding.PSObject.Properties.Name)
+        if ($props -notcontains 'severity' -or [string]$finding.severity -notin @('blocker','high','medium')) { return [pscustomobject]@{ valid=$false; reason='invalid_finding_severity' } }
+        if ($props -notcontains 'file' -or $null -eq $finding.file -or -not ($finding.file -is [string])) { return [pscustomobject]@{ valid=$false; reason='invalid_finding_file' } }
+        if ($props -notcontains 'issue' -or [string]::IsNullOrWhiteSpace([string]$finding.issue)) { return [pscustomobject]@{ valid=$false; reason='invalid_finding_issue' } }
+        if ($props -notcontains 'requiredFix' -or [string]::IsNullOrWhiteSpace([string]$finding.requiredFix)) { return [pscustomobject]@{ valid=$false; reason='invalid_finding_requiredFix' } }
+    }
+    return [pscustomobject]@{ valid=$true; reason=$null }
+}
+
+function Compare-ReviewFindings {
+    param([AllowNull()]$Expected, [AllowNull()]$Actual)
+    $expectedItems = @($Expected); $actualItems = @($Actual)
+    $expectedSchema = Test-RepairFindingsSchema -Findings $expectedItems
+    $actualSchema = Test-RepairFindingsSchema -Findings $actualItems
+    if (-not $expectedSchema.valid -or -not $actualSchema.valid -or $expectedItems.Count -ne $actualItems.Count) { return $false }
+    for ($i = 0; $i -lt $expectedItems.Count; $i++) {
+        $actualProps = @($actualItems[$i].PSObject.Properties.Name)
+        if ($actualProps.Count -ne 4 -or @($actualProps | Where-Object { $_ -notin @('severity','file','issue','requiredFix') }).Count -gt 0) { return $false }
+        foreach ($field in @('severity','file','issue','requiredFix')) {
+            if ([string]$expectedItems[$i].$field -cne [string]$actualItems[$i].$field) { return $false }
+        }
+    }
+    return $true
+}
+
+function Get-EligibleRepairContext {
+    param(
+        [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$RepoPath,
+        [bool]$HasFindingsAssertion=$false, [AllowNull()]$FindingsAssertion,
+        [bool]$HasPostReviewHeadAssertion=$false, [string]$PostReviewHeadAssertion,
+        [bool]$HasTargetAssertion=$false, [string]$TargetAssertion
+    )
+    $fail = {
+        param([string]$Status, [string]$Reason, [string]$Note)
+        return [pscustomobject]@{ eligible=$false; validated=$false; status=$Status; reason=$Reason; note=$Note; repairAttempted=$false }
+    }
+    if ($OperationNumber -ne 1) { return (& $fail 'repair_not_eligible' 'operation_not_1' '검수 기반 자동 수리는 작전 1 전용이다.') }
+    $runReceipt = Get-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $runEligibility = Test-RunReceiptVerificationEligible -Receipt $runReceipt -RepoPath $RepoPath
+    if (-not $runEligibility.eligible) {
+        if ($runEligibility.status -eq 'run_receipt_missing') { return (& $fail 'repair_receipt_missing' 'run_receipt_missing' $runEligibility.note) }
+        if ($runEligibility.status -eq 'run_receipt_repository_mismatch') { return (& $fail 'repository_receipt_mismatch' 'run_receipt_repository_mismatch' $runEligibility.note) }
+        return (& $fail 'repair_not_eligible' 'run_unverified_or_ineligible' $runEligibility.note)
+    }
+    $reviewReceipt = Get-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    if ($null -eq $reviewReceipt) { return (& $fail 'repair_receipt_missing' 'review_receipt_missing' '유효한 REPAIR_REQUIRED review 영수증이 필요하다.') }
+    if (-not (Test-ReceiptRepoMatch -Receipt $reviewReceipt -RepoPath $RepoPath)) { return (& $fail 'repository_receipt_mismatch' 'review_receipt_repository_mismatch' '현재 저장소와 review 영수증의 저장소가 다르다.') }
+    $reviewProps = @($reviewReceipt.PSObject.Properties.Name)
+    foreach ($required in @('operation','verdict','findings','postReviewHead','originalWorker')) {
+        if ($reviewProps -notcontains $required) { return (& $fail 'repair_not_eligible' 'review_receipt_incomplete' "review 영수증 필드가 없다: $required") }
+    }
+    if ([int]$reviewReceipt.operation -ne 1 -or [string]$reviewReceipt.verdict -ne 'REPAIR_REQUIRED') { return (& $fail 'repair_not_eligible' 'review_verdict_not_repair_required' 'REPAIR_REQUIRED review 영수증만 repair 자격이 있다.') }
+    $schema = Test-RepairFindingsSchema -Findings @($reviewReceipt.findings)
+    if (-not $schema.valid) { return (& $fail 'repair_not_eligible' 'review_findings_invalid' 'review 영수증 findings가 엄격 스키마를 만족하지 않는다.') }
+    if ([string]$reviewReceipt.originalWorker -cne [string]$runReceipt.worker) { return (& $fail 'repair_not_eligible' 'review_original_worker_mismatch' 'review originalWorker와 run worker가 다르다.') }
+    if ([string]$reviewReceipt.postReviewHead -cne [string]$runReceipt.finalHead) { return (& $fail 'repair_not_eligible' 'review_run_head_mismatch' 'review postReviewHead와 run finalHead가 다르다.') }
+    $currentHead = Get-GitHead -Path $RepoPath
+    if ($currentHead -cne [string]$reviewReceipt.postReviewHead) { return (& $fail 'repair_state_mismatch' 'current_head_mismatch' '현재 HEAD가 review postReviewHead와 다르다.') }
+    if ($HasPostReviewHeadAssertion -and $PostReviewHeadAssertion -cne [string]$reviewReceipt.postReviewHead) { return (& $fail 'repair_argument_receipt_mismatch' 'post_review_head_mismatch' 'PostReviewHead 인수가 review 영수증과 다르다.') }
+    if ($HasTargetAssertion -and ($TargetAssertion -cne [string]$reviewReceipt.originalWorker -or $TargetAssertion -cne [string]$runReceipt.worker)) { return (& $fail 'repair_argument_receipt_mismatch' 'repair_target_mismatch' 'Target 인수가 run/review 영수증의 worker와 다르다.') }
+    if ($HasFindingsAssertion -and -not (Compare-ReviewFindings -Expected @($reviewReceipt.findings) -Actual @($FindingsAssertion))) { return (& $fail 'repair_argument_receipt_mismatch' 'findings_mismatch' 'FindingsFile 또는 findings 인수가 review 영수증과 다르다.') }
+    return [pscustomobject]@{
+        eligible=$true; validated=$true; status='eligible'; reason=$null; note='verified run and review receipts'
+        runReceipt=$runReceipt; reviewReceipt=$reviewReceipt; findings=@($reviewReceipt.findings)
+        postReviewHead=[string]$reviewReceipt.postReviewHead; originalWorker=[string]$reviewReceipt.originalWorker
+        verificationProvenance=[string]$runReceipt.verificationProvenance; repairAttempted=$false
+    }
+}
+
 function Invoke-OperationRepair {
     param(
         [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
-        [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)]$Findings,
-        [Parameter(Mandatory)][ValidateSet('grok','gpt')][string]$OriginalWorker,
-        [Parameter(Mandatory)][string]$PostReviewHead, [string]$Kind = 'logic',
+        [Parameter(Mandatory)][string]$RepoPath, $Findings,
+        [ValidateSet('grok','gpt')][string]$OriginalWorker,
+        [string]$PostReviewHead, [string]$Kind = 'logic',
         [scriptblock]$IssueFetcher, [scriptblock]$RepairRunner, [scriptblock]$CiProbe
     )
+    $context = Get-EligibleRepairContext -OperationNumber $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath `
+        -HasFindingsAssertion:$($PSBoundParameters.ContainsKey('Findings')) -FindingsAssertion $Findings `
+        -HasPostReviewHeadAssertion:$($PSBoundParameters.ContainsKey('PostReviewHead')) -PostReviewHeadAssertion $PostReviewHead `
+        -HasTargetAssertion:$($PSBoundParameters.ContainsKey('OriginalWorker')) -TargetAssertion $OriginalWorker
+    if (-not $context.eligible) {
+        Add-Member -InputObject $context -NotePropertyName operation -NotePropertyValue $OperationNumber -Force
+        Add-Member -InputObject $context -NotePropertyName issueNumber -NotePropertyValue $IssueNumber -Force
+        return $context
+    }
+    $Findings = @($context.findings); $OriginalWorker = [string]$context.originalWorker; $PostReviewHead = [string]$context.postReviewHead
     $config = Get-Config
     $originalFindingCount = @($Findings).Count
-
-    # v2.3: 자동 수리는 작전 1 전용이다
-    if ($OperationNumber -ne 1) {
-        return [pscustomobject]@{ operation = $OperationNumber; issueNumber = $IssueNumber; status = 'repair_not_eligible'
-            reason = 'operation_not_1'; repairAttempted = $false
-            note = '검수 기반 자동 수리는 작전 1 전용이다. 작전 2/3은 repair를 지원하지 않는다.' }
-    }
 
     # 0) 수리 워커 사용량 게이트 (usage-state를 지금 다시 읽는다)
     $state = Get-UsageState
@@ -1077,8 +1140,7 @@ function Invoke-OperationRepair {
     }
 }
 
-# repair CLI 래퍼 (v2.2): -PostReviewHead/-FindingsFile/-Target을 수동으로 추측하지 않도록
-# run/review 영수증에서 자동 복원한다. 명시 인수가 있으면 그것을 우선한다.
+# repair CLI 래퍼: 유효한 run/review 영수증은 필수이며 수동 인수는 receipt assertion으로만 사용한다.
 function Invoke-RepairCommand {
     param(
         [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
@@ -1086,53 +1148,27 @@ function Invoke-RepairCommand {
         [string]$PostReviewHead, [string]$FindingsFile, [string]$Target,
         [scriptblock]$IssueFetcher, [scriptblock]$RepairRunner, [scriptblock]$CiProbe
     )
-    # v2.3: 자동 수리는 작전 1 전용이다 (GPT 호출 전 차단)
-    if ($OperationNumber -ne 1) {
-        return [pscustomobject]@{ operation = $OperationNumber; issueNumber = $IssueNumber; status = 'repair_not_eligible'
-            reason = 'operation_not_1'; repairAttempted = $false
-            note = '검수 기반 자동 수리는 작전 1 전용이다. 작전 2/3은 repair를 지원하지 않는다.' }
+    $invoke = @{
+        OperationNumber=$OperationNumber; IssueNumber=$IssueNumber; RepoPath=$RepoPath; Kind=$Kind
+        IssueFetcher=$IssueFetcher; RepairRunner=$RepairRunner; CiProbe=$CiProbe
     }
-    $reviewReceipt = Get-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
-    $runReceipt = Get-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
-
-    # v2.3: review 영수증 저장소가 현재 저장소와 다르면 중단
-    if ($null -ne $reviewReceipt -and -not (Test-ReceiptRepoMatch -Receipt $reviewReceipt -RepoPath $RepoPath)) {
-        return [pscustomobject]@{ operation = $OperationNumber; issueNumber = $IssueNumber; status = 'repository_receipt_mismatch'
-            note = '현재 저장소와 review 영수증의 저장소가 다르다. 수리를 중단한다.' }
+    if ($PSBoundParameters.ContainsKey('PostReviewHead')) { $invoke.PostReviewHead = $PostReviewHead }
+    if ($PSBoundParameters.ContainsKey('Target')) {
+        if ($Target -notin @('grok','gpt')) {
+            return [pscustomobject]@{ operation=$OperationNumber; issueNumber=$IssueNumber; status='repair_argument_receipt_mismatch'
+                reason='repair_target_mismatch'; repairAttempted=$false; note='Target은 유효한 receipt worker와 일치해야 한다.' }
+        }
+        $invoke.OriginalWorker = $Target
     }
-    # v2.3: 유효한 REPAIR_REQUIRED review 영수증만 수리 근거가 된다
-    if ($null -ne $reviewReceipt -and $reviewReceipt.verdict -ne 'REPAIR_REQUIRED') {
-        return [pscustomobject]@{ operation = $OperationNumber; issueNumber = $IssueNumber; status = 'repair_not_eligible'
-            reason = "review_verdict_not_repair_required:$($reviewReceipt.verdict)"; repairAttempted = $false
-            note = 'REPAIR_REQUIRED가 아닌 review 영수증으로는 수리하지 않는다.' }
-    }
-
-    $findings = $null
-    if ($FindingsFile) {
-        $findings = @((Get-Content -LiteralPath $FindingsFile -Raw -Encoding UTF8 | ConvertFrom-Json))
-    } elseif ($null -ne $reviewReceipt) {
-        $findings = @($reviewReceipt.findings)
-    }
-    if (-not $PostReviewHead -and $null -ne $reviewReceipt) { $PostReviewHead = [string]$reviewReceipt.postReviewHead }
-    if (-not $Target) {
-        if ($null -ne $reviewReceipt -and $reviewReceipt.PSObject.Properties.Name -contains 'originalWorker' -and $reviewReceipt.originalWorker) {
-            $Target = [string]$reviewReceipt.originalWorker
-        } elseif ($null -ne $runReceipt) {
-            $Target = [string]$runReceipt.worker
+    if ($PSBoundParameters.ContainsKey('FindingsFile')) {
+        try {
+            $invoke.Findings = @((Get-Content -LiteralPath $FindingsFile -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop))
+        } catch {
+            return [pscustomobject]@{ operation=$OperationNumber; issueNumber=$IssueNumber; status='repair_argument_receipt_mismatch'
+                reason='findings_mismatch'; repairAttempted=$false; note='FindingsFile을 읽거나 엄격 JSON findings로 검증할 수 없다.' }
         }
     }
-    if ($null -eq $findings -or @($findings).Count -eq 0 -or -not $PostReviewHead -or -not $Target) {
-        return [pscustomobject]@{ operation = $OperationNumber; issueNumber = $IssueNumber; status = 'repair_receipt_missing'
-            note = 'review 영수증(REPAIR_REQUIRED findings)이 없다. 먼저 review를 실행해야 한다. 인수를 수동으로 추측해 넣지 않는다.'
-            expectedReviewReceiptPath = (Get-ReviewReceiptPath -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath) }
-    }
-    if ($Target -notin @('grok','gpt')) {
-        return [pscustomobject]@{ operation = $OperationNumber; issueNumber = $IssueNumber; status = 'repair_receipt_missing'
-            note = "영수증의 원래 worker가 grok/gpt가 아니다: '$Target'. 자동 수리를 하지 않는다." }
-    }
-    return Invoke-OperationRepair -OperationNumber $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath `
-        -Findings $findings -OriginalWorker $Target -PostReviewHead $PostReviewHead -Kind $Kind `
-        -IssueFetcher $IssueFetcher -RepairRunner $RepairRunner -CiProbe $CiProbe
+    return Invoke-OperationRepair @invoke
 }
 
 # ---------------- v2.4.4 중단 복구 ----------------
