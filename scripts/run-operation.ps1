@@ -625,10 +625,21 @@ function Invoke-PersistentRouteWorker {
     }
     $deadline = [DateTime]::UtcNow.AddSeconds($waitSeconds)
     do {
+        # worker-host가 Write-AtomicJsonFile의 File.Replace로 영수증을 교체하는 찰나에는
+        # Test-Path가 false가 되어 Get-ExecutionReceipt가 null을 돌려줄 수 있다. 그 순간의 null은
+        # "아직 준비 안 됨"이므로 에러 없이 다음 폴링으로 넘긴다 (필수 파라미터에 null 전달 금지).
         $current = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
-        $ready = ConvertFrom-ExecutionResult -Receipt $current -RepoPath $RepoPath
-        if ($null -ne $ready) { return $ready }
-        if ([DateTime]::UtcNow -ge $deadline) { return New-ExecutionPendingResult -Receipt $current }
+        if ($null -ne $current) {
+            $ready = ConvertFrom-ExecutionResult -Receipt $current -RepoPath $RepoPath
+            if ($null -ne $ready) { return $ready }
+            if ([DateTime]::UtcNow -ge $deadline) { return New-ExecutionPendingResult -Receipt $current }
+        } elseif ([DateTime]::UtcNow -ge $deadline) {
+            # 마감 시각에도 영수증이 순간적으로 사라진 상태면 짧게 한 번 더 재시도한다.
+            Start-Sleep -Milliseconds $pollMs
+            $current = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+            if ($null -ne $current) { return New-ExecutionPendingResult -Receipt $current }
+            throw 'Execution receipt is not readable at deadline (transient atomic-replace window did not settle).'
+        }
         Start-Sleep -Milliseconds $pollMs
     } while ($true)
 }
