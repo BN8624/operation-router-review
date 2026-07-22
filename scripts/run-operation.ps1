@@ -1320,11 +1320,19 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
         'repair' {
             # v2.2: -PostReviewHead/-FindingsFile/-Target은 선택 인수. 없으면 run/review 영수증에서 자동 복원한다.
+            # v2.4.6 회귀: 이 세 값을 무조건 splat하면 Invoke-RepairCommand 내부의
+            # $PSBoundParameters.ContainsKey(...)가 CLI에서 실제로 넘겼는지와 무관하게 항상 true가 되어,
+            # 값을 안 넘겨도 빈 문자열/빈 Target이 assertion으로 강제되어 매번 repair_argument_receipt_mismatch로
+            # 실패했다(이슈 #15 op1 repair에서 실측). 스크립트 자신의 $PSBoundParameters로 실제 CLI 바인딩 여부를
+            # 가려 선택 인수일 때만 splat한다.
             if (-not $Operation -or -not $IssueNumber) { throw 'repair requires -Operation and -IssueNumber' }
             Assert-ValidOperationNumber -Value ([string]$Operation) | Out-Null
             Assert-ValidIssueNumber -Value ([string]$IssueNumber) | Out-Null
-            Invoke-RepairCommand -OperationNumber $Operation -IssueNumber $IssueNumber -RepoPath (Get-Location).Path `
-                -Kind $Kind -PostReviewHead $PostReviewHead -FindingsFile $FindingsFile -Target $Target | ConvertTo-Json -Depth 12
+            $repairArgs = @{ OperationNumber = $Operation; IssueNumber = $IssueNumber; RepoPath = (Get-Location).Path; Kind = $Kind }
+            if ($PSBoundParameters.ContainsKey('PostReviewHead')) { $repairArgs.PostReviewHead = $PostReviewHead }
+            if ($PSBoundParameters.ContainsKey('FindingsFile')) { $repairArgs.FindingsFile = $FindingsFile }
+            if ($PSBoundParameters.ContainsKey('Target')) { $repairArgs.Target = $Target }
+            Invoke-RepairCommand @repairArgs | ConvertTo-Json -Depth 12
         }
     }
 }
