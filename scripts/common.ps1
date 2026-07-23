@@ -718,6 +718,8 @@ function New-ExecutionGeneration {
         resultEnvelopePresent = $false; verificationProvenance = 'worker_result_pending'
         postflight = $null; remainingProblems = @()
     }
+    $receipt = Initialize-ExecutionProgress -Receipt $receipt
+    Write-ExecutionProgressEvent -Receipt $receipt -Event execution_created -Summary "execution generation $generation created" | Out-Null
     Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
     return $receipt
 }

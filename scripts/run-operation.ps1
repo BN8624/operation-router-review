@@ -21,6 +21,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'progress.ps1')
 . (Join-Path $PSScriptRoot 'resolve-route.ps1')
 . (Join-Path $PSScriptRoot 'prepare-operation.ps1')
 . (Join-Path $PSScriptRoot 'invoke-grok.ps1')
@@ -610,10 +611,16 @@ function Invoke-PersistentRouteWorker {
         if ($null -ne $InjectedRunner) {
             $receipt.status = 'worker_running'; $receipt.processId = $PID
             $receipt.processStartedAt = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
+            Write-ExecutionProgressEvent -Receipt $receipt -Event worker_process_started -Summary "injected $($Route.worker) fixture started" | Out-Null
             Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
             $workerResult = & $InjectedRunner $Route $RepoPath $receipt.promptPath
+            $outputLength=if($workerResult.PSObject.Properties.Name -contains 'Output'){[Text.Encoding]::UTF8.GetByteCount([string]$workerResult.Output)}else{0}
+            if($outputLength -gt 0){Write-ExecutionProgressEvent -Receipt $receipt -Event worker_output_activity -Summary "worker output changed: $outputLength bytes" | Out-Null}
+            Write-ExecutionProgressEvent -Receipt $receipt -Event worker_exited -Summary "injected worker exited with code $($workerResult.ExitCode)" | Out-Null
             Write-InjectedExecutionResult -Receipt $receipt -WorkerResult $workerResult -RepoPath $RepoPath
             $receipt = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+            Write-ExecutionProgressEvent -Receipt $receipt -Event artifact_sanitized -Summary 'active prompt and raw output artifacts sanitized' | Out-Null
+            Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
             return ConvertFrom-ExecutionResult -Receipt $receipt -RepoPath $RepoPath
         }
         $null = Start-ExecutionWorkerHost -Receipt $receipt -Route $Route -Config $Config -RepoPath $RepoPath

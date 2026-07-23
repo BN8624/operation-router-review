@@ -2412,6 +2412,83 @@ Describe 'v2.4.7-0. v2.4.6 runtime hotfix 회귀 고정' {
     }
 }
 
+Describe 'v2.4.7-1. sanitized progress journal과 GPT observable parser' {
+    It 'execution generation은 worker 시작 전에 progress metadata와 execution_created를 남긴다' {
+        $repo=New-FakeRepo
+        try{
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='gpt';model='gpt-5.6-sol';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 450 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'fixture' -RunId 'progress-created'
+            $receipt.progressSchemaVersion | Should Be 1
+            (Assert-PathWithinRoot -Path $receipt.progressPath -Root $receipt.artifactPath) | Out-Null
+            $events=@(Read-ExecutionProgressEvents -Receipt $receipt)
+            $events.Count | Should Be 1;$events[0].event | Should Be 'execution_created';$events[0].seq | Should Be 1
+        }finally{Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'event schema는 단조 seq와 필수 필드를 유지하고 summary를 정규화·마스킹·500자로 제한한다' {
+        $repo=New-FakeRepo
+        try{
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 451 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'fixture' -RunId 'progress-schema'
+            $secret='ghp_abcdefghijklmnopqrstuvwx1234'
+            Write-ExecutionProgressEvent -Receipt $receipt -Event heartbeat -Summary (($secret+"`n")+('x'*700)) | Out-Null
+            $events=@(Read-ExecutionProgressEvents -Receipt $receipt);$event=$events[-1]
+            foreach($field in @('schemaVersion','seq','at','operation','issueNumber','executionId','generation','worker','event','phase','level','summary')){($event.PSObject.Properties.Name -contains $field)|Should Be $true}
+            [int]$event.seq | Should Be 2;([string]$event.summary).Length | Should Not BeGreaterThan 500
+            [string]$event.summary | Should Not Match [regex]::Escape($secret);[string]$event.summary | Should Not Match "`n"
+        }finally{Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'journal limit은 상세 이벤트를 progress_suppressed 1회로 줄이고 terminal 이벤트는 계속 기록한다' {
+        $repo=New-FakeRepo;$original=${function:Get-ProgressConfig}
+        try{
+            Set-Item function:Get-ProgressConfig -Value {[pscustomobject]@{pollIntervalMilliseconds=10;heartbeatSeconds=1;maxSummaryCharacters=500;maxJournalBytes=1;followCheckpointSeconds=1}}
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 452 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'fixture' -RunId 'progress-limit'
+            Write-ExecutionProgressEvent -Receipt $receipt -Event file_changed -Summary 'a.txt' | Out-Null
+            Write-ExecutionProgressEvent -Receipt $receipt -Event file_changed -Summary 'b.txt' | Out-Null
+            Write-ExecutionProgressEvent -Receipt $receipt -Event operation_terminal -Summary 'completed' | Out-Null
+            $events=@(Read-ExecutionProgressEvents -Receipt $receipt)
+            @($events|Where-Object event -eq 'progress_suppressed').Count | Should Be 1
+            @($events|Where-Object event -eq 'file_changed').Count | Should Be 0
+            @($events|Where-Object event -eq 'operation_terminal').Count | Should Be 1
+        }finally{Set-Item function:Get-ProgressConfig -Value $original;Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'GPT JSONL parser는 command와 file change만 구조화하고 reasoning·unknown·malformed를 무시한다' {
+        $start=@(ConvertFrom-GptProgressLine -Line '{"type":"item.started","item":{"type":"command_execution","command":"powershell tests/run-tests.ps1"}}')
+        $done=@(ConvertFrom-GptProgressLine -Line '{"type":"item.completed","item":{"type":"command_execution","exit_code":0}}')
+        $file=@(ConvertFrom-GptProgressLine -Line '{"type":"item.completed","item":{"type":"file_change","path":"scripts/progress.ps1"}}')
+        $start[0].event|Should Be 'command_started';$done[0].event|Should Be 'command_completed';$file[0].event|Should Be 'file_changed'
+        @(ConvertFrom-GptProgressLine -Line '{"type":"reasoning","text":"hidden"}').Count|Should Be 0
+        @(ConvertFrom-GptProgressLine -Line '{"type":"unknown"}').Count|Should Be 0
+        @(ConvertFrom-GptProgressLine -Line '{bad').Count|Should Be 0
+    }
+
+    It 'observable Git state는 파일 변경과 commit/push 상태 비교에 필요한 값만 반환한다' {
+        $repo=New-FakeRepo -WithRemote
+        try{
+            $before=Get-ExecutionObservableState -RepoPath $repo;$before.worktreeClean|Should Be $true;$before.ahead|Should Be 0
+            Set-Content -LiteralPath (Join-Path $repo 'changed.txt') -Value 'x' -Encoding UTF8
+            $after=Get-ExecutionObservableState -RepoPath $repo;$after.worktreeClean|Should Be $false
+            @($after.files) -contains 'changed.txt' | Should Be $true
+        }finally{Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'injected worker 경로도 process/output/exit/sanitized 이벤트를 순서대로 기록한다' {
+        $repo=New-FakeRepo -WithRemote;$prompt=Join-Path $TestWorkRoot 'progress-injected.txt';Set-Content -LiteralPath $prompt -Value 'fixture' -Encoding UTF8
+        try{
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
+            $runner={param($r,$path,$p)[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;ErrorClass='none';Output='fixture output'}}
+            $result=Invoke-PersistentRouteWorker -Route $route -RepoPath $repo -PromptPath $prompt -Config (Get-Config) -OperationNumber 3 -IssueNumber 453 -Kind logic -Snapshot $snap -RunId 'progress-injected' -InjectedRunner $runner
+            $receipt=$result.ExecutionReceipt;$events=@(Read-ExecutionProgressEvents -Receipt $receipt);$names=@($events|ForEach-Object event)
+            foreach($expected in @('execution_created','worker_process_started','worker_output_activity','worker_exited','artifact_sanitized')){($names -contains $expected)|Should Be $true}
+            @($events|ForEach-Object {[int]$_.seq}) -join ',' | Should Be '1,2,3,4,5'
+        }finally{Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+}
+
 Describe 'v2.4.6-2. retention의 namespace 전체 최신 execution receipt 참조 보호' {
     It '여러 이슈의 latest와 active generation은 count를 초과해도 모두 보호한다' {
         $repo=New-FakeRepo

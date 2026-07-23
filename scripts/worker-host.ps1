@@ -12,6 +12,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'progress.ps1')
 . (Join-Path $PSScriptRoot 'invoke-grok.ps1')
 . (Join-Path $PSScriptRoot 'invoke-gpt.ps1')
 
@@ -35,6 +36,48 @@ function Resolve-WorkerExecutable {
         Where-Object { $_.Source -and $_.Source -match '\.(exe|cmd|bat)$' } | Select-Object -First 1
     if ($null -eq $found) { throw "Worker executable not found: $Name" }
     return $found.Source
+}
+
+function Write-WorkerProgress {
+    param([Parameter(Mandatory)]$Receipt,[Parameter(Mandatory)][string]$Event,[string]$Summary,[string]$Level='info')
+    $written=Write-ExecutionProgressEvent -Receipt $Receipt -Event $Event -Summary $Summary -Level $Level
+    if($null -ne $written){$script:LastWorkerProgressAt=[DateTime]::UtcNow}
+}
+
+function Update-WorkerObservableProgress {
+    param([Parameter(Mandatory)]$Receipt,[Parameter(Mandatory)][string]$RepoPath,[switch]$Final)
+    $stdout=Read-SharedTextFile -Path ([string]$Receipt.rawStdoutPath)
+    $stderr=Read-SharedTextFile -Path ([string]$Receipt.rawStderrPath)
+    $bytes=[Text.Encoding]::UTF8.GetByteCount($stdout)+[Text.Encoding]::UTF8.GetByteCount($stderr)
+    if($bytes -ne $script:LastWorkerOutputBytes){
+        Write-WorkerProgress -Receipt $Receipt -Event worker_output_activity -Summary "worker output changed: $bytes bytes"
+        $script:LastWorkerOutputBytes=$bytes
+    }
+    if([string]$Receipt.worker -eq 'gpt'){
+        $completeLines=@($stdout -split "`r?`n")
+        if(-not $Final -and -not ($stdout.EndsWith("`n") -or $stdout.EndsWith("`r")) -and $completeLines.Count -gt 0){$completeLines=@($completeLines[0..($completeLines.Count-2)])}
+        for($i=$script:ProcessedGptLines;$i -lt $completeLines.Count;$i++){
+            foreach($event in @(ConvertFrom-GptProgressLine -Line ([string]$completeLines[$i]))){
+                Write-WorkerProgress -Receipt $Receipt -Event ([string]$event.event) -Summary ([string]$event.summary) -Level ([string]$event.level)
+            }
+        }
+        $script:ProcessedGptLines=$completeLines.Count
+    }
+    $current=Get-ExecutionObservableState -RepoPath $RepoPath
+    if([string]$current.status -cne [string]$script:LastObservable.status){
+        $state=if($current.worktreeClean){'clean'}else{'dirty'}
+        Write-WorkerProgress -Receipt $Receipt -Event git_state_changed -Summary "worktree $state"
+        foreach($file in @($current.files | Where-Object {$script:LastObservable.files -notcontains $_})){
+            Write-WorkerProgress -Receipt $Receipt -Event file_changed -Summary ([string]$file)
+        }
+    }
+    if(-not [string]::IsNullOrWhiteSpace([string]$current.head) -and [string]$current.head -cne [string]$script:LastObservable.head){
+        Write-WorkerProgress -Receipt $Receipt -Event commit_detected -Summary ([string]$current.head)
+    }
+    if($null -ne $current.ahead -and [int]$current.ahead -eq 0 -and $null -ne $script:LastObservable.ahead -and [int]$script:LastObservable.ahead -gt 0){
+        Write-WorkerProgress -Receipt $Receipt -Event push_detected -Summary 'origin/main synchronized'
+    }
+    $script:LastObservable=$current
 }
 
 $receipt = Read-JsonFile -Path $ExecutionReceiptPath
@@ -70,15 +113,29 @@ $wrapperContent = "@echo off`r`ncall `"%ORH_EXE%`" $($argRefs -join ' ') $stdin`
 [System.IO.File]::WriteAllText($wrapper, $wrapperContent, [System.Text.Encoding]::ASCII)
 
 try {
+    $progressCfg=Get-ProgressConfig
+    $script:LastWorkerOutputBytes=0
+    $script:ProcessedGptLines=0
+    $script:LastObservable=Get-ExecutionObservableState -RepoPath ([string]$receipt.repoRoot)
+    $script:WorkerStartedAt=[DateTime]::UtcNow
+    $script:LastWorkerProgressAt=$script:WorkerStartedAt
     $proc = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d','/s','/c',('"' + $wrapper + '"')) `
         -WorkingDirectory ([string]$receipt.repoRoot) -RedirectStandardOutput ([string]$receipt.rawStdoutPath) `
         -RedirectStandardError ([string]$receipt.rawStderrPath) -PassThru -WindowStyle Hidden
     $receipt.status = 'worker_running'
     $receipt.processId = $proc.Id
     $receipt.processStartedAt = $proc.StartTime.ToUniversalTime().ToString('o')
+    Write-WorkerProgress -Receipt $receipt -Event worker_process_started -Summary "$($receipt.model) / $($receipt.effort) process started"
     Save-ExecutionReceipt -Receipt $receipt -RepoPath ([string]$receipt.repoRoot) | Out-Null
     while (-not $proc.HasExited) {
         Update-ExecutionMaskedLog -Receipt $receipt -Header $header
+        Update-WorkerObservableProgress -Receipt $receipt -RepoPath ([string]$receipt.repoRoot)
+        if(([DateTime]::UtcNow-$script:LastWorkerProgressAt).TotalSeconds -ge [int]$progressCfg.heartbeatSeconds){
+            $elapsed=[int]([DateTime]::UtcNow-$script:WorkerStartedAt).TotalSeconds
+            $state=if($script:LastObservable.worktreeClean){'clean'}else{'dirty'}
+            $headState=if([string]$script:LastObservable.head -ceq [string]$receipt.startHead){'HEAD unchanged'}else{'HEAD changed'}
+            Write-WorkerProgress -Receipt $receipt -Event heartbeat -Summary "running ${elapsed}s, output $script:LastWorkerOutputBytes bytes, worktree $state, $headState"
+        }
         $receipt = Get-ExecutionReceipt -Operation ([int]$receipt.operation) -IssueNumber ([int]$receipt.issueNumber) -RepoPath ([string]$receipt.repoRoot)
         if ([string]$receipt.executionId -ne [string]$invocation.executionId) { throw 'Execution generation changed while worker was running.' }
         Save-ExecutionReceipt -Receipt $receipt -RepoPath ([string]$receipt.repoRoot) | Out-Null
@@ -87,6 +144,8 @@ try {
     }
     $proc.WaitForExit()
     Update-ExecutionMaskedLog -Receipt $receipt -Header $header
+    Update-WorkerObservableProgress -Receipt $receipt -RepoPath ([string]$receipt.repoRoot) -Final
+    Write-WorkerProgress -Receipt $receipt -Event worker_exited -Summary "worker exited with code $($proc.ExitCode)"
     $stdout = Read-SharedTextFile -Path ([string]$receipt.rawStdoutPath)
     $stderr = Read-SharedTextFile -Path ([string]$receipt.rawStderrPath)
     $output = $stdout + $stderr
@@ -112,6 +171,7 @@ try {
         }
         throw 'Execution artifact sanitization failed.'
     }
+    Write-WorkerProgress -Receipt $receipt -Event artifact_sanitized -Summary 'active prompt and raw output artifacts sanitized'
     $envelope = [pscustomobject]@{
         schemaVersion = 1; executionId = $receipt.executionId; generation = $receipt.generation
         worker = $receipt.worker; exitCode = $proc.ExitCode; success = [bool]$success

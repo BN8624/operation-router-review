@@ -90,6 +90,13 @@
     "staleHeartbeatSeconds": 15,
     "executionRetentionCount": 10
   },
+  "progress": {
+    "pollIntervalMilliseconds": 1000,
+    "heartbeatSeconds": 15,
+    "maxSummaryCharacters": 500,
+    "maxJournalBytes": 1048576,
+    "followCheckpointSeconds": 600
+  },
   "logRetentionCount": 20,
   "weeklyExhaustedPatterns": [
     "weekly limit",
