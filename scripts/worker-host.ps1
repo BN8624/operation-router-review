@@ -136,7 +136,7 @@ try {
             $headState=if([string]$script:LastObservable.head -ceq [string]$receipt.startHead){'HEAD unchanged'}else{'HEAD changed'}
             Write-WorkerProgress -Receipt $receipt -Event heartbeat -Summary "running ${elapsed}s, output $script:LastWorkerOutputBytes bytes, worktree $state, $headState"
         }
-        $receipt = Get-ExecutionReceipt -Operation ([int]$receipt.operation) -IssueNumber ([int]$receipt.issueNumber) -RepoPath ([string]$receipt.repoRoot)
+        $receipt = Get-ExecutionReceiptStable -Operation ([int]$receipt.operation) -IssueNumber ([int]$receipt.issueNumber) -RepoPath ([string]$receipt.repoRoot)
         if ([string]$receipt.executionId -ne [string]$invocation.executionId) { throw 'Execution generation changed while worker was running.' }
         Save-ExecutionReceipt -Receipt $receipt -RepoPath ([string]$receipt.repoRoot) | Out-Null
         Start-Sleep -Milliseconds 1000
@@ -186,7 +186,7 @@ try {
     $receipt.workerStopReason = $stopReason
     Save-ExecutionReceipt -Receipt $receipt -RepoPath ([string]$receipt.repoRoot) | Out-Null
 } catch {
-    $receipt = Get-ExecutionReceipt -Operation ([int]$receipt.operation) -IssueNumber ([int]$receipt.issueNumber) -RepoPath ([string]$receipt.repoRoot)
+    try{$receipt = Get-ExecutionReceiptStable -Operation ([int]$receipt.operation) -IssueNumber ([int]$receipt.issueNumber) -RepoPath ([string]$receipt.repoRoot)}catch{$receipt=$null}
     if ($null -ne $receipt -and [string]$receipt.executionId -eq [string]$invocation.executionId -and [string]$receipt.status -ne 'artifact_sanitization_failed') {
         $receipt.status = 'interrupted_postflight_pending'
         $receipt.interruptedReason = 'worker_host_failure'

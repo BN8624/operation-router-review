@@ -2489,6 +2489,98 @@ Describe 'v2.4.7-1. sanitized progress journal과 GPT observable parser' {
     }
 }
 
+Describe 'v2.4.7-2. detach 실행과 generation 고정 watch terminal handoff' {
+    It 'run detach는 host를 정확히 1회 시작하고 즉시 worker_starting과 watchCommand를 반환한다' {
+        $repo=New-FakeRepo -WithRemote;$prompt=Join-Path $TestWorkRoot 'detach.txt';Set-Content -LiteralPath $prompt -Value fixture -Encoding UTF8
+        $original=${function:Start-ExecutionWorkerHost};$script:v247HostCalls=0
+        try{
+            Set-Item function:Start-ExecutionWorkerHost -Value {param($Receipt,$Route,$Config,[string]$RepoPath)$script:v247HostCalls++;[pscustomobject]@{Id=999}}
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
+            $result=Invoke-PersistentRouteWorker -Route $route -RepoPath $repo -PromptPath $prompt -Config (Get-Config) -OperationNumber 1 -IssueNumber 460 -Kind logic -Snapshot $snap -RunId detach -Detach
+            $result.ErrorClass|Should Be 'execution_pending';$result.WorkerCalls|Should Be 1;$result.ExecutionReceipt.status|Should Be 'worker_starting';$script:v247HostCalls|Should Be 1
+        }finally{Set-Item function:Start-ExecutionWorkerHost -Value $original;Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'active execution에 detach를 재호출하면 workerCalls=0이고 generation을 재사용한다' {
+        $repo=New-FakeRepo -WithRemote;$prompt=Join-Path $TestWorkRoot 'detach-active.txt';Set-Content -LiteralPath $prompt -Value fixture -Encoding UTF8
+        try{
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='gpt';model='gpt-5.6-sol';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 461 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId active
+            $result=Invoke-PersistentRouteWorker -Route $route -RepoPath $repo -PromptPath $prompt -Config (Get-Config) -OperationNumber 1 -IssueNumber 461 -Kind logic -Snapshot $snap -RunId second -Detach
+            $result.AlreadyActive|Should Be $true;$result.WorkerCalls|Should Be 0;$result.ExecutionReceipt.generation|Should Be $receipt.generation
+        }finally{Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'watch one-shot은 현재 progress를 출력하되 worker와 generation을 만들지 않는다' {
+        $repo=New-FakeRepo
+        try{
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 462 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId watch
+            Write-ExecutionProgressEvent -Receipt $receipt -Event heartbeat -Summary 'running fixture'|Out-Null;Save-ExecutionReceipt -Receipt $receipt -RepoPath $repo|Out-Null
+            $script:v247WatchLines=@();$emit={param($line)$script:v247WatchLines+=$line}
+            $result=Invoke-WatchCommand -OperationNumber 2 -IssueNumber 462 -RepoPath $repo -Emitter $emit
+            $result.status|Should Be 'worker_starting';$result.workerCalls|Should Be 0;$result.generation|Should Be 1
+            @($script:v247WatchLines|Where-Object{$_ -match 'RUNNING'}).Count|Should Be 1
+            (Get-ExecutionReceipt -Operation 2 -IssueNumber 462 -RepoPath $repo).generation|Should Be 1
+        }finally{Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'watch follow는 worker result 후 recover를 1회 재개하고 terminal review handoff를 출력한다' {
+        $repo=New-FakeRepo -WithRemote
+        try{
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 463 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId follow
+            Push-Location $repo;try{Set-Content a.txt 'changed';git add a.txt;git commit -q -m fixture;git push -q origin main}finally{Pop-Location}
+            Write-AtomicJsonFile -Path $receipt.resultPath -Object ([pscustomobject]@{schemaVersion=1;executionId=$receipt.executionId;generation=$receipt.generation;worker='grok';exitCode=0;success=$true;quotaExhausted=$false;errorClass='none';workerStopReason='EndTurn';localVerificationComplete=$true;stdoutPath=$receipt.rawStdoutPath;stderrPath=$receipt.rawStderrPath})
+            $receipt.status='worker_exited_postflight_pending';Save-ExecutionReceipt -Receipt $receipt -RepoPath $repo|Out-Null
+            $script:v247WatchLines=@();$result=Invoke-WatchCommand -OperationNumber 1 -IssueNumber 463 -RepoPath $repo -Follow -Emitter {param($line)$script:v247WatchLines+=$line} -CiProbe $ciNone
+            $result.terminal|Should Be $true;$result.status|Should Be 'completed';$result.nextAction|Should Be 'review';$result.workerCalls|Should Be 0
+            @($script:v247WatchLines|Where-Object{$_ -match '^\[ORH_TERMINAL\]'}).Count|Should Be 1
+            @((Read-ExecutionProgressEvents -Receipt (Get-ExecutionReceipt -Operation 1 -IssueNumber 463 -RepoPath $repo))|Where-Object event -eq 'operation_terminal').Count|Should Be 1
+        }finally{Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'watch는 receipt generation 교체를 따라가지 않고 watch_generation_changed로 fail-closed 한다' {
+        $repo=New-FakeRepo
+        try{
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='gpt';model='gpt-5.6-terra';effort='medium'}
+            $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 464 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId generation
+            $script:v247GenerationChanged=$false
+            $sleep={param($ms)if(-not $script:v247GenerationChanged){$changed=Get-ExecutionReceipt -Operation 2 -IssueNumber 464 -RepoPath $repo;$changed.generation=2;$changed.executionId='replacement';Save-ExecutionReceipt -Receipt $changed -RepoPath $repo|Out-Null;$script:v247GenerationChanged=$true}}
+            $result=Invoke-WatchCommand -OperationNumber 2 -IssueNumber 464 -RepoPath $repo -Follow -FollowSeconds 5 -SleepAction $sleep -Emitter {param($line)}
+            $result.status|Should Be 'watch_generation_changed';$result.nextAction|Should Be 'stop';$result.workerCalls|Should Be 0
+        }finally{Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'result 없는 interrupted recover는 성공을 합성하지 않고 manual_verification으로 끝난다' {
+        $repo=New-FakeRepo -WithRemote
+        try{
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 465 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId unverified
+            Push-Location $repo;try{Set-Content a.txt 'changed';git add a.txt;git commit -q -m fixture;git push -q origin main}finally{Pop-Location}
+            $receipt.status='interrupted_postflight_pending';$receipt.updatedAt=[DateTime]::UtcNow.AddMinutes(-1).ToString('o');Save-ExecutionReceipt -Receipt $receipt -RepoPath $repo|Out-Null
+            $result=Invoke-WatchCommand -OperationNumber 1 -IssueNumber 465 -RepoPath $repo -Follow -Emitter {param($line)} -CiProbe $ciNone
+            $result.terminal|Should Be $true;$result.nextAction|Should Be 'manual_verification';$result.status|Should Match 'unverified'
+        }finally{Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'nextAction은 operation/worker/verified status 정책을 구분한다' {
+        (Get-WatchNextAction -Receipt ([pscustomobject]@{operation=1;worker='gpt'}) -Status completed)|Should Be 'opus_end_review'
+        (Get-WatchNextAction -Receipt ([pscustomobject]@{operation=2;worker='grok'}) -Status completed_ci_pending)|Should Be 'sonnet_end_review'
+        (Get-WatchNextAction -Receipt ([pscustomobject]@{operation=3;worker='grok'}) -Status completed)|Should Be 'report'
+        (Get-WatchNextAction -Receipt ([pscustomobject]@{operation=1;worker='grok'}) -Status worker_failed)|Should Be 'stop'
+    }
+
+    It 'stable receipt read는 transient null을 bounded retry한 뒤 정상 receipt를 반환한다' {
+        $original=${function:Get-ExecutionReceipt};$script:v247StableCalls=0
+        try{
+            Set-Item function:Get-ExecutionReceipt -Value {param($Operation,$IssueNumber,$RepoPath)$script:v247StableCalls++;if($script:v247StableCalls -lt 3){return $null};[pscustomobject]@{operation=$Operation;issueNumber=$IssueNumber;status='worker_running'}}
+            $receipt=Get-ExecutionReceiptStable -Operation 1 -IssueNumber 466 -RepoPath $TestWorkRoot -MaxAttempts 4 -DelayMilliseconds 1
+            $receipt.status|Should Be 'worker_running';$script:v247StableCalls|Should Be 3
+        }finally{Set-Item function:Get-ExecutionReceipt -Value $original}
+    }
+}
+
 Describe 'v2.4.6-2. retention의 namespace 전체 최신 execution receipt 참조 보호' {
     It '여러 이슈의 latest와 active generation은 count를 초과해도 모두 보호한다' {
         $repo=New-FakeRepo

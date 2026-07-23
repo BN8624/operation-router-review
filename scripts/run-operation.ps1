@@ -1,15 +1,18 @@
 ﻿# operation-router 메인 진입점.
-# 명령: run | review | repair | postflight | recover | status | doctor | set | reset
+# 명령: run | watch | review | repair | postflight | recover | status | doctor | set | reset
 # run 역할: 시작검토 -> 계약+이슈원문 주문서 -> 라우팅 -> 작업자 1회 -> (한도오류 시 부분변경 가드) -> postflight -> 전체 JSON.
 
 param(
-    [ValidateSet('run','review','repair','postflight','recover','status','doctor','set','reset')][string]$Command = 'run',
+    [ValidateSet('run','watch','review','repair','postflight','recover','status','doctor','set','reset')][string]$Command = 'run',
     [int]$Operation,
     [int]$IssueNumber,
     [ValidateSet('logic','mechanical')][string]$Kind = 'logic',
     [switch]$UseGptReviewReserve,
     [switch]$FinishCurrent,
     [switch]$ClaudeOnly,
+    [switch]$Detach,
+    [switch]$Follow,
+    [int]$FollowSeconds = 0,
     [string]$StartHead,
     [string]$PostReviewHead,
     [string]$FindingsFile,
@@ -302,7 +305,7 @@ function Invoke-RunOperation {
     param(
         [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
         [ValidateSet('logic','mechanical')][string]$Kind = 'logic',
-        [switch]$UseGptReviewReserve, [switch]$FinishCurrent, [switch]$ClaudeOnly,
+        [switch]$UseGptReviewReserve, [switch]$FinishCurrent, [switch]$ClaudeOnly, [switch]$Detach,
         [string]$RepoPath = (Get-Location).Path,
         [scriptblock]$IssueFetcher, [scriptblock]$GrokRunner, [scriptblock]$GptRunner, [scriptblock]$CiProbe,
         [scriptblock]$ClaudeImplementer
@@ -376,14 +379,15 @@ function Invoke-RunOperation {
         # 워커 실행. 최초·fallback·review·repair가 같은 공통 오류 정책을 사용한다.
         $runId = [guid]::NewGuid().ToString('N')
         $invokePrimary = { Invoke-RouteWorker -Route $route -RepoPath $RepoPath -PromptPath $tempOrderPath -Config $config -GrokRunner $GrokRunner -GptRunner $GptRunner `
-            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $snapshot -RunId $runId }
+            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $snapshot -RunId $runId -Detach:$Detach }
         $execution = Invoke-WorkerWithErrorPolicy -Provider $route.worker -InvokeWorker $invokePrimary -State $state -Config $config -Log $log
         $result = $execution.Result
         if ($execution.ErrorClass -eq 'execution_pending') {
             $receipt = $result.ExecutionReceipt
             $pendingStatus = if ($result.AlreadyActive) { 'execution_already_active' } else { [string]$receipt.status }
             $extra = @{ executionId = $receipt.executionId; generation = $receipt.generation; startedAt = $receipt.startedAt
-                logPath = $receipt.logPath; resumeCommand = "/operation recover $OperationNumber $IssueNumber" }
+                logPath = $receipt.logPath; watchCommand = "-Command watch -Operation $OperationNumber -IssueNumber $IssueNumber -Follow"
+                resumeCommand = "/operation recover $OperationNumber $IssueNumber"; workerCalls=[int]$result.WorkerCalls }
             return New-FinalOutput -Operation $OperationNumber -RouteLabel (New-RouteLabel -Route $route) -Status $pendingStatus `
                 -Worker $route.worker -Model $route.model -Effort $route.effort -Snapshot $snapshot -Postflight $null `
                 -IssueNumber $IssueNumber -LogPath $receipt.logPath -RemainingProblems @('worker execution has not reached postflight') -Extra $extra
@@ -423,7 +427,11 @@ function Invoke-RunOperation {
         }
 
         # postflight
+        $progressReceipt=$null
+        try{$progressReceipt=Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{}
+        if($null -ne $progressReceipt){Write-ExecutionProgressEvent -Receipt $progressReceipt -Event postflight_started -Phase postflight -Summary 'postflight verification started'|Out-Null}
         $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -DeclaredNoCodeChange:$false -CiProbe $CiProbe
+        if($null -ne $progressReceipt){Write-ExecutionProgressEvent -Receipt $progressReceipt -Event postflight_completed -Phase postflight -Summary "postflight status $($pf.status)"|Out-Null}
         # 영수증을 저장하기 전에 watched critical-file 위반을 확정한다. 위반이면 영수증 status도
         # repo_boundary_violation으로 저장해, 보안 위반 run이 completed 영수증으로 남아 review 자격을
         #통과하는 결함을 막는다(finalizer는 출력만 고쳤음).
@@ -445,6 +453,9 @@ function Invoke-RunOperation {
                 $er.remainingProblems = @(Get-RemainingProblems -Status $receiptStatus -Postflight $pf)
                 $er = Complete-ExecutionTerminalArtifacts -Receipt $er -RepoPath $RepoPath -IntendedStatus $receiptStatus
                 $receiptStatus = [string]$er.status; $executionRemaining = @($er.remainingProblems)
+                Add-Member -InputObject $er -NotePropertyName nextAction -NotePropertyValue (Get-WatchNextAction -Receipt $er -Status $receiptStatus) -Force
+                Write-ExecutionProgressEvent -Receipt $er -Event operation_terminal -Phase postflight -Summary "status=$receiptStatus nextAction=$($er.nextAction)" | Out-Null
+                Save-ExecutionReceipt -Receipt $er -RepoPath $RepoPath | Out-Null
             }
         }
         # 작전 1 실행 영수증은 artifact finalization까지 성공한 정상 결과에만 review 자격과 함께 저장한다.
@@ -502,7 +513,7 @@ function New-ExecutionPendingResult {
     return [pscustomobject]@{
         Worker = $Receipt.worker; ExitCode = $null; Success = $false; QuotaExhausted = $false
         ErrorClass = 'execution_pending'; WorkerStopReason = $null; Output = ''; ExecutionPending = $true
-        AlreadyActive = $AlreadyActive; ExecutionReceipt = $Receipt
+        AlreadyActive = $AlreadyActive; WorkerCalls = if($AlreadyActive){0}else{1}; ExecutionReceipt = $Receipt
     }
 }
 
@@ -578,7 +589,7 @@ function Invoke-PersistentRouteWorker {
         [Parameter(Mandatory)]$Route, [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$PromptPath,
         [Parameter(Mandatory)]$Config, [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
         [Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)][string]$RunId,
-        [scriptblock]$InjectedRunner
+        [scriptblock]$InjectedRunner,[switch]$Detach
     )
     $lock = Open-ExecutionLock -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
     if ($null -eq $lock) {
@@ -613,7 +624,10 @@ function Invoke-PersistentRouteWorker {
             $receipt.processStartedAt = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
             Write-ExecutionProgressEvent -Receipt $receipt -Event worker_process_started -Summary "injected $($Route.worker) fixture started" | Out-Null
             Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
-            $workerResult = & $InjectedRunner $Route $RepoPath $receipt.promptPath
+            $workerResultRaw = & $InjectedRunner $Route $RepoPath $receipt.promptPath
+            $workerCandidates=@(@($workerResultRaw)|Where-Object{$null -ne $_ -and $null -ne $_.PSObject.Properties['ExitCode']})
+            if($workerCandidates.Count -eq 0){throw 'Injected worker result is missing ExitCode.'}
+            $workerResult=$workerCandidates[-1]
             $outputLength=if($workerResult.PSObject.Properties.Name -contains 'Output'){[Text.Encoding]::UTF8.GetByteCount([string]$workerResult.Output)}else{0}
             if($outputLength -gt 0){Write-ExecutionProgressEvent -Receipt $receipt -Event worker_output_activity -Summary "worker output changed: $outputLength bytes" | Out-Null}
             Write-ExecutionProgressEvent -Receipt $receipt -Event worker_exited -Summary "injected worker exited with code $($workerResult.ExitCode)" | Out-Null
@@ -625,6 +639,10 @@ function Invoke-PersistentRouteWorker {
         }
         $null = Start-ExecutionWorkerHost -Receipt $receipt -Route $Route -Config $Config -RepoPath $RepoPath
     } finally { $lock.Dispose() }
+    if($Detach){
+        try{$receipt=Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -MaxAttempts 12 -DelayMilliseconds 75}catch{throw 'Execution receipt did not reach a readable worker_starting state after host launch.'}
+        return New-ExecutionPendingResult -Receipt $receipt
+    }
     $waitSeconds = 480; $pollMs = 500
     if ($Config.PSObject.Properties.Name -contains 'execution') {
         if ($Config.execution.PSObject.Properties.Name -contains 'foregroundWaitSeconds') { $waitSeconds = [Math]::Max(0, [int]$Config.execution.foregroundWaitSeconds) }
@@ -635,7 +653,7 @@ function Invoke-PersistentRouteWorker {
         # worker-host가 Write-AtomicJsonFile의 File.Replace로 영수증을 교체하는 찰나에는
         # Test-Path가 false가 되어 Get-ExecutionReceipt가 null을 돌려줄 수 있다. 그 순간의 null은
         # "아직 준비 안 됨"이므로 에러 없이 다음 폴링으로 넘긴다 (필수 파라미터에 null 전달 금지).
-        $current = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+        try{$current = Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -MaxAttempts 3 -DelayMilliseconds ([Math]::Max(25,[int]($pollMs/3)))}catch{$current=$null}
         if ($null -ne $current) {
             $ready = ConvertFrom-ExecutionResult -Receipt $current -RepoPath $RepoPath
             if ($null -ne $ready) { return $ready }
@@ -643,7 +661,7 @@ function Invoke-PersistentRouteWorker {
         } elseif ([DateTime]::UtcNow -ge $deadline) {
             # 마감 시각에도 영수증이 순간적으로 사라진 상태면 짧게 한 번 더 재시도한다.
             Start-Sleep -Milliseconds $pollMs
-            $current = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+            try{$current = Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{$current=$null}
             if ($null -ne $current) { return New-ExecutionPendingResult -Receipt $current }
             throw 'Execution receipt is not readable at deadline (transient atomic-replace window did not settle).'
         }
@@ -655,11 +673,11 @@ function Invoke-PersistentRouteWorker {
 function Invoke-RouteWorker {
     param([Parameter(Mandatory)]$Route, [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$PromptPath,
           [Parameter(Mandatory)]$Config, [scriptblock]$GrokRunner, [scriptblock]$GptRunner,
-          [int]$OperationNumber = 0, [int]$IssueNumber = 0, [string]$Kind = 'logic', $Snapshot, [string]$RunId)
+          [int]$OperationNumber = 0, [int]$IssueNumber = 0, [string]$Kind = 'logic', $Snapshot, [string]$RunId,[switch]$Detach)
     if ($OperationNumber -gt 0 -and $IssueNumber -gt 0 -and $null -ne $Snapshot) {
         $injected = if ($Route.worker -eq 'grok') { $GrokRunner } else { $GptRunner }
         return Invoke-PersistentRouteWorker -Route $Route -RepoPath $RepoPath -PromptPath $PromptPath -Config $Config `
-            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $Snapshot -RunId $RunId -InjectedRunner $injected
+            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $Snapshot -RunId $RunId -InjectedRunner $injected -Detach:$Detach
     }
     if ($Route.worker -eq 'grok') {
         if ($null -eq $GrokRunner) {
@@ -1195,7 +1213,7 @@ function Invoke-RecoverCommand {
         [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
         [string]$RepoPath = (Get-Location).Path, [scriptblock]$ProcessProbe, [scriptblock]$Clock, [scriptblock]$CiProbe
     )
-    $receipt = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    try{$receipt = Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{$receipt=$null}
     if ($null -eq $receipt) {
         return [pscustomobject]@{ operation=$OperationNumber; issueNumber=$IssueNumber; status='execution_receipt_missing'; workerCalls=0 }
     }
@@ -1207,7 +1225,7 @@ function Invoke-RecoverCommand {
         return [pscustomobject]@{ operation=$OperationNumber; issueNumber=$IssueNumber; status='repository_receipt_mismatch'; workerCalls=0 }
     }
     $result = ConvertFrom-ExecutionResult -Receipt $receipt -RepoPath $RepoPath
-    if ($null -eq $result -and (Test-ExecutionStatusActive -Status ([string]$receipt.status))) {
+    if ($null -eq $result -and [string]$receipt.status -in @('worker_starting','worker_running')) {
         if (Test-ExecutionProcessAlive -Receipt $receipt -ProcessProbe $ProcessProbe) {
             return [pscustomobject]@{
                 operation=$OperationNumber; issueNumber=$IssueNumber; status='worker_running'; workerCalls=0
@@ -1234,12 +1252,13 @@ function Invoke-RecoverCommand {
         return [pscustomobject]@{ operation=$OperationNumber; issueNumber=$IssueNumber; status='execution_recovery_locked'; workerCalls=0 }
     }
     try {
-        $receipt = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+        try{$receipt = Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='receipt_unreadable';workerCalls=0}}
         $result = ConvertFrom-ExecutionResult -Receipt $receipt -RepoPath $RepoPath
         $receipt.status = 'recovering_postflight'
         Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
         $snapshot = $receipt.startSnapshot
         $route = [pscustomobject]@{ worker=$receipt.worker; model=$receipt.model; effort=$receipt.effort }
+        Write-ExecutionProgressEvent -Receipt $receipt -Event postflight_started -Phase postflight -Summary 'recovery postflight started' | Out-Null
         if ($null -ne $result) {
             $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -DeclaredNoCodeChange:$false -CiProbe $CiProbe
             $interrupted = $false; $recovered = $true
@@ -1266,6 +1285,10 @@ function Invoke-RecoverCommand {
         }
         $receipt = Complete-ExecutionTerminalArtifacts -Receipt $receipt -RepoPath $RepoPath -IntendedStatus $finalStatus
         $finalStatus = [string]$receipt.status
+        Write-ExecutionProgressEvent -Receipt $receipt -Event postflight_completed -Phase postflight -Summary "postflight status $finalStatus" | Out-Null
+        Add-Member -InputObject $receipt -NotePropertyName nextAction -NotePropertyValue (Get-WatchNextAction -Receipt $receipt -Status $finalStatus) -Force
+        Write-ExecutionProgressEvent -Receipt $receipt -Event operation_terminal -Phase postflight -Summary "status=$finalStatus nextAction=$($receipt.nextAction)" | Out-Null
+        Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
         if ($OperationNumber -eq 1 -and $receipt.worker -in @('grok','gpt') -and ($null -eq $result -or $result.Success) -and
             $finalStatus -notin @('artifact_sanitization_failed','artifact_retention_failed')) {
             if ($null -eq $result) { Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath }
@@ -1288,6 +1311,69 @@ function Invoke-RecoverCommand {
     } finally { $lock.Dispose() }
 }
 
+function New-WatchResult {
+    param([Parameter(Mandatory)]$Receipt,[Parameter(Mandatory)][string]$Status,[bool]$Terminal,[int]$LastSeq,[string]$NextAction,[int]$WorkerCalls=0)
+    return [pscustomobject]@{
+        schemaVersion=1;operation=[int]$Receipt.operation;issueNumber=[int]$Receipt.issueNumber;status=$Status
+        worker=[string]$Receipt.worker;executionId=[string]$Receipt.executionId;generation=[int]$Receipt.generation
+        finalHead=if($Receipt.PSObject.Properties.Name -contains 'finalHead'){$Receipt.finalHead}else{$null}
+        terminal=$Terminal;nextAction=$NextAction;lastSeq=$LastSeq;workerCalls=$WorkerCalls
+    }
+}
+
+function Invoke-WatchCommand {
+    param(
+        [Parameter(Mandatory)][int]$OperationNumber,[Parameter(Mandatory)][int]$IssueNumber,
+        [string]$RepoPath=(Get-Location).Path,[switch]$Follow,[int]$FollowSeconds=0,
+        [scriptblock]$Emitter,[scriptblock]$SleepAction,[scriptblock]$ProcessProbe,[scriptblock]$CiProbe
+    )
+    if($FollowSeconds -lt 0){throw 'FollowSeconds must be zero or positive.'}
+    if($null -eq $Emitter){$Emitter={param($line)Write-Host $line}}
+    if($null -eq $SleepAction){$SleepAction={param($ms)Start-Sleep -Milliseconds $ms}}
+    try{$anchor=Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{return [pscustomobject]@{schemaVersion=1;operation=$OperationNumber;issueNumber=$IssueNumber;status='receipt_unreadable';terminal=$false;nextAction='stop';workerCalls=0}}
+    if($anchor.PSObject.Properties.Name -contains 'legacyNamespaceBlocked' -or -not (Test-ReceiptRepoMatch -Receipt $anchor -RepoPath $RepoPath)){
+        return [pscustomobject]@{schemaVersion=1;operation=$OperationNumber;issueNumber=$IssueNumber;status='repository_receipt_mismatch';terminal=$true;nextAction='stop';workerCalls=0}
+    }
+    $identity=@{ownerRepo=[string]$anchor.ownerRepo;canonicalRepoRoot=[string]$anchor.canonicalRepoRoot;repoRootHash=[string]$anchor.repoRootHash;executionId=[string]$anchor.executionId;generation=[int]$anchor.generation}
+    $lastSeq=0;$started=[DateTime]::UtcNow;$cfg=Get-ProgressConfig;$recoveryAttempted=$false
+    while($true){
+        try{$receipt=Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{return [pscustomobject]@{schemaVersion=1;operation=$OperationNumber;issueNumber=$IssueNumber;status='receipt_unreadable';terminal=$false;nextAction='stop';workerCalls=0}}
+        if([string]$receipt.ownerRepo -cne $identity.ownerRepo -or [string]$receipt.canonicalRepoRoot -cne $identity.canonicalRepoRoot -or [string]$receipt.repoRootHash -cne $identity.repoRootHash -or [string]$receipt.executionId -cne $identity.executionId -or [int]$receipt.generation -ne $identity.generation){
+            return New-WatchResult -Receipt $anchor -Status 'watch_generation_changed' -Terminal $true -LastSeq $lastSeq -NextAction 'stop'
+        }
+        foreach($event in @(Read-ExecutionProgressEvents -Receipt $receipt -AfterSeq $lastSeq)){
+            & $Emitter (Format-ExecutionProgressLine -Event $event)
+            $lastSeq=[Math]::Max($lastSeq,[int]$event.seq)
+        }
+        $status=[string]$receipt.status
+        if(-not (Test-ExecutionStatusActive -Status $status)){
+            $next=if($receipt.PSObject.Properties.Name -contains 'nextAction' -and $receipt.nextAction){[string]$receipt.nextAction}else{Get-WatchNextAction -Receipt $receipt -Status $status}
+            $terminal=New-WatchResult -Receipt $receipt -Status $status -Terminal $true -LastSeq $lastSeq -NextAction $next
+            & $Emitter ('[ORH_TERMINAL] '+($terminal|ConvertTo-Json -Compress -Depth 8))
+            return $terminal
+        }
+        if(-not $Follow){return New-WatchResult -Receipt $receipt -Status $status -Terminal $false -LastSeq $lastSeq -NextAction 'continue'}
+        $hasResult=Test-Path -LiteralPath ([string]$receipt.resultPath)
+        $shouldRecover=$hasResult -or $status -in @('worker_exited_postflight_pending','interrupted_postflight_pending')
+        if(-not $shouldRecover -and $status -eq 'worker_running' -and -not (Test-ExecutionProcessAlive -Receipt $receipt -ProcessProbe $ProcessProbe)){
+            try{$age=([DateTime]::UtcNow-[DateTime]::Parse([string]$receipt.updatedAt).ToUniversalTime()).TotalSeconds;$shouldRecover=($age -ge 15)}catch{}
+        }
+        if($shouldRecover -and -not $recoveryAttempted){
+            $recoveryAttempted=$true
+            $recovered=Invoke-RecoverCommand -OperationNumber $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -ProcessProbe $ProcessProbe -CiProbe $CiProbe
+            if([string]$recovered.status -eq 'execution_recovery_locked'){$recoveryAttempted=$false}
+            continue
+        }
+        $elapsed=([DateTime]::UtcNow-$started).TotalSeconds
+        $checkpoint=if($FollowSeconds -gt 0){$FollowSeconds}else{[int]$cfg.followCheckpointSeconds}
+        if($checkpoint -gt 0 -and $elapsed -ge $checkpoint){
+            $checkpointStatus=if($shouldRecover){'watch_recovery_locked'}else{'watch_checkpoint'}
+            return New-WatchResult -Receipt $receipt -Status $checkpointStatus -Terminal $false -LastSeq $lastSeq -NextAction 'continue'
+        }
+        & $SleepAction ([Math]::Max(100,[int]$cfg.pollIntervalMilliseconds))
+    }
+}
+
 # ---------------- CLI 진입점 ----------------
 if ($MyInvocation.InvocationName -ne '.') {
     switch ($Command) {
@@ -1303,7 +1389,13 @@ if ($MyInvocation.InvocationName -ne '.') {
             Assert-ValidOperationNumber -Value ([string]$Operation) | Out-Null
             Assert-ValidIssueNumber -Value ([string]$IssueNumber) | Out-Null
             Invoke-RunOperation -OperationNumber $Operation -IssueNumber $IssueNumber -Kind $Kind `
-                -UseGptReviewReserve:$UseGptReviewReserve -FinishCurrent:$FinishCurrent -ClaudeOnly:$ClaudeOnly | ConvertTo-Json -Depth 12
+                -UseGptReviewReserve:$UseGptReviewReserve -FinishCurrent:$FinishCurrent -ClaudeOnly:$ClaudeOnly -Detach:$Detach | ConvertTo-Json -Depth 12
+        }
+        'watch' {
+            if (-not $Operation -or -not $IssueNumber) { throw 'watch requires -Operation <1|2|3> and -IssueNumber <positive int>' }
+            Assert-ValidOperationNumber -Value ([string]$Operation) | Out-Null
+            Assert-ValidIssueNumber -Value ([string]$IssueNumber) | Out-Null
+            Invoke-WatchCommand -OperationNumber $Operation -IssueNumber $IssueNumber -RepoPath (Get-Location).Path -Follow:$Follow -FollowSeconds $FollowSeconds | ConvertTo-Json -Depth 12
         }
         'postflight' {
             if (-not $Operation -or -not $IssueNumber) { throw 'postflight requires -Operation and -IssueNumber' }

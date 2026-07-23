@@ -49,6 +49,24 @@ function Read-JsonFile {
     return $raw | ConvertFrom-Json
 }
 
+function Read-JsonFileStable {
+    param([Parameter(Mandatory)][string]$Path,[int]$MaxAttempts=8,[int]$DelayMilliseconds=75)
+    $last=$null
+    for($attempt=1;$attempt -le [Math]::Max(1,$MaxAttempts);$attempt++){
+        try{
+            if(-not (Test-Path -LiteralPath $Path)){throw [System.IO.FileNotFoundException]::new("JSON file not found: $Path")}
+            $raw=Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
+            if([string]::IsNullOrWhiteSpace($raw)){throw [System.IO.InvalidDataException]::new("JSON file is empty: $Path")}
+            return ($raw|ConvertFrom-Json -ErrorAction Stop)
+        }catch{
+            $last=$_
+            if($attempt -lt $MaxAttempts){Start-Sleep -Milliseconds ([Math]::Max(1,$DelayMilliseconds))}
+        }
+    }
+    if($null -ne $last){throw $last}
+    throw "JSON file is unreadable: $Path"
+}
+
 function Write-JsonFile {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Object, [int]$Depth = 12)
     $json = $Object | ConvertTo-Json -Depth $Depth
@@ -639,6 +657,19 @@ function Get-ExecutionReceipt {
     $path = Get-ExecutionReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     $legacyPath = Join-Path (Get-LegacyPendingNamespacePath -RepoPath $RepoPath) "$(Get-ExecutionKey -Operation $Operation -IssueNumber $IssueNumber)-execution.json"
     return (Get-ReceiptWithLegacyMigration -CurrentPath $path -LegacyPath $legacyPath -RepoPath $RepoPath -BlockActiveExecution)
+}
+function Get-ExecutionReceiptStable {
+    param([Parameter(Mandatory)][int]$Operation,[Parameter(Mandatory)][int]$IssueNumber,[Parameter(Mandatory)][string]$RepoPath,[int]$MaxAttempts=8,[int]$DelayMilliseconds=75)
+    $last=$null
+    for($attempt=1;$attempt -le [Math]::Max(1,$MaxAttempts);$attempt++){
+        try{
+            $receipt=Get-ExecutionReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+            if($null -eq $receipt){throw [System.IO.InvalidDataException]::new('execution receipt temporarily unavailable')}
+            return $receipt
+        }catch{$last=$_;if($attempt -lt $MaxAttempts){Start-Sleep -Milliseconds ([Math]::Max(1,$DelayMilliseconds))}}
+    }
+    if($null -ne $last){throw $last}
+    return $null
 }
 function Save-ExecutionReceipt {
     param([Parameter(Mandatory)]$Receipt, [Parameter(Mandatory)][string]$RepoPath)

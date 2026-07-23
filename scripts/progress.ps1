@@ -132,17 +132,22 @@ function Read-ExecutionProgressEvents {
 function ConvertFrom-GptProgressLine {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Line)
     try { $item=$Line|ConvertFrom-Json -ErrorAction Stop } catch { return @() }
-    $events=@(); $type=[string]$item.type
-    if($type -eq 'item.started' -and [string]$item.item.type -eq 'command_execution') {
-        $events += [pscustomobject]@{event='command_started';phase='implementation';level='info';summary=('command started: ' + (ConvertTo-ProgressSummary -Text ([string]$item.item.command)))}
-    } elseif($type -eq 'item.completed' -and [string]$item.item.type -eq 'command_execution') {
-        $summary='command completed'; if($item.item.PSObject.Properties.Name -contains 'exit_code'){$summary += ' exit=' + [string]$item.item.exit_code}
+    if($null -eq $item -or $item.PSObject.Properties.Name -notcontains 'type'){return @()}
+    $events=@(); $type=[string]$item.type;$payload=$null
+    if($item.PSObject.Properties.Name -contains 'item'){$payload=$item.item}
+    $payloadType=if($null -ne $payload -and $payload.PSObject.Properties.Name -contains 'type'){[string]$payload.type}else{''}
+    if($type -eq 'item.started' -and $payloadType -eq 'command_execution') {
+        $command=if($payload.PSObject.Properties.Name -contains 'command'){[string]$payload.command}else{''}
+        $events += [pscustomobject]@{event='command_started';phase='implementation';level='info';summary=('command started: ' + (ConvertTo-ProgressSummary -Text $command))}
+    } elseif($type -eq 'item.completed' -and $payloadType -eq 'command_execution') {
+        $summary='command completed'; if($payload.PSObject.Properties.Name -contains 'exit_code'){$summary += ' exit=' + [string]$payload.exit_code}
         $events += [pscustomobject]@{event='command_completed';phase='implementation';level='info';summary=$summary}
-    } elseif($type -eq 'item.completed' -and [string]$item.item.type -eq 'file_change') {
-        $path=''; if($item.item.PSObject.Properties.Name -contains 'path'){$path=[string]$item.item.path}elseif($item.item.PSObject.Properties.Name -contains 'changes'){$path=(@($item.item.changes|ForEach-Object{[string]$_.path}) -join ', ')}
+    } elseif($type -eq 'item.completed' -and $payloadType -eq 'file_change') {
+        $path=''; if($payload.PSObject.Properties.Name -contains 'path'){$path=[string]$payload.path}elseif($payload.PSObject.Properties.Name -contains 'changes'){$path=(@($payload.changes|ForEach-Object{[string]$_.path}) -join ', ')}
         $events += [pscustomobject]@{event='file_changed';phase='implementation';level='info';summary=('file changed: ' + (ConvertTo-ProgressSummary -Text $path))}
-    } elseif($type -eq 'item.completed' -and [string]$item.item.type -eq 'agent_message') {
-        $message=ConvertTo-ProgressSummary -Text ([string]$item.item.text); if($message.Length -gt 160){$message=$message.Substring(0,160)}
+    } elseif($type -eq 'item.completed' -and $payloadType -eq 'agent_message') {
+        $messageText=if($payload.PSObject.Properties.Name -contains 'text'){[string]$payload.text}else{''}
+        $message=ConvertTo-ProgressSummary -Text $messageText; if($message.Length -gt 160){$message=$message.Substring(0,160)}
         if(-not [string]::IsNullOrWhiteSpace($message)){$events += [pscustomobject]@{event='worker_output_activity';phase='implementation';level='info';summary=('agent update: ' + $message)}}
     } elseif($type -in @('turn.started','turn.completed','turn.failed')) {
         $level=if($type -eq 'turn.failed'){'warning'}else{'info'}
