@@ -2582,20 +2582,33 @@ Describe 'v2.4.7-2. detach 실행과 generation 고정 watch terminal handoff' {
 }
 
 Describe 'v2.4.7-3. Skill 자동 follow와 종료 검토 연결' {
-    It 'operation-1은 run detach 후 watch follow와 모든 nextAction 분기를 명시한다' {
+    It 'operation-1은 run detach, watch follow, nextAction 순서와 허용 분기만 명시한다' {
         $raw=Get-Content -LiteralPath (Join-Path $SkillsRoot 'operation-1\SKILL.md') -Raw -Encoding UTF8
         $raw|Should Match '-Command run -Operation 1 -IssueNumber \$0 -Detach'
         $raw|Should Match '-Command watch -Operation 1 -IssueNumber \$0 -Follow'
-        foreach($action in @('review','opus_end_review','manual_verification','stop')){$raw|Should Match ('nextAction='+$action)}
-        $raw|Should Match 'run.*다시 호출하지 말고'
+        $raw|Should Match '(?s)run -Detach.*?-Command watch -Operation 1.*?-Follow.*?nextAction'
+        $actions=@([regex]::Matches($raw,'nextAction=([a-z_]+)')|ForEach-Object{$_.Groups[1].Value}|Sort-Object -Unique)
+        ($actions -join ',')|Should Be 'manual_verification,opus_end_review,review,stop'
+        $raw|Should Not Match 'recover만 안내|run을 다시 호출하지 않는다'
     }
 
-    It 'operation-2는 detach/follow 뒤 Sonnet 종료 검토와 stop을 명시한다' {
+    It 'operation-2는 run detach, watch follow, nextAction 순서와 허용 분기만 명시한다' {
         $raw=Get-Content -LiteralPath (Join-Path $SkillsRoot 'operation-2\SKILL.md') -Raw -Encoding UTF8
         $raw|Should Match '-Command run -Operation 2 -IssueNumber \$0 -Detach'
         $raw|Should Match '-Command watch -Operation 2 -IssueNumber \$0 -Follow'
-        $raw|Should Match 'nextAction=sonnet_end_review';$raw|Should Match 'nextAction=stop'
+        $raw|Should Match '(?s)run -Detach.*?-Command watch -Operation 2.*?-Follow.*?nextAction'
+        $actions=@([regex]::Matches($raw,'nextAction=([a-z_]+)')|ForEach-Object{$_.Groups[1].Value}|Sort-Object -Unique)
+        ($actions -join ',')|Should Be 'sonnet_end_review,stop'
+        $raw|Should Not Match 'recover만 안내|run을 다시 호출하지 않는다'
         $raw|Should Match '새 generation 생성의 근거가 아니다'
+    }
+
+    It 'operation-1과 operation-2의 recover는 새 세션 재진입 전용이다' {
+        foreach($name in @('operation-1','operation-2')) {
+            $raw=Get-Content -LiteralPath (Join-Path $SkillsRoot "$name\SKILL.md") -Raw -Encoding UTF8
+            $raw|Should Match '새 세션.*재진입'
+            $raw|Should Match 'watch가 살아 있는 동안 수동으로 호출하지 않는다'
+        }
     }
 
     It 'operation 보조 Skill은 watch 명령을 제공하고 operation-3은 report 외 자동 검토를 추가하지 않는다' {
