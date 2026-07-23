@@ -1,23 +1,47 @@
-operation-router v2.4.7-1 verification result
+operation-router v3.0.0 final verification
 Date: 2026-07-23 (KST)
 Runner: Windows PowerShell 5.1, Pester 3.4 (-Strict)
 
-Source-tree command:
+Focused v3 groups:
+  issue branch / worker contract / mutation lock: 26 passed, 0 failed
+  Draft PR / PR CI: 18 passed, 0 failed
+  receipt / review / repair / recover / merge_ready: 15 passed, 0 failed
+  direct-main and safety regressions: 11 passed, 0 failed
+  focused total: 70 passed, 0 failed
+
+Final source-tree command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
-Expected/final: Passed 247, Failed 0, Skipped 0, Pending 0, Inconclusive 0
+Final result:
+  exit code: 0
+  duration: 912.15 seconds
+  318 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  installedIntegrationTests: not-requested
 
 Installed fixture command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixture.ps1
-Expected/final: source-tree 247/247, installed Skill 6/6 byte-identical,
-  installedIntegrationFailures 0, isolated USERPROFILE removed after run
+Final result:
+  exit code: 0
+  duration: 907.03 seconds
+  source tree: 318 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  installedIntegrationTests: executed
+  installedIntegrationFailures: 0
+  installed Skill byte-equivalence: 6/6
 
-Focused additions: 21
-  v2.4.6 runtime hotfix regressions: 2
-  v2.4.7 progress journal/parser: 6
-  v2.4.7 detach/watch/nextAction/stable-read: 8
-  v2.4.7-1 Skill watch-first contract: 4
-  v2.4.7-1 documentation consistency: 1
+Final focused integrity checks:
+  v2.3.4 reproducibility / manifest group: 22 passed, 0 failed
+  v2.4.7 Skill watch-first group: 4 passed, 0 failed
+  v2.4.7 cross-document workflow group: 1 passed, 0 failed
+  PowerShell parser: 15 files passed
+  config JSON parse: passed
+  manifest SHA-256: 34 entries passed
+  git diff --check: passed
 
-Additional existing execution/recover regression run: 9/9 PASS.
-Test categories: Pester mocks, fake Git repositories/remotes, ordinary OS process
-fixture, isolated installed fixture. Paid Grok/GPT/Claude live calls: 0.
+Isolation:
+  fake Git repositories and bare remotes, injected workers, mock PR probe,
+  ordinary OS process fixture, synthetic model cache, and unique temporary
+  USERPROFILE only for the accepted installed integration run.
+  The preliminary installed-fixture run was discarded and stopped after its
+  legacy read-only models_cache copy was detected. The runner was corrected
+  before the accepted final run. Real user-home writes: 0.
+  Real GitHub PR/check mutations during tests: 0.
+  Paid Grok/GPT/Claude live calls: 0.

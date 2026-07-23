@@ -1,5 +1,14 @@
 {
-  "_comment": "operation-router v2.4.7 config. Routing and model assignments are unchanged from v2.4.6. Progress settings affect observation only. Verified 2026-07-22 against codex-cli 0.144.5 models_cache: gpt-5.6-sol/terra/luna are exposed. Claude and Grok CLI capabilities remain as verified 2026-07-20: claude 2.1.212, grok 0.2.102. Do not hand-edit model IDs without re-verifying.",
+  "_comment": "operation-router v3.0.0 config. New bundles default to issue branches and Draft PRs. A legacy installed config with no gitWorkflow object remains direct-main. Routing and model assignments are unchanged from v2.4.7.",
+  "gitWorkflow": {
+    "mode": "pull-request",
+    "baseBranch": "main",
+    "branchPrefix": "operation-router",
+    "createDraftPullRequest": true,
+    "autoMerge": false,
+    "requireCiWhenWorkflowPresent": true,
+    "fetchBeforeRun": true
+  },
   "grok": {
     "model": "grok-4.5",
     "operations": {

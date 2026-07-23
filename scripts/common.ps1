@@ -300,6 +300,72 @@ function Get-WorkerResultErrorClass {
     return (Get-WorkerErrorClass -Text $t)
 }
 
+function ConvertFrom-WorkerCompletionReport {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $invalid = {
+        param([string]$Reason)
+        [pscustomobject]@{
+            valid=$false;reason=$Reason;localVerificationComplete=$false
+            verification=$null;remainingProblems=@()
+        }
+    }
+    if([string]::IsNullOrWhiteSpace($Text)){return (& $invalid 'worker_report_missing')}
+
+    $structured=@()
+    foreach($line in @($Text -split "`r?`n")){
+        $trimmed=$line.Trim()
+        if($trimmed.Length -lt 2 -or -not $trimmed.StartsWith('{')){continue}
+        try{$event=$trimmed|ConvertFrom-Json -ErrorAction Stop}catch{continue}
+        if($null -ne $event -and $event.PSObject.Properties.Name -contains 'item' -and $null -ne $event.item -and
+            $event.item.PSObject.Properties.Name -contains 'type' -and [string]$event.item.type -eq 'agent_message' -and
+            $event.item.PSObject.Properties.Name -contains 'text' -and -not [string]::IsNullOrWhiteSpace([string]$event.item.text)){
+            $structured += [string]$event.item.text
+        }
+    }
+    if($structured.Count -eq 0){
+        $start=$Text.IndexOf('{');$end=$Text.LastIndexOf('}')
+        if($start -ge 0 -and $end -gt $start){
+            try{
+                $grok=$Text.Substring($start,$end-$start+1)|ConvertFrom-Json -ErrorAction Stop
+                if($null -ne $grok -and $grok.PSObject.Properties.Name -contains 'text' -and
+                    -not [string]::IsNullOrWhiteSpace([string]$grok.text)){
+                    $structured += [string]$grok.text
+                }
+            }catch{}
+        }
+    }
+    $candidate=if($structured.Count -gt 0){[string]$structured[$structured.Count-1]}else{$Text}
+    $matches=[regex]::Matches($candidate,'(?m)^\s*\[ORH_WORKER_REPORT\]\s*(\{[^\r\n]+\})\s*$')
+    if($matches.Count -eq 0){return (& $invalid 'worker_report_missing')}
+    try{$report=$matches[$matches.Count-1].Groups[1].Value|ConvertFrom-Json -ErrorAction Stop}catch{return (& $invalid 'worker_report_invalid_json')}
+    if($null -eq $report){return (& $invalid 'worker_report_null')}
+    $props=@($report.PSObject.Properties.Name)
+    if($props.Count -ne 3 -or @($props|Where-Object{$_ -notin @('localVerificationComplete','verification','remainingProblems')}).Count -gt 0){
+        return (& $invalid 'worker_report_schema_mismatch')
+    }
+    if($report.localVerificationComplete -isnot [bool] -or $report.verification -isnot [string] -or
+        $report.remainingProblems -isnot [System.Array] -or
+        [string]::IsNullOrWhiteSpace([string]$report.verification)){
+        return (& $invalid 'worker_report_schema_mismatch')
+    }
+    $remaining=@()
+    foreach($problem in @($report.remainingProblems)){
+        if($problem -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$problem)){
+            return (& $invalid 'worker_report_schema_mismatch')
+        }
+        $safe=Protect-SecretText -Text ([string]$problem)
+        if($safe.Length -gt 300){$safe=$safe.Substring(0,300)+'...[truncated]'}
+        $remaining+=$safe
+        if($remaining.Count -gt 20){return (& $invalid 'worker_report_too_many_problems')}
+    }
+    $verification=Protect-SecretText -Text ([string]$report.verification)
+    if($verification.Length -gt 2000){$verification=$verification.Substring(0,2000)+'...[truncated]'}
+    return [pscustomobject]@{
+        valid=$true;reason=$null;localVerificationComplete=[bool]$report.localVerificationComplete
+        verification=$verification;remainingProblems=@($remaining)
+    }
+}
+
 function Test-WorkerResultSuccess {
     param([Parameter(Mandatory)]$Result)
     if ($null -eq $Result) { return $false }
@@ -417,10 +483,10 @@ function Get-GitOriginOwnerRepo {
     if ($r.Text -match '[:/]([^/:]+)/([^/]+?)(\.git)?$') { return "$($Matches[1])/$($Matches[2])" }
     return $null
 }
-# origin/main 대비 ahead/behind. origin 없으면 unavailable.
+# 지정 원격 ref 대비 ahead/behind. 생략하면 legacy origin/main을 사용한다.
 function Get-GitAheadBehind {
-    param([string]$Path = (Get-Location).Path)
-    $r = Invoke-GitRaw -Path $Path -GitArgs @('rev-list','--left-right','--count','origin/main...HEAD')
+    param([string]$Path = (Get-Location).Path, [string]$RemoteRef = 'origin/main')
+    $r = Invoke-GitRaw -Path $Path -GitArgs @('rev-list','--left-right','--count',"$RemoteRef...HEAD")
     if ($r.ExitCode -ne 0) { return @{ Available = $false; Ahead = $null; Behind = $null } }
     $parts = $r.Text -split '\s+'
     if ($parts.Count -ge 2) { return @{ Available = $true; Behind = [int]$parts[0]; Ahead = [int]$parts[1] } }
@@ -699,7 +765,8 @@ function New-ExecutionGeneration {
         [Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber,
         [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$Kind,
         [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)]$Route,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$PromptContent, [string]$RunId
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PromptContent, [string]$RunId,
+        [AllowNull()]$Workflow
     )
     Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
     $previous = Get-ExecutionReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
@@ -732,7 +799,7 @@ function New-ExecutionGeneration {
     [System.IO.File]::WriteAllText($logPath, (Protect-SecretText -Text $header), (New-Object System.Text.UTF8Encoding($false)))
     Invoke-LogRetention -Scope ([string]$Script:RouterLogScope)
     $receipt = [pscustomobject]@{
-        schemaVersion = 1; executionId = $executionId; runId = $RunId; generation = $generation
+        schemaVersion = if($null -ne $Workflow){2}else{1}; executionId = $executionId; runId = $RunId; generation = $generation
         ownerRepo = $id.ownerRepo; repoRoot = $id.repoRoot; canonicalRepoRoot = $id.canonicalRepoRoot
         repoRootHash = $id.repoRootHash; namespaceVersion = $id.namespaceVersion
         operation = $Operation; issueNumber = $IssueNumber; kind = $Kind; purpose = 'implement'
@@ -742,13 +809,15 @@ function New-ExecutionGeneration {
         promptPresent = $true; promptDeletedAt = $null; artifactRoot = $artifactRoot; artifactPath = $artifactDir
         resultPath = $resultPath; rawStdoutPath = $stdoutPath; rawStderrPath = $stderrPath
         stdoutPath = $null; stderrPath = $null; sanitizedStdoutPath = $sanitizedStdoutPath; sanitizedStderrPath = $sanitizedStderrPath
-        artifactSanitizationStatus = 'pending'; artifactSanitizedAt = $null; invocationPath = $invocationPath
+        artifactSanitizationStatus = 'pending'; artifactSanitizedAt = $null
+        artifactRetentionStatus = 'pending'; artifactRetentionCompletedAt = $null; invocationPath = $invocationPath
         processId = $null; processStartedAt = $null; finalHead = $null; workerExitCode = $null
         workerStopReason = $null; interruptedReason = $null; workerReportedVerification = $null
         localVerificationComplete = $false; interrupted = $false; recoveredByPostflight = $false
         resultEnvelopePresent = $false; verificationProvenance = 'worker_result_pending'
         postflight = $null; remainingProblems = @()
     }
+    if ($null -ne $Workflow) { Add-Member -InputObject $receipt -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $Workflow) -Force }
     $receipt = Initialize-ExecutionProgress -Receipt $receipt
     Write-ExecutionProgressEvent -Receipt $receipt -Event execution_created -Summary "execution generation $generation created" | Out-Null
     Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
@@ -953,9 +1022,14 @@ function Complete-ExecutionTerminalArtifacts {
         $Receipt.remainingProblems = @($Receipt.remainingProblems) + @('execution artifact sanitization failed: ' + [string]$sanitized.error)
     }
     Write-ExecutionGenerationMarker -Receipt $Receipt -Status ([string]$Receipt.status)
-    try { Invoke-ExecutionRetention -Receipt $Receipt | Out-Null } catch {
+    try {
+        Invoke-ExecutionRetention -Receipt $Receipt | Out-Null
+        Add-Member -InputObject $Receipt -NotePropertyName artifactRetentionStatus -NotePropertyValue 'completed' -Force
+        Add-Member -InputObject $Receipt -NotePropertyName artifactRetentionCompletedAt -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+    } catch {
         $underlying = [string]$Receipt.status
         $Receipt.status = 'artifact_retention_failed'
+        Add-Member -InputObject $Receipt -NotePropertyName artifactRetentionStatus -NotePropertyValue 'failed' -Force
         Add-Member -InputObject $Receipt -NotePropertyName artifactFinalizationUnderlyingStatus -NotePropertyValue $underlying -Force
         $Receipt.remainingProblems = @($Receipt.remainingProblems) + @('execution retention failed: ' + (Protect-SecretText -Text ([string]$_.Exception.Message)))
         Write-ExecutionGenerationMarker -Receipt $Receipt -Status ([string]$Receipt.status)
@@ -981,17 +1055,19 @@ function Get-PendingOrderPath {
 }
 function Save-PendingSnapshot {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)]$Snapshot,
-          [Parameter(Mandatory)][string]$RepoPath, [string]$Kind = 'logic')
+          [Parameter(Mandatory)][string]$RepoPath, [string]$Kind = 'logic', [AllowNull()]$Workflow)
     Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
     $id = Get-RepoIdentity -RepoPath $RepoPath
     $path = Get-PendingSnapshotPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
     $payload = [pscustomobject]@{
+        schemaVersion = if($null -ne $Workflow){2}else{1}
         operation = $Operation; issueNumber = $IssueNumber; kind = $Kind
         ownerRepo = $id.ownerRepo; repoRoot = $id.repoRoot; canonicalRepoRoot = $id.canonicalRepoRoot
         repoRootHash = $id.repoRootHash; namespaceVersion = $id.namespaceVersion
         snapshot = $Snapshot; savedAt = (Get-Date).ToUniversalTime().ToString('o')
     }
+    if ($null -ne $Workflow) { Add-Member -InputObject $payload -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $Workflow) -Force }
     Write-JsonFile -Path $path -Object $payload
     return $path
 }
@@ -1036,7 +1112,8 @@ function Save-RunReceipt {
         [string]$StatusOverride, [bool]$ResultEnvelopePresent = $false,
         [bool]$Interrupted = $true, [string]$InterruptedReason,
         [bool]$LocalVerificationComplete = $false, [bool]$RecoveredByPostflight = $false,
-        [string]$VerificationProvenance = 'unknown'
+        [string]$VerificationProvenance = 'unknown', [AllowNull()]$Workflow,
+        [string]$ArtifactSanitizationStatus = 'unknown', [string]$ArtifactRetentionStatus = 'unknown'
     )
     Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
     $id = Get-RepoIdentity -RepoPath $RepoPath
@@ -1054,7 +1131,12 @@ function Save-RunReceipt {
     if ($null -ne $WorkerResult -and ($WorkerResult.PSObject.Properties.Name -contains 'WorkerReportedVerification') -and $null -ne $WorkerResult.WorkerReportedVerification) {
         $reportedVerification = Protect-SecretText -Text ([string]$WorkerResult.WorkerReportedVerification)
     }
+    $workerRemaining=@()
+    if($null -ne $WorkerResult -and $WorkerResult.PSObject.Properties.Name -contains 'WorkerRemainingProblems'){
+        $workerRemaining=@($WorkerResult.WorkerRemainingProblems|ForEach-Object{Protect-SecretText -Text ([string]$_)})
+    }
     $payload = [pscustomobject]@{
+        schemaVersion = if($null -ne $Workflow){2}else{1}
         operation   = $Operation
         issueNumber = $IssueNumber
         ownerRepo   = $id.ownerRepo
@@ -1076,10 +1158,14 @@ function Save-RunReceipt {
         interruptedReason = $InterruptedReason
         localVerificationComplete = [bool]$LocalVerificationComplete
         workerReportedVerification = $reportedVerification
+        workerRemainingProblems = @($workerRemaining)
         recoveredByPostflight = [bool]$RecoveredByPostflight
         verificationProvenance = $VerificationProvenance
+        artifactSanitizationStatus = $ArtifactSanitizationStatus
+        artifactRetentionStatus = $ArtifactRetentionStatus
         createdAt   = (Get-Date).ToUniversalTime().ToString('o')
     }
+    if ($null -ne $Workflow) { Add-Member -InputObject $payload -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $Workflow) -Force }
     Write-JsonFile -Path $path -Object $payload
     return $path
 }
@@ -1117,7 +1203,13 @@ function Test-RunReceiptVerificationEligible {
         [string]$Receipt.verificationProvenance -notin @('valid_worker_result_envelope','valid_worker_result_envelope_recovered_postflight')) {
         return (& $fail 'run_result_unverified' 'run_result_unverified' '정상 worker result envelope와 검증 provenance가 확인되지 않았다.')
     }
-    if ([string]$Receipt.status -notin @('completed','completed_ci_pending','completed_ci_unavailable')) {
+    $workflow = Get-ReceiptWorkflowContext -Receipt $Receipt
+    $eligibleStatuses = if ([string]$workflow.mode -eq 'pull-request') {
+        @('pr_opened','pr_ci_pending','pr_ci_unavailable')
+    } else {
+        @('completed','completed_ci_pending','completed_ci_unavailable')
+    }
+    if ([string]$Receipt.status -notin $eligibleStatuses) {
         return (& $fail 'run_status_not_completed' ("run_not_completed:" + [string]$Receipt.status) '정상 완료 상태가 아닌 run은 review와 repair 자격이 없다.')
     }
     return [pscustomobject]@{
@@ -1140,13 +1232,15 @@ function Save-ReviewReceipt {
         [Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber,
         [Parameter(Mandatory)][string]$RepoPath,
         [Parameter(Mandatory)][string]$Verdict, [Parameter(Mandatory)]$Findings,
-        [Parameter(Mandatory)][string]$PostReviewHead, [Parameter(Mandatory)][string]$OriginalWorker
+        [Parameter(Mandatory)][string]$PostReviewHead, [Parameter(Mandatory)][string]$OriginalWorker,
+        [AllowNull()]$Workflow
     )
     Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
     $id = Get-RepoIdentity -RepoPath $RepoPath
     $path = Get-ReviewReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
     $payload = [pscustomobject]@{
+        schemaVersion  = if($null -ne $Workflow){2}else{1}
         operation      = $Operation
         issueNumber    = $IssueNumber
         ownerRepo      = $id.ownerRepo
@@ -1160,6 +1254,7 @@ function Save-ReviewReceipt {
         originalWorker = $OriginalWorker
         createdAt      = (Get-Date).ToUniversalTime().ToString('o')
     }
+    if ($null -ne $Workflow) { Add-Member -InputObject $payload -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $Workflow) -Force }
     Write-JsonFile -Path $path -Object $payload
     return $path
 }
@@ -1176,8 +1271,92 @@ function Remove-ReviewReceipt {
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
 }
 
+function Get-RepairReceiptPath {
+    param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
+    return (Join-Path (Get-PendingNamespacePath -RepoPath $RepoPath) "op$Operation-issue$IssueNumber-repair.json")
+}
+function Save-RepairReceipt {
+    param(
+        [Parameter(Mandatory)][int]$Operation,[Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$RepoPath,[Parameter(Mandatory)]$RunReceipt,
+        [Parameter(Mandatory)]$Postflight,[Parameter(Mandatory)]$Route,
+        [Parameter(Mandatory)][string]$Status,[Parameter(Mandatory)]$Workflow,
+        [AllowNull()]$WorkerResult
+    )
+    Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
+    $id=Get-RepoIdentity -RepoPath $RepoPath
+    $path=Get-RepairReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
+    $repairRemaining=if($null -ne $WorkerResult -and $WorkerResult.PSObject.Properties.Name -contains 'WorkerRemainingProblems'){@($WorkerResult.WorkerRemainingProblems)}else{@()}
+    $payload=[pscustomobject]@{
+        schemaVersion=2;operation=$Operation;issueNumber=$IssueNumber;ownerRepo=$id.ownerRepo
+        repoRoot=$id.repoRoot;canonicalRepoRoot=$id.canonicalRepoRoot;repoRootHash=$id.repoRootHash
+        namespaceVersion=$id.namespaceVersion;startHead=$RunReceipt.startHead;repairStartHead=$Postflight.startHead
+        finalHead=$Postflight.finalHead;worker=$Route.worker;model=$Route.model;effort=$Route.effort
+        status=$Status;postflight=$Postflight;workflow=(Copy-WorkflowContext -Workflow $Workflow)
+        finalReviewRequired=$true;reviewVerdict=$null
+        resultEnvelopePresent=$true;interrupted=$false
+        localVerificationComplete=($null -ne $WorkerResult -and $WorkerResult.PSObject.Properties.Name -contains 'LocalVerificationComplete' -and [bool]$WorkerResult.LocalVerificationComplete)
+        remainingProblems=@($repairRemaining);workerRemainingProblems=@($repairRemaining)
+        verificationProvenance='valid_repair_worker_result'
+        artifactSanitizationStatus='not-applicable';artifactRetentionStatus='not-applicable'
+        createdAt=(Get-Date).ToUniversalTime().ToString('o')
+    }
+    Write-JsonFile -Path $path -Object $payload
+    return $path
+}
+function Get-RepairReceipt {
+    param([Parameter(Mandatory)][int]$Operation,[Parameter(Mandatory)][int]$IssueNumber,[Parameter(Mandatory)][string]$RepoPath)
+    $path=Get-RepairReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    if(-not (Test-Path -LiteralPath $path)){return $null}
+    try{return Read-JsonFileStable -Path $path -MaxAttempts 3 -DelayMilliseconds 25}catch{return $null}
+}
+function Remove-RepairReceipt {
+    param([Parameter(Mandatory)][int]$Operation,[Parameter(Mandatory)][int]$IssueNumber,[Parameter(Mandatory)][string]$RepoPath)
+    $path=Get-RepairReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
+    if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force}
+}
+
 # ---------- 고정 실행 계약 ----------
 function Get-FixedExecutionContract {
+    param([AllowNull()]$Workflow)
+    if ($null -ne $Workflow -and [string]$Workflow.mode -eq 'pull-request') {
+        return @"
+[OPERATION_ROUTER_FINAL_WORKER]
+You are the final worker already selected by operation-router.
+Do not apply any global Operation 1/2/3 delegation rule in this marked session.
+Do not invoke, inspect, preflight, or delegate to Grok, Codex, Claude, or any other worker CLI.
+Implement the GitHub issue below directly. The issue body is the sole task canon.
+
+[역할 지정 — 최우선으로 적용]
+너는 operation-router가 호출한 최종 작업자다. 다른 모델이나 CLI에 재위임하지 않는다.
+
+[고정 실행 계약 — pull-request]
+- workflow mode: pull-request
+- base branch: $($Workflow.baseBranch)
+- base head: $($Workflow.baseHead)
+- expected branch: $($Workflow.workBranch)
+- expected remote branch: $($Workflow.remoteWorkBranch)
+- issue number: $($Workflow.issueNumber)
+- 현재 expected branch에서만 작업한다.
+- branch를 생성·변경·삭제하지 않는다.
+- main으로 checkout하거나 main에 push하지 않는다.
+- configured base branch($($Workflow.baseBranch))로 checkout하거나 그 branch에 push하지 않는다.
+- $($Workflow.remoteWorkBranch)에만 push하고 upstream을 그 원격 브랜치로 설정한다.
+- PR과 이슈를 생성·수정·댓글·종료·병합하지 않는다.
+- force push, reset, clean, rebase를 하지 않는다.
+- 작업 시작 전 worktree가 clean이어야 한다.
+- 이슈 원문 범위를 확장하지 않는다.
+- 의미 단위별로 테스트하고 커밋한다.
+- 테스트 실패를 숨기지 않는다.
+- secret과 환경변수 값을 출력하거나 커밋하지 않는다.
+- 완료 시 변경 파일, 테스트, 커밋, push, 남은 문제만 짧게 보고한다.
+- 마지막 줄은 반드시 [ORH_WORKER_REPORT] {"localVerificationComplete":true,"verification":"실행한 검증 요약","remainingProblems":[]} 형식의 한 줄 JSON이다. 검증을 실제로 완료하지 못했으면 localVerificationComplete를 false로, 남은 문제가 있으면 문자열 배열로 보고한다.
+
+[아래는 GitHub 이슈 본문 원문 — 요약·재작성·삭제하지 않는다]
+"@
+    }
     return @'
 [OPERATION_ROUTER_FINAL_WORKER]
 You are the final worker already selected by operation-router.
@@ -1209,8 +1388,8 @@ Implement the GitHub issue below directly. The issue body is the sole task canon
 }
 # 계약 + 이슈원문(무손실). 이슈 본문은 변형하지 않는다.
 function New-OrderContent {
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$IssueBody)
-    $contract = Get-FixedExecutionContract
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$IssueBody, [AllowNull()]$Workflow)
+    $contract = Get-FixedExecutionContract -Workflow $Workflow
     return ($contract + "`n" + $IssueBody)
 }
 

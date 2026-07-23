@@ -1,9 +1,9 @@
 ﻿# operation-router 메인 진입점.
-# 명령: run | watch | review | repair | postflight | recover | status | doctor | set | reset
+# 명령: run | watch | review | repair | finalize | postflight | recover | status | doctor | set | reset
 # run 역할: 시작검토 -> 계약+이슈원문 주문서 -> 라우팅 -> 작업자 1회 -> (한도오류 시 부분변경 가드) -> postflight -> 전체 JSON.
 
 param(
-    [ValidateSet('run','watch','review','repair','postflight','recover','status','doctor','set','reset')][string]$Command = 'run',
+    [ValidateSet('run','watch','review','repair','finalize','postflight','recover','status','doctor','set','reset')][string]$Command = 'run',
     [int]$Operation,
     [int]$IssueNumber,
     [ValidateSet('logic','mechanical')][string]$Kind = 'logic',
@@ -17,6 +17,7 @@ param(
     [string]$PostReviewHead,
     [string]$FindingsFile,
     [ValidateSet('grok','gpt')][string]$Target,
+    [ValidateSet('PASS','REPAIR_REQUIRED')][string]$ReviewVerdict,
     [string]$Value
 )
 
@@ -24,6 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'git-workflow.ps1')
 . (Join-Path $PSScriptRoot 'progress.ps1')
 . (Join-Path $PSScriptRoot 'resolve-route.ps1')
 . (Join-Path $PSScriptRoot 'prepare-operation.ps1')
@@ -107,6 +109,16 @@ function New-FinalOutput {
         remainingProblems = @($RemainingProblems)
         logPath = $LogPath
     }
+    if($Postflight -and $Postflight.PSObject.Properties.Name -contains 'workflow' -and $null -ne $Postflight.workflow){
+        $wf=$Postflight.workflow
+        $o.workflowMode=[string]$wf.mode
+        $o.baseBranch=if($wf.PSObject.Properties.Name -contains 'baseBranch'){$wf.baseBranch}else{$null}
+        $o.workBranch=if($wf.PSObject.Properties.Name -contains 'workBranch'){$wf.workBranch}else{$null}
+        $o.baseAdvanced=if($wf.PSObject.Properties.Name -contains 'baseAdvanced'){[bool]$wf.baseAdvanced}else{$false}
+        $o.prNumber=if($wf.PSObject.Properties.Name -contains 'pr' -and $null -ne $wf.pr){[int]$wf.pr.number}else{$null}
+        $o.prUrl=if($wf.PSObject.Properties.Name -contains 'pr' -and $null -ne $wf.pr){[string]$wf.pr.url}else{$null}
+        $o.prDraft=if($wf.PSObject.Properties.Name -contains 'pr' -and $null -ne $wf.pr){[bool]$wf.pr.draft}else{$null}
+    }
     if ($Extra) { foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] } }
     $obj = [pscustomobject]$o
     # 선택한 critical file의 사후 무결성 변화를 모든 종료 경로에서 확인한다. OS sandbox가 아니다.
@@ -153,6 +165,35 @@ function Get-RemainingProblems {
         'repair_quota_unknown'    { $probs += 'repair returned an ambiguous quota message; usage-state unchanged' }
         'repair_postflight_failed' { $probs += 'repair worker exited 0 but postflight gates failed' }
         'repair_worker_unavailable' { $probs += 'no permitted repair worker under current usage state; no silent worker swap' }
+        'repository_execution_active' { $probs += 'another mutation execution is active in this clone; follow that execution instead' }
+        'remote_sync_unavailable' { $probs += 'origin branch state could not be verified; no completion or merge readiness is trusted' }
+        'not_on_base_or_work_branch' { $probs += 'pull-request mode must start on the configured base or receipt-owned issue branch' }
+        'base_branch_missing' { $probs += 'configured base branch is missing locally or on origin' }
+        'base_behind_remote' { $probs += 'local base branch is behind origin; automatic pull is forbidden' }
+        'base_ahead_remote' { $probs += 'local base branch is ahead of origin; automatic push is forbidden' }
+        'work_branch_unowned' { $probs += 'existing issue branch has no valid workflow receipt and was not adopted' }
+        'work_branch_context_mismatch' { $probs += 'issue branch receipt or Draft PR context does not match' }
+        'work_branch_mismatch' { $probs += 'worker changed away from the assigned issue branch' }
+        'work_branch_push_incomplete' { $probs += 'local issue branch HEAD is not confirmed on its origin branch' }
+        'work_branch_upstream_mismatch' { $probs += 'issue branch upstream is not the expected origin issue branch' }
+        'base_branch_touched' { $probs += 'worker final commit is reachable from the remote base branch; direct base push detected' }
+        'local_base_ref_changed' { $probs += 'local base branch ref changed during the worker execution' }
+        'pr_tool_unavailable' { $probs += 'GitHub PR tool is unavailable' }
+        'pr_lookup_failed' { $probs += 'Draft PR lookup failed' }
+        'pr_create_failed' { $probs += 'Draft PR creation failed' }
+        'pr_context_mismatch' { $probs += 'Draft PR base, head, or head SHA does not match the workflow receipt' }
+        'pr_not_draft' { $probs += 'existing PR is unexpectedly not Draft' }
+        'pr_already_closed' { $probs += 'existing PR is closed' }
+        'pr_already_merged' { $probs += 'existing PR is already merged' }
+        'pr_ci_pending' { $probs += 'PR checks are still pending; merge_ready is forbidden' }
+        'pr_ci_failed' { $probs += 'at least one PR check failed; review and merge_ready are forbidden' }
+        'pr_ci_unavailable' { $probs += 'PR check result is unavailable; merge_ready is forbidden' }
+        'worker_reported_remaining_problems' { $probs += 'worker reported unresolved problems; merge_ready is forbidden' }
+        'recovered_pr_commit_unverified' { $probs += 'PR commit recovered without a trusted worker result; manual verification is required' }
+        'recovered_pr_ci_pending_unverified' { $probs += 'PR commit recovered without a worker result and checks are pending' }
+        'recovered_pr_ci_failed_unverified' { $probs += 'PR commit recovered without a worker result and checks failed' }
+        'recovered_pr_ci_unavailable_unverified' { $probs += 'PR commit recovered without a worker result and checks are unavailable' }
+        'recovered_pr_context_mismatch' { $probs += 'PR recovery context does not match the receipt' }
     }
     return $probs
 }
@@ -234,6 +275,8 @@ function Invoke-ClaudeExecution {
         [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)]$Target,
         [Parameter(Mandatory)][string]$Order, [Parameter(Mandatory)]$Snapshot,
         [string]$Mode = 'claude-only', [scriptblock]$ClaudeImplementer, [scriptblock]$CiProbe,
+        [AllowNull()]$Workflow, [scriptblock]$PrProbe, [scriptblock]$CheckLister,
+        [scriptblock]$IssueTitleFetcher, [scriptblock]$RemoteHeadProbe,
         [Parameter(Mandatory)]$Log
     )
     if ($null -ne $ClaudeImplementer) {
@@ -243,17 +286,31 @@ function Invoke-ClaudeExecution {
         $success = $true; $exit = 0
         if ($null -ne $impl -and ($impl.PSObject.Properties.Name -contains 'Success')) { $success = [bool]$impl.Success }
         if ($null -ne $impl -and ($impl.PSObject.Properties.Name -contains 'ExitCode')) { $exit = [int]$impl.ExitCode }
-        $wr = [pscustomobject]@{ Success = $success; ExitCode = $exit; QuotaExhausted = $false; Output = 'claude-executed' }
-        $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $Snapshot -WorkerResult $wr -DeclaredNoCodeChange:$false -CiProbe $CiProbe
+        $wr = [pscustomobject]@{ Success = $success; ExitCode = $exit; QuotaExhausted = $false; Output = 'claude-executed'
+            WorkerReportedVerification='current Claude session completed implementation';LocalVerificationComplete=$success }
+        $route = [pscustomobject]@{worker='claude';model=$Target.model;effort=$Target.effort}
+        $pf = Resolve-WorkflowPostflight -RepoPath $RepoPath -StartSnapshot $Snapshot -WorkerResult $wr -Workflow $Workflow `
+            -Operation $Operation -IssueNumber $IssueNumber -Route $route -CiProbe $CiProbe -PrProbe $PrProbe `
+            -CheckLister $CheckLister -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe
+        $Workflow=Copy-WorkflowContext -Workflow $pf.workflow
+        if([string]$Workflow.mode -eq 'pull-request'){
+            Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $Workflow|Out-Null
+            Save-RunReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $Snapshot -Postflight $pf `
+                -Route $route -WorkerResult $wr -StatusOverride $pf.status -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
+                -ResultEnvelopePresent $true -Interrupted $false -LocalVerificationComplete $success -RecoveredByPostflight $false `
+                -VerificationProvenance 'valid_worker_result_envelope' -Workflow $Workflow `
+                -ArtifactSanitizationStatus 'not-applicable' -ArtifactRetentionStatus 'not-applicable'|Out-Null
+        }
         Remove-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
         $lp = Write-RouterLog -Name "op$Operation-issue$IssueNumber-claude" -Content ($Log -join "`n")
         return New-FinalOutput -Operation $Operation -RouteLabel "$Mode-executed" -Status $pf.status `
             -Worker 'claude' -Model $Target.model -Effort $Target.effort -Snapshot $Snapshot -Postflight $pf `
             -IssueNumber $IssueNumber -LogPath $lp -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
-            -Extra @{ executedBy = 'claude'; mode = $Mode }
+            -Extra @{ executedBy = 'claude'; mode = $Mode; workflow=$Workflow
+                workflowMode=$Workflow.mode; baseBranch=$Workflow.baseBranch; workBranch=$Workflow.workBranch }
     }
     # 지시 모드: 주문서를 pending(저장소 네임스페이스)에 보존하고 postflight 명령을 안내 (재귀 resumeCommand 없음)
-    Save-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -Snapshot $Snapshot -Kind $Kind -RepoPath $RepoPath | Out-Null
+    Save-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -Snapshot $Snapshot -Kind $Kind -RepoPath $RepoPath -Workflow $Workflow | Out-Null
     $orderPath = Get-PendingOrderPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     Assert-PathWithinRoot -Path $orderPath -Root $Script:PendingDir | Out-Null
     Set-Content -LiteralPath $orderPath -Value $Order -Encoding UTF8 -NoNewline
@@ -266,6 +323,7 @@ function Invoke-ClaudeExecution {
             requiredModel = $Target.model; requiredEffort = $Target.effort
             orderPath = $orderPath; startHead = $Snapshot.startHead
             postflightCommand = "-Command postflight -Operation $Operation -IssueNumber $IssueNumber"
+            workflow = $Workflow; workflowMode=$Workflow.mode; baseBranch=$Workflow.baseBranch; workBranch=$Workflow.workBranch
             note = '현재 세션이 요구 모델이면 고정 실행 계약+이슈 원문(orderPath)을 직접 수행한 뒤 postflightCommand를 실행하라. 재라우팅/재귀 handoff 없음.'
         }
 }
@@ -273,7 +331,8 @@ function Invoke-ClaudeExecution {
 # claude-only 지시 후 현재 세션이 구현을 마친 뒤 호출: pending 스냅샷 기준 postflight.
 function Invoke-PostflightCommand {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber,
-          [string]$RepoPath = (Get-Location).Path, [scriptblock]$CiProbe)
+          [string]$RepoPath = (Get-Location).Path, [scriptblock]$CiProbe,
+          [scriptblock]$PrProbe,[scriptblock]$CheckLister,[scriptblock]$IssueTitleFetcher,[scriptblock]$RemoteHeadProbe)
     $pend = Get-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     if ($null -eq $pend) {
         return [pscustomobject]@{ operation = $Operation; issueNumber = $IssueNumber; status = 'no_pending_snapshot'
@@ -290,14 +349,32 @@ function Invoke-PostflightCommand {
             note = '현재 저장소와 pending 스냅샷의 저장소가 다르다. postflight를 중단한다.' }
         return (Complete-BoundaryFinalizer -Result $mismatch -BoundarySnapshot $pendBoundary)
     }
-    $wr = [pscustomobject]@{ Success = $true; ExitCode = 0; QuotaExhausted = $false; Output = 'claude-postflight' }
-    $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $pend.snapshot -WorkerResult $wr -DeclaredNoCodeChange:$false -CiProbe $CiProbe
+    $workflow = Get-ReceiptWorkflowContext -Receipt $pend
+    $mutation = Enter-RepositoryMutation -RepoPath $RepoPath -Operation $Operation -IssueNumber $IssueNumber -Purpose 'claude-postflight'
+    if (-not $mutation.acquired) { return $mutation }
+    $wr = [pscustomobject]@{ Success = $true; ExitCode = 0; QuotaExhausted = $false; Output = 'claude-postflight'; WorkerReportedVerification='current Claude session completed implementation' }
+    $route=[pscustomobject]@{worker='claude';model=$null;effort=$null}
+    try {
+    $pf = Resolve-WorkflowPostflight -RepoPath $RepoPath -StartSnapshot $pend.snapshot -WorkerResult $wr -Workflow $workflow `
+        -Operation $Operation -IssueNumber $IssueNumber -Route $route -CiProbe $CiProbe -PrProbe $PrProbe `
+        -CheckLister $CheckLister -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe
+    $workflow=Copy-WorkflowContext -Workflow $pf.workflow
+    if([string]$workflow.mode -eq 'pull-request'){
+        Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow|Out-Null
+        Save-RunReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $pend.snapshot -Postflight $pf `
+            -Route $route -WorkerResult $wr -StatusOverride $pf.status -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
+            -ResultEnvelopePresent $true -Interrupted $false -LocalVerificationComplete $true -RecoveredByPostflight $false `
+            -VerificationProvenance 'valid_worker_result_envelope' -Workflow $workflow `
+            -ArtifactSanitizationStatus 'not-applicable' -ArtifactRetentionStatus 'not-applicable'|Out-Null
+    }
     Remove-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     $orderPath = Get-PendingOrderPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     if (Test-Path -LiteralPath $orderPath) { Remove-Item -LiteralPath $orderPath -Force }
     return New-FinalOutput -Operation $Operation -RouteLabel 'claude-postflight' -Status $pf.status `
         -Worker 'claude' -Model $null -Effort $null -Snapshot $pend.snapshot -Postflight $pf `
-        -IssueNumber $IssueNumber -LogPath $null -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf)
+        -IssueNumber $IssueNumber -LogPath $null -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
+        -Extra @{workflow=$pf.workflow;workflowMode=$workflow.mode;baseBranch=$workflow.baseBranch;workBranch=$workflow.workBranch}
+    } finally { Exit-RepositoryMutation -RepoPath $RepoPath -Operation $Operation -IssueNumber $IssueNumber -Token $mutation.token | Out-Null }
 }
 
 # ---------------- run ----------------
@@ -308,11 +385,39 @@ function Invoke-RunOperation {
         [switch]$UseGptReviewReserve, [switch]$FinishCurrent, [switch]$ClaudeOnly, [switch]$Detach,
         [string]$RepoPath = (Get-Location).Path,
         [scriptblock]$IssueFetcher, [scriptblock]$GrokRunner, [scriptblock]$GptRunner, [scriptblock]$CiProbe,
-        [scriptblock]$ClaudeImplementer
+        [scriptblock]$ClaudeImplementer, [scriptblock]$FetchProbe, [scriptblock]$PrProbe,
+        [scriptblock]$CheckLister, [scriptblock]$IssueTitleFetcher, [scriptblock]$RemoteHeadProbe,
+        [scriptblock]$ProcessProbe
     )
     $config = Get-Config
-
-    $pre = Test-StartPreconditions -RepoPath $RepoPath
+    if(-not (Test-GitRepository -Path $RepoPath)){
+        return New-FinalOutput -Operation $OperationNumber -RouteLabel 'blocked-preflight' -Status 'not_a_git_repository' `
+            -Worker $null -Model $null -Effort $null -Snapshot $null -Postflight $null `
+            -IssueNumber $IssueNumber -LogPath $null -RemainingProblems @('not_a_git_repository')
+    }
+    $mutation=Enter-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Purpose 'run' -ProcessProbe $ProcessProbe
+    if(-not $mutation.acquired){return $mutation}
+    $keepMutation=$false
+    $tempOrderPath=$null
+    try {
+    if($mutation.owned -and $mutation.receipt.PSObject.Properties.Name -contains 'executionId' -and
+        -not [string]::IsNullOrWhiteSpace([string]$mutation.receipt.executionId)){
+        try{$activeReceipt=Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{$activeReceipt=$null}
+        if($null -ne $activeReceipt -and [string]$activeReceipt.executionId -ceq [string]$mutation.receipt.executionId -and
+            (Test-ExecutionStatusActive -Status ([string]$activeReceipt.status))){
+            $keepMutation=$true
+            $activeWorkflow=Get-ReceiptWorkflowContext -Receipt $activeReceipt
+            return New-FinalOutput -Operation $OperationNumber -RouteLabel 'execution-active' -Status 'execution_already_active' `
+                -Worker $activeReceipt.worker -Model $activeReceipt.model -Effort $activeReceipt.effort -Snapshot $activeReceipt.startSnapshot `
+                -Postflight $null -IssueNumber $IssueNumber -LogPath $activeReceipt.logPath `
+                -RemainingProblems @('worker execution has not reached postflight') -Extra @{
+                    executionId=$activeReceipt.executionId;generation=$activeReceipt.generation;workerCalls=0
+                    watchCommand="-Command watch -Operation $OperationNumber -IssueNumber $IssueNumber -Follow"
+                    workflow=$activeWorkflow;workflowMode=$activeWorkflow.mode;baseBranch=$activeWorkflow.baseBranch;workBranch=$activeWorkflow.workBranch
+                }
+        }
+    }
+    $pre = Initialize-GitWorkflowRun -RepoPath $RepoPath -IssueNumber $IssueNumber -Config $config -FetchProbe $FetchProbe -PrProbe $PrProbe
     if (-not $pre.ok) {
         $preSnap = $null
         if ($pre.PSObject.Properties.Name -contains 'snapshot') { $preSnap = $pre.snapshot }
@@ -321,6 +426,12 @@ function Invoke-RunOperation {
             -Postflight $null -IssueNumber $IssueNumber -LogPath $null -RemainingProblems @($pre.reason)
     }
     $snapshot = $pre.snapshot
+    $workflow = Copy-WorkflowContext -Workflow $pre.workflow
+    Add-Member -InputObject $workflow -NotePropertyName issueNumber -NotePropertyValue $IssueNumber -Force
+    Add-Member -InputObject $snapshot -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $workflow) -Force
+    if([string]$workflow.mode -eq 'pull-request'){
+        Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow | Out-Null
+    }
 
     if ($null -eq $IssueFetcher) {
         $IssueFetcher = {
@@ -332,20 +443,21 @@ function Invoke-RunOperation {
         }
     }
     $issueBody = & $IssueFetcher $IssueNumber $RepoPath
-    $order = New-OrderContent -IssueBody $issueBody
+    $order = New-OrderContent -IssueBody $issueBody -Workflow $workflow
     $tempOrderPath = New-TempOrderFile -Content $order
 
     $log = New-Object System.Collections.Generic.List[string]
     $log.Add("op=$OperationNumber issue=$IssueNumber kind=$Kind repo=$($pre.ownerRepo) startHead=$($snapshot.startHead)")
 
-    try {
         # --claude-only 재개: 워커 라우팅을 다시 하지 않고 현재 세션이 직접 수행한다.
         # claude_only_required를 반복 반환하지 않는다 (무한 루프 제거).
         if ($ClaudeOnly) {
             $target = Get-ClaudeTarget -Operation $OperationNumber -Kind $Kind -Config $config
+            if($null -eq $ClaudeImplementer){$keepMutation=$true}
             return Invoke-ClaudeExecution -Operation $OperationNumber -IssueNumber $IssueNumber -Kind $Kind `
                 -RepoPath $RepoPath -Target $target -Order $order -Snapshot $snapshot -Mode 'claude-only' `
-                -ClaudeImplementer $ClaudeImplementer -CiProbe $CiProbe -Log $log
+                -ClaudeImplementer $ClaudeImplementer -CiProbe $CiProbe -Workflow $workflow -PrProbe $PrProbe `
+                -CheckLister $CheckLister -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe -Log $log
         }
 
         $state = Get-UsageState
@@ -356,9 +468,11 @@ function Invoke-RunOperation {
         # claude_direct (작전 3 mechanical, GPT 차단): 현재 세션(Haiku)이 직접 수행하는 실제 흐름으로 연결.
         if ($route.status -eq 'claude_direct') {
             $target = Get-ClaudeTarget -Operation $OperationNumber -Kind $Kind -Config $config
+            if($null -eq $ClaudeImplementer){$keepMutation=$true}
             return Invoke-ClaudeExecution -Operation $OperationNumber -IssueNumber $IssueNumber -Kind $Kind `
                 -RepoPath $RepoPath -Target $target -Order $order -Snapshot $snapshot -Mode 'claude-direct' `
-                -ClaudeImplementer $ClaudeImplementer -CiProbe $CiProbe -Log $log
+                -ClaudeImplementer $ClaudeImplementer -CiProbe $CiProbe -Workflow $workflow -PrProbe $PrProbe `
+                -CheckLister $CheckLister -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe -Log $log
         }
         # claude_only_required (작전 1·2·3 logic, GPT 차단): 단일 handoff. resumeCommand로 --claude-only 안내 (원래 이슈번호 유지).
         if ($route.status -eq 'claude_only_required') {
@@ -379,11 +493,13 @@ function Invoke-RunOperation {
         # 워커 실행. 최초·fallback·review·repair가 같은 공통 오류 정책을 사용한다.
         $runId = [guid]::NewGuid().ToString('N')
         $invokePrimary = { Invoke-RouteWorker -Route $route -RepoPath $RepoPath -PromptPath $tempOrderPath -Config $config -GrokRunner $GrokRunner -GptRunner $GptRunner `
-            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $snapshot -RunId $runId -Detach:$Detach }
+            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $snapshot -RunId $runId -Detach:$Detach `
+            -Workflow $workflow -MutationToken $mutation.token }
         $execution = Invoke-WorkerWithErrorPolicy -Provider $route.worker -InvokeWorker $invokePrimary -State $state -Config $config -Log $log
         $result = $execution.Result
         if ($execution.ErrorClass -eq 'execution_pending') {
             $receipt = $result.ExecutionReceipt
+            $keepMutation=$true
             $pendingStatus = if ($result.AlreadyActive) { 'execution_already_active' } else { [string]$receipt.status }
             $extra = @{ executionId = $receipt.executionId; generation = $receipt.generation; startedAt = $receipt.startedAt
                 logPath = $receipt.logPath; watchCommand = "-Command watch -Operation $OperationNumber -IssueNumber $IssueNumber -Follow"
@@ -413,8 +529,11 @@ function Invoke-RunOperation {
             $rerouted = Invoke-QuotaFallback -Route $route -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -State $state `
                 -Config $config -RepoPath $RepoPath -PromptPath $tempOrderPath -Order $order -Snapshot $snapshot `
                 -GptRunner $GptRunner -ClaudeImplementer $ClaudeImplementer -CiProbe $CiProbe `
-                -UseGptReviewReserve:$UseGptReviewReserve -FinishCurrent:$FinishCurrent -Log $log -FallbackProviders @($route.worker) -RunId $runId
+                -UseGptReviewReserve:$UseGptReviewReserve -FinishCurrent:$FinishCurrent -Log $log -FallbackProviders @($route.worker) -RunId $runId `
+                -Workflow $workflow -MutationToken $mutation.token -PrProbe $PrProbe -CheckLister $CheckLister `
+                -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe
             if ($null -ne $rerouted.TerminalOutput) {
+                if([string]$rerouted.TerminalOutput.status -in @('worker_starting','worker_running','execution_already_active','claude_execute')){$keepMutation=$true}
                 $rerouted.TerminalOutput.logPath = Write-RouterLog -Name "op$OperationNumber-issue$IssueNumber" -Content ($log -join "`n")
                 return $rerouted.TerminalOutput
             }
@@ -430,7 +549,13 @@ function Invoke-RunOperation {
         $progressReceipt=$null
         try{$progressReceipt=Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{}
         if($null -ne $progressReceipt){Write-ExecutionProgressEvent -Receipt $progressReceipt -Event postflight_started -Phase postflight -Summary 'postflight verification started'|Out-Null}
-        $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -DeclaredNoCodeChange:$false -CiProbe $CiProbe
+        $pf = Resolve-WorkflowPostflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -Workflow $workflow `
+            -Operation $OperationNumber -IssueNumber $IssueNumber -Route $effectiveRoute -CiProbe $CiProbe -PrProbe $PrProbe `
+            -CheckLister $CheckLister -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe
+        $workflow=Copy-WorkflowContext -Workflow $pf.workflow
+        if([string]$workflow.mode -eq 'pull-request'){
+            Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow | Out-Null
+        }
         if($null -ne $progressReceipt){Write-ExecutionProgressEvent -Receipt $progressReceipt -Event postflight_completed -Phase postflight -Summary "postflight status $($pf.status)"|Out-Null}
         # 영수증을 저장하기 전에 watched critical-file 위반을 확정한다. 위반이면 영수증 status도
         # repo_boundary_violation으로 저장해, 보안 위반 run이 completed 영수증으로 남아 review 자격을
@@ -441,11 +566,16 @@ function Invoke-RunOperation {
         }
         $receiptStatus = if ($runBoundaryViol.Count -gt 0) { 'repo_boundary_violation' } else { $pf.status }
         $executionRemaining = @(Get-RemainingProblems -Status $receiptStatus -Postflight $pf)
+        if($result.PSObject.Properties.Name -contains 'WorkerRemainingProblems'){
+            $executionRemaining += @($result.WorkerRemainingProblems|ForEach-Object{Protect-SecretText -Text ([string]$_)})
+        }
+        $artifactSanitizationStatus='unknown';$artifactRetentionStatus='unknown'
         if ($result.PSObject.Properties.Name -contains 'ExecutionReceipt' -and $null -ne $result.ExecutionReceipt) {
             $er = Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
             if ($null -ne $er -and [string]$er.executionId -eq [string]$result.ExecutionReceipt.executionId) {
                 $er.status = $receiptStatus; $er.finalHead = $pf.finalHead; $er.workerExitCode = $result.ExitCode
                 $er.workerStopReason = $result.WorkerStopReason; $er.postflight = $pf
+                Add-Member -InputObject $er -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $workflow) -Force
                 $er.interrupted = $false; $er.recoveredByPostflight = $false
                 $er.workerReportedVerification = if ($result.PSObject.Properties.Name -contains 'WorkerReportedVerification' -and $null -ne $result.WorkerReportedVerification) { Protect-SecretText -Text ([string]$result.WorkerReportedVerification) } else { $null }
                 $er.localVerificationComplete = if ($result.PSObject.Properties.Name -contains 'LocalVerificationComplete') { [bool]$result.LocalVerificationComplete } else { $false }
@@ -453,18 +583,21 @@ function Invoke-RunOperation {
                 $er.remainingProblems = @(Get-RemainingProblems -Status $receiptStatus -Postflight $pf)
                 $er = Complete-ExecutionTerminalArtifacts -Receipt $er -RepoPath $RepoPath -IntendedStatus $receiptStatus
                 $receiptStatus = [string]$er.status; $executionRemaining = @($er.remainingProblems)
+                $artifactSanitizationStatus=[string]$er.artifactSanitizationStatus
+                $artifactRetentionStatus=[string]$er.artifactRetentionStatus
                 Add-Member -InputObject $er -NotePropertyName nextAction -NotePropertyValue (Get-WatchNextAction -Receipt $er -Status $receiptStatus) -Force
                 Write-ExecutionProgressEvent -Receipt $er -Event operation_terminal -Phase postflight -Summary "status=$receiptStatus nextAction=$($er.nextAction)" | Out-Null
                 Save-ExecutionReceipt -Receipt $er -RepoPath $RepoPath | Out-Null
             }
         }
         # 작전 1 실행 영수증은 artifact finalization까지 성공한 정상 결과에만 review 자격과 함께 저장한다.
-        if ($OperationNumber -eq 1 -and $effectiveRoute.worker -in @('grok','gpt') -and $receiptStatus -notin @('artifact_sanitization_failed','artifact_retention_failed')) {
+        if (($OperationNumber -eq 1 -or [string]$workflow.mode -eq 'pull-request') -and $effectiveRoute.worker -in @('grok','gpt') -and $receiptStatus -notin @('artifact_sanitization_failed','artifact_retention_failed')) {
             $runLocalVerification = if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false}
             $rcPath = Save-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $snapshot -Postflight $pf `
                 -Route $effectiveRoute -WorkerResult $result -StatusOverride $receiptStatus -RemainingProblems $executionRemaining `
                 -ResultEnvelopePresent $true -Interrupted $false -LocalVerificationComplete $runLocalVerification `
-                -RecoveredByPostflight $false -VerificationProvenance 'valid_worker_result_envelope'
+                -RecoveredByPostflight $false -VerificationProvenance 'valid_worker_result_envelope' -Workflow $workflow `
+                -ArtifactSanitizationStatus $artifactSanitizationStatus -ArtifactRetentionStatus $artifactRetentionStatus
             $log.Add("op1 run receipt saved: $rcPath (status=$receiptStatus)")
         }
         $lp = Write-RouterLog -Name "op$OperationNumber-issue$IssueNumber" -Content ($log -join "`n")
@@ -472,13 +605,15 @@ function Invoke-RunOperation {
             -Worker $effectiveRoute.worker -Model $effectiveRoute.model -Effort $effectiveRoute.effort `
             -Snapshot $snapshot -Postflight $pf -IssueNumber $IssueNumber -LogPath $lp `
             -RemainingProblems $executionRemaining `
-            -Extra @{ interrupted=$false; recoveredByPostflight=$false
+            -Extra @{ interrupted=$false; recoveredByPostflight=$false; workflow=$workflow; workflowMode=$workflow.mode
+                baseBranch=$workflow.baseBranch; workBranch=$workflow.workBranch
                 workerReportedVerification=if($result.PSObject.Properties.Name -contains 'WorkerReportedVerification' -and $null -ne $result.WorkerReportedVerification){Protect-SecretText -Text ([string]$result.WorkerReportedVerification)}else{$null}
                 localVerificationComplete=if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false}
                 resultEnvelopePresent=$true; verificationProvenance='valid_worker_result_envelope' }
     }
     finally {
-        Remove-TempOrderFile -Path $tempOrderPath
+        if($tempOrderPath){Remove-TempOrderFile -Path $tempOrderPath}
+        if(-not $keepMutation){Exit-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Token $mutation.token | Out-Null}
     }
 }
 
@@ -499,6 +634,7 @@ function ConvertFrom-ExecutionResult {
         WorkerStopReason = $envelope.workerStopReason; Output = $output; ExecutionReceipt = $Receipt
         WorkerReportedVerification = if ($envelope.PSObject.Properties.Name -contains 'workerReportedVerification') { $envelope.workerReportedVerification } else { $null }
         LocalVerificationComplete = if ($envelope.PSObject.Properties.Name -contains 'localVerificationComplete') { [bool]$envelope.localVerificationComplete } else { $false }
+        WorkerRemainingProblems = if ($envelope.PSObject.Properties.Name -contains 'workerRemainingProblems') { @($envelope.workerRemainingProblems) } else { @() }
     }
     if (-not $workerResult.Success) {
         $Receipt.status = if ([string]::IsNullOrWhiteSpace($workerResult.ErrorClass)) { 'worker_failed' } else { [string]$workerResult.ErrorClass }
@@ -536,6 +672,18 @@ function Write-InjectedExecutionResult {
     }
     $localVerificationComplete = $false
     if ($WorkerResult.PSObject.Properties.Name -contains 'LocalVerificationComplete') { $localVerificationComplete = [bool]$WorkerResult.LocalVerificationComplete }
+    $workerRemainingProblems=@()
+    if($WorkerResult.PSObject.Properties.Name -contains 'WorkerRemainingProblems'){
+        $workerRemainingProblems=@($WorkerResult.WorkerRemainingProblems|ForEach-Object{Protect-SecretText -Text ([string]$_)})
+    }
+    if($null -eq $verification -and $WorkerResult.PSObject.Properties.Name -contains 'Output'){
+        $parsedReport=ConvertFrom-WorkerCompletionReport -Text ([string]$WorkerResult.Output)
+        if($parsedReport.valid){
+            $verification=$parsedReport.verification
+            $localVerificationComplete=[bool]$parsedReport.localVerificationComplete
+            $workerRemainingProblems=@($parsedReport.remainingProblems)
+        }
+    }
     $sanitized = Complete-ExecutionArtifactSanitization -Receipt $Receipt
     $Receipt = $sanitized.receipt
     if (-not $sanitized.success) {
@@ -553,7 +701,8 @@ function Write-InjectedExecutionResult {
         schemaVersion = 1; executionId = $Receipt.executionId; generation = $Receipt.generation; worker = $Receipt.worker
         exitCode = $WorkerResult.ExitCode; success = [bool]$WorkerResult.Success; quotaExhausted = [bool]$quota
         errorClass = $errorClass; workerStopReason = $stopReason; workerReportedVerification = $verification
-        localVerificationComplete = $localVerificationComplete; stdoutPath = $Receipt.stdoutPath; stderrPath = $Receipt.stderrPath
+        localVerificationComplete = $localVerificationComplete;workerRemainingProblems=@($workerRemainingProblems)
+        workerReportValid=($null -ne $verification);stdoutPath = $Receipt.stdoutPath; stderrPath = $Receipt.stderrPath
         completedAt = (Get-Date).ToUniversalTime().ToString('o')
     }
     Write-AtomicJsonFile -Path ([string]$Receipt.resultPath) -Object $envelope
@@ -589,7 +738,7 @@ function Invoke-PersistentRouteWorker {
         [Parameter(Mandatory)]$Route, [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$PromptPath,
         [Parameter(Mandatory)]$Config, [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
         [Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)][string]$RunId,
-        [scriptblock]$InjectedRunner,[switch]$Detach
+        [scriptblock]$InjectedRunner,[switch]$Detach,[AllowNull()]$Workflow,[string]$MutationToken
     )
     $lock = Open-ExecutionLock -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
     if ($null -eq $lock) {
@@ -615,10 +764,14 @@ function Invoke-PersistentRouteWorker {
         if ($OperationNumber -eq 1) {
             Remove-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
             Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+            Remove-RepairReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
         }
         $prompt = Get-Content -LiteralPath $PromptPath -Raw -Encoding UTF8
         $receipt = New-ExecutionGeneration -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -Kind $Kind `
-            -Snapshot $Snapshot -Route $Route -PromptContent $prompt -RunId $RunId
+            -Snapshot $Snapshot -Route $Route -PromptContent $prompt -RunId $RunId -Workflow $Workflow
+        if(-not [string]::IsNullOrWhiteSpace($MutationToken)){
+            Set-RepositoryMutationExecution -RepoPath $RepoPath -Token $MutationToken -ExecutionReceipt $receipt
+        }
         if ($null -ne $InjectedRunner) {
             $receipt.status = 'worker_running'; $receipt.processId = $PID
             $receipt.processStartedAt = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
@@ -673,11 +826,13 @@ function Invoke-PersistentRouteWorker {
 function Invoke-RouteWorker {
     param([Parameter(Mandatory)]$Route, [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$PromptPath,
           [Parameter(Mandatory)]$Config, [scriptblock]$GrokRunner, [scriptblock]$GptRunner,
-          [int]$OperationNumber = 0, [int]$IssueNumber = 0, [string]$Kind = 'logic', $Snapshot, [string]$RunId,[switch]$Detach)
+          [int]$OperationNumber = 0, [int]$IssueNumber = 0, [string]$Kind = 'logic', $Snapshot, [string]$RunId,[switch]$Detach,
+          [AllowNull()]$Workflow,[string]$MutationToken)
     if ($OperationNumber -gt 0 -and $IssueNumber -gt 0 -and $null -ne $Snapshot) {
         $injected = if ($Route.worker -eq 'grok') { $GrokRunner } else { $GptRunner }
         return Invoke-PersistentRouteWorker -Route $Route -RepoPath $RepoPath -PromptPath $PromptPath -Config $Config `
-            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $Snapshot -RunId $RunId -InjectedRunner $injected -Detach:$Detach
+            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $Snapshot -RunId $RunId -InjectedRunner $injected -Detach:$Detach `
+            -Workflow $Workflow -MutationToken $MutationToken
     }
     if ($Route.worker -eq 'grok') {
         if ($null -eq $GrokRunner) {
@@ -700,7 +855,8 @@ function Invoke-QuotaFallback {
           [Parameter(Mandatory)][string]$PromptPath, [Parameter(Mandatory)][string]$Order, [Parameter(Mandatory)]$Snapshot,
           [scriptblock]$GptRunner, [scriptblock]$ClaudeImplementer, [scriptblock]$CiProbe,
           [switch]$UseGptReviewReserve, [switch]$FinishCurrent, [Parameter(Mandatory)]$Log,
-          [string[]]$FallbackProviders = @(), [string]$RunId)
+          [string[]]$FallbackProviders = @(), [string]$RunId,[AllowNull()]$Workflow,[string]$MutationToken,
+          [scriptblock]$PrProbe,[scriptblock]$CheckLister,[scriptblock]$IssueTitleFetcher,[scriptblock]$RemoteHeadProbe)
     if ($IssueNumber -le 0) { throw "Invoke-QuotaFallback: issue number must be positive (got $IssueNumber)." }
     $Log.Add("$($Route.worker) weekly exhaustion handled; re-resolving route (issue=$IssueNumber)")
 
@@ -712,7 +868,8 @@ function Invoke-QuotaFallback {
         $target = Get-ClaudeTarget -Operation $OperationNumber -Kind $Kind -Config $Config
         $out = Invoke-ClaudeExecution -Operation $OperationNumber -IssueNumber $IssueNumber -Kind $Kind `
             -RepoPath $RepoPath -Target $target -Order $Order -Snapshot $Snapshot -Mode 'claude-direct' `
-            -ClaudeImplementer $ClaudeImplementer -CiProbe $CiProbe -Log $Log
+            -ClaudeImplementer $ClaudeImplementer -CiProbe $CiProbe -Workflow $Workflow -PrProbe $PrProbe `
+            -CheckLister $CheckLister -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe -Log $Log
         return @{ TerminalOutput = $out; Result = $null; Route = $newRoute }
     }
     if ($newRoute.status -eq 'claude_only_required') {
@@ -733,7 +890,8 @@ function Invoke-QuotaFallback {
         }
         $nextHistory = @($FallbackProviders) + @($newRoute.worker)
         $invokeFallback = { Invoke-RouteWorker -Route $newRoute -RepoPath $RepoPath -PromptPath $PromptPath -Config $Config -GptRunner $GptRunner `
-            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $Snapshot -RunId $RunId }
+            -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind -Snapshot $Snapshot -RunId $RunId `
+            -Workflow $Workflow -MutationToken $MutationToken }
         $execution = Invoke-WorkerWithErrorPolicy -Provider 'gpt' -InvokeWorker $invokeFallback -State $State -Config $Config -Log $Log
         $result = $execution.Result
         if ($execution.ErrorClass -eq 'execution_pending') {
@@ -760,7 +918,9 @@ function Invoke-QuotaFallback {
             return Invoke-QuotaFallback -Route $newRoute -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Kind $Kind `
                 -State $State -Config $Config -RepoPath $RepoPath -PromptPath $PromptPath -Order $Order -Snapshot $Snapshot `
                 -GptRunner $GptRunner -ClaudeImplementer $ClaudeImplementer -CiProbe $CiProbe `
-                -UseGptReviewReserve:$UseGptReviewReserve -FinishCurrent:$FinishCurrent -Log $Log -FallbackProviders $nextHistory -RunId $RunId
+                -UseGptReviewReserve:$UseGptReviewReserve -FinishCurrent:$FinishCurrent -Log $Log -FallbackProviders $nextHistory -RunId $RunId `
+                -Workflow $Workflow -MutationToken $MutationToken -PrProbe $PrProbe -CheckLister $CheckLister `
+                -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe
         }
         if (-not $execution.Success) {
             $out = New-WorkerPolicyFailureOutput -OperationNumber $OperationNumber -IssueNumber $IssueNumber -Route $newRoute `
@@ -787,7 +947,7 @@ function Invoke-OperationReview {
         [Parameter(Mandatory)][string]$RepoPath,
         [string]$Kind = 'logic',
         [switch]$UseGptReviewReserve,
-        [scriptblock]$IssueFetcher, [scriptblock]$GptReviewRunner
+        [scriptblock]$IssueFetcher, [scriptblock]$GptReviewRunner, [scriptblock]$PrProbe
     )
     # 검수 워커 실행 후 watched critical-file 변화를 공통 finalizer로 판정한다. 진입 시 스냅샷을 캡처하고
     # 본문의 모든 반환을 하나의 결과로 모아 finalizer를 통과시킨다(자격 조기 반환 포함, 위반 없으면 무변경).
@@ -819,6 +979,12 @@ function Invoke-OperationReview {
         return [pscustomobject]@{ status = 'review_not_eligible'; verdict = $null; findings = @()
             reason = $reviewReason; note = $runEligibility.note }
     }
+    $reviewContext=Test-PullRequestReviewContext -RunReceipt $receipt -RepoPath $RepoPath -PrProbe $PrProbe
+    if(-not $reviewContext.ok){
+        return [pscustomobject]@{status='review_not_eligible';verdict=$null;findings=@();reason=[string]$reviewContext.status
+            note='현재 브랜치, HEAD, 또는 Draft PR context가 run 영수증과 일치하지 않는다.'}
+    }
+    $workflow=Copy-WorkflowContext -Workflow $reviewContext.workflow
     # 6) 현재 HEAD == 영수증 finalHead
     $currentHead = Get-GitHead -Path $RepoPath
     if ($currentHead -ne $receipt.finalHead) {
@@ -855,6 +1021,7 @@ function Invoke-OperationReview {
 
     $reviewPrompt = @"
 [독립 검수 요청 — 반드시 아래 JSON 스키마로만 응답한다]
+이 검수는 read-only다. 파일, branch, PR, 이슈를 생성·수정·댓글·종료·병합하지 않는다.
 {
   "verdict": "PASS|REPAIR_REQUIRED",
   "findings": [
@@ -867,6 +1034,15 @@ function Invoke-OperationReview {
 
 [시작 HEAD] $startHead
 [최종 HEAD] $finalHead
+[workflow mode] $($workflow.mode)
+[base branch] $($workflow.baseBranch)
+[base head] $(if($workflow.PSObject.Properties.Name -contains 'baseHead'){$workflow.baseHead}else{''})
+[work branch] $(if($workflow.PSObject.Properties.Name -contains 'workBranch'){$workflow.workBranch}else{''})
+[PR number] $(if($workflow.PSObject.Properties.Name -contains 'pr' -and $null -ne $workflow.pr){$workflow.pr.number}else{''})
+[PR URL] $(if($workflow.PSObject.Properties.Name -contains 'pr' -and $null -ne $workflow.pr){$workflow.pr.url}else{''})
+[PR head SHA] $(if($workflow.PSObject.Properties.Name -contains 'pr' -and $null -ne $workflow.pr){$workflow.pr.headSha}else{''})
+[PR CI status] $($pfr.ciStatus)
+[base advanced] $(if($workflow.PSObject.Properties.Name -contains 'baseAdvanced'){$workflow.baseAdvanced}else{$false})
 [작업자] worker=$($receipt.worker) model=$($receipt.model) effort=$($receipt.effort)
 [worker 종료코드] $($pfr.workerExitCode)
 [postflight]
@@ -950,9 +1126,9 @@ $diff
         # repair가 그것으로 실행될 수 있다. 영수증 자체를 만들지 않아 repair 자격을 원천 차단한다.
         $reviewReceiptPath = $null
         $reviewBoundaryViol = @(Test-RepoBoundaryViolation -BeforeSnapshot $__reviewBoundary)
-        if ($parsed.verdict -eq 'REPAIR_REQUIRED' -and $reviewBoundaryViol.Count -eq 0) {
+        if (($parsed.verdict -eq 'REPAIR_REQUIRED' -or [string]$workflow.mode -eq 'pull-request') -and $reviewBoundaryViol.Count -eq 0) {
             $reviewReceiptPath = Save-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath `
-                -Verdict $parsed.verdict -Findings $parsed.findings -PostReviewHead $finalHead -OriginalWorker $receipt.worker
+                -Verdict $parsed.verdict -Findings $parsed.findings -PostReviewHead $finalHead -OriginalWorker $receipt.worker -Workflow $workflow
         }
         return [pscustomobject]@{
             status = 'reviewed'; verdict = $parsed.verdict; findings = @($parsed.findings)
@@ -1011,7 +1187,7 @@ function Get-EligibleRepairContext {
         [Parameter(Mandatory)][string]$RepoPath,
         [bool]$HasFindingsAssertion=$false, [AllowNull()]$FindingsAssertion,
         [bool]$HasPostReviewHeadAssertion=$false, [string]$PostReviewHeadAssertion,
-        [bool]$HasTargetAssertion=$false, [string]$TargetAssertion
+        [bool]$HasTargetAssertion=$false, [string]$TargetAssertion,[scriptblock]$PrProbe
     )
     $fail = {
         param([string]$Status, [string]$Reason, [string]$Note)
@@ -1037,6 +1213,28 @@ function Get-EligibleRepairContext {
     if (-not $schema.valid) { return (& $fail 'repair_not_eligible' 'review_findings_invalid' 'review 영수증 findings가 엄격 스키마를 만족하지 않는다.') }
     if ([string]$reviewReceipt.originalWorker -cne [string]$runReceipt.worker) { return (& $fail 'repair_not_eligible' 'review_original_worker_mismatch' 'review originalWorker와 run worker가 다르다.') }
     if ([string]$reviewReceipt.postReviewHead -cne [string]$runReceipt.finalHead) { return (& $fail 'repair_not_eligible' 'review_run_head_mismatch' 'review postReviewHead와 run finalHead가 다르다.') }
+    $runWorkflow=Get-ReceiptWorkflowContext -Receipt $runReceipt
+    $reviewWorkflow=Get-ReceiptWorkflowContext -Receipt $reviewReceipt
+    if([string]$runWorkflow.mode -cne [string]$reviewWorkflow.mode){
+        return (& $fail 'repair_not_eligible' 'workflow_mode_mismatch' 'run/review 영수증의 workflow mode가 다르다.')
+    }
+    if([string]$runWorkflow.mode -eq 'pull-request'){
+        foreach($field in @('baseBranch','workBranch')){
+            if($runWorkflow.PSObject.Properties.Name -notcontains $field -or $reviewWorkflow.PSObject.Properties.Name -notcontains $field -or
+                [string]$runWorkflow.$field -cne [string]$reviewWorkflow.$field){
+                return (& $fail 'repair_not_eligible' 'workflow_context_mismatch' 'run/review 영수증의 branch context가 다르다.')
+            }
+        }
+        if($runWorkflow.PSObject.Properties.Name -notcontains 'pr' -or $reviewWorkflow.PSObject.Properties.Name -notcontains 'pr' -or
+            $null -eq $runWorkflow.pr -or $null -eq $reviewWorkflow.pr -or
+            [int]$runWorkflow.pr.number -ne [int]$reviewWorkflow.pr.number -or
+            [string]$runWorkflow.pr.headSha -cne [string]$reviewWorkflow.pr.headSha){
+            return (& $fail 'repair_not_eligible' 'workflow_context_mismatch' 'run/review 영수증의 PR context가 다르다.')
+        }
+        $prContext=Test-PullRequestReviewContext -RunReceipt $runReceipt -RepoPath $RepoPath -PrProbe $PrProbe
+        if(-not $prContext.ok){return (& $fail 'repair_state_mismatch' ([string]$prContext.status) '현재 branch/HEAD/Draft PR context가 run 영수증과 일치하지 않는다.')}
+        $runWorkflow=Copy-WorkflowContext -Workflow $prContext.workflow
+    }
     $currentHead = Get-GitHead -Path $RepoPath
     if ($currentHead -cne [string]$reviewReceipt.postReviewHead) { return (& $fail 'repair_state_mismatch' 'current_head_mismatch' '현재 HEAD가 review postReviewHead와 다르다.') }
     if ($HasPostReviewHeadAssertion -and $PostReviewHeadAssertion -cne [string]$reviewReceipt.postReviewHead) { return (& $fail 'repair_argument_receipt_mismatch' 'post_review_head_mismatch' 'PostReviewHead 인수가 review 영수증과 다르다.') }
@@ -1046,7 +1244,7 @@ function Get-EligibleRepairContext {
         eligible=$true; validated=$true; status='eligible'; reason=$null; note='verified run and review receipts'
         runReceipt=$runReceipt; reviewReceipt=$reviewReceipt; findings=@($reviewReceipt.findings)
         postReviewHead=[string]$reviewReceipt.postReviewHead; originalWorker=[string]$reviewReceipt.originalWorker
-        verificationProvenance=[string]$runReceipt.verificationProvenance; repairAttempted=$false
+        verificationProvenance=[string]$runReceipt.verificationProvenance; repairAttempted=$false;workflow=$runWorkflow
     }
 }
 
@@ -1056,18 +1254,20 @@ function Invoke-OperationRepair {
         [Parameter(Mandatory)][string]$RepoPath, $Findings,
         [ValidateSet('grok','gpt')][string]$OriginalWorker,
         [string]$PostReviewHead, [string]$Kind = 'logic',
-        [scriptblock]$IssueFetcher, [scriptblock]$RepairRunner, [scriptblock]$CiProbe
+        [scriptblock]$IssueFetcher, [scriptblock]$RepairRunner, [scriptblock]$CiProbe,
+        [scriptblock]$PrProbe,[scriptblock]$CheckLister,[scriptblock]$RemoteHeadProbe,[scriptblock]$ProcessProbe
     )
     $context = Get-EligibleRepairContext -OperationNumber $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath `
         -HasFindingsAssertion:$($PSBoundParameters.ContainsKey('Findings')) -FindingsAssertion $Findings `
         -HasPostReviewHeadAssertion:$($PSBoundParameters.ContainsKey('PostReviewHead')) -PostReviewHeadAssertion $PostReviewHead `
-        -HasTargetAssertion:$($PSBoundParameters.ContainsKey('OriginalWorker')) -TargetAssertion $OriginalWorker
+        -HasTargetAssertion:$($PSBoundParameters.ContainsKey('OriginalWorker')) -TargetAssertion $OriginalWorker -PrProbe $PrProbe
     if (-not $context.eligible) {
         Add-Member -InputObject $context -NotePropertyName operation -NotePropertyValue $OperationNumber -Force
         Add-Member -InputObject $context -NotePropertyName issueNumber -NotePropertyValue $IssueNumber -Force
         return $context
     }
     $Findings = @($context.findings); $OriginalWorker = [string]$context.originalWorker; $PostReviewHead = [string]$context.postReviewHead
+    $workflow=Copy-WorkflowContext -Workflow $context.workflow
     $config = Get-Config
     $originalFindingCount = @($Findings).Count
 
@@ -1102,16 +1302,33 @@ function Invoke-OperationRepair {
         return [pscustomobject]@{ operation = $OperationNumber; issueNumber = $IssueNumber; status = 'repair_state_mismatch'
             note = '검수 직후 HEAD/worktree와 현재 상태가 다르다. 자동 수리를 하지 않는다.'; expectedHead = $PostReviewHead; currentHead = $curHead; worktreeClean = [bool]$wt.Clean }
     }
-
+    $mutation=Enter-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Purpose 'repair' -ProcessProbe $ProcessProbe
+    if(-not $mutation.acquired){return $mutation}
+    $promptPath=$null
+    try {
+    $lockedHead=Get-GitHead -Path $RepoPath;$lockedWorktree=Get-GitWorktreeStatus -Path $RepoPath
+    if($lockedHead -cne $PostReviewHead -or -not $lockedWorktree.Clean){
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='repair_state_mismatch';repairAttempted=$false
+            note='mutation lock 획득 뒤 HEAD/worktree가 review receipt와 달라졌다.';expectedHead=$PostReviewHead;currentHead=$lockedHead;worktreeClean=[bool]$lockedWorktree.Clean}
+    }
+    if([string]$workflow.mode -eq 'pull-request'){
+        $lockedPrContext=Test-PullRequestReviewContext -RunReceipt $context.runReceipt -RepoPath $RepoPath -PrProbe $PrProbe
+        if(-not $lockedPrContext.ok){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='repair_state_mismatch';repairAttempted=$false
+                reason=[string]$lockedPrContext.status;note='mutation lock 획득 뒤 Draft PR context가 receipt와 달라졌다.'}
+        }
+        $workflow=Copy-WorkflowContext -Workflow $lockedPrContext.workflow
+    }
     # 수리 시작 스냅샷 (postflight 기준)
     $snapshot = Get-StartSnapshot -RepoPath $RepoPath
+    Add-Member -InputObject $snapshot -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $workflow) -Force
 
     if ($null -eq $IssueFetcher) {
         $IssueFetcher = { param($num, $path) $out = & gh issue view $num --json body -q .body 2>&1; if ($LASTEXITCODE -ne 0) { throw "gh issue view failed: $out" }; return ($out | Out-String) }
     }
     $issueBody = & $IssueFetcher $IssueNumber $RepoPath
     $findingsJson = ($Findings | ConvertTo-Json -Depth 8)
-    $repairOrder = (New-OrderContent -IssueBody $issueBody) + "`n`n[검수 결함 목록 — 아래 항목만 수리한다]`n$findingsJson"
+    $repairOrder = (New-OrderContent -IssueBody $issueBody -Workflow $workflow) + "`n`n[검수 결함 목록 — 아래 항목만 수리한다]`n$findingsJson"
     $promptPath = New-TempOrderFile -Content $repairOrder
 
     # 수리 워커: 원래 worker를 유지한다 (grok이면 Grok medium, gpt면 GPT Sol medium). 교체 없음.
@@ -1123,10 +1340,16 @@ function Invoke-OperationRepair {
 
     $log = New-Object System.Collections.Generic.List[string]
     $log.Add("repair op=$OperationNumber issue=$IssueNumber originalWorker=$OriginalWorker repairWorker=$($repairRoute.worker)/$($repairRoute.effort) postReviewHead=$PostReviewHead")
-    try {
         $invokeRepairWorker = { Invoke-RouteWorker -Route $repairRoute -RepoPath $RepoPath -PromptPath $promptPath -Config $config -GrokRunner $RepairRunner -GptRunner $RepairRunner }
         $execution = Invoke-WorkerWithErrorPolicy -Provider $repairRoute.worker -InvokeWorker $invokeRepairWorker -State $state -Config $config -Log $log
         $result = $execution.Result
+        if($null -ne $result -and $result.PSObject.Properties.Name -contains 'Output' -and
+            $result.PSObject.Properties.Name -notcontains 'LocalVerificationComplete'){
+            $repairReport=ConvertFrom-WorkerCompletionReport -Text ([string]$result.Output)
+            Add-Member -InputObject $result -NotePropertyName WorkerReportedVerification -NotePropertyValue $repairReport.verification -Force
+            Add-Member -InputObject $result -NotePropertyName LocalVerificationComplete -NotePropertyValue ([bool]($repairReport.valid -and $repairReport.localVerificationComplete)) -Force
+            Add-Member -InputObject $result -NotePropertyName WorkerRemainingProblems -NotePropertyValue @($repairReport.remainingProblems) -Force
+        }
         $log.Add("repair worker exit=$($result.ExitCode) quota=$($result.QuotaExhausted)")
         $log.Add($result.Output)
         if (-not $execution.Success) {
@@ -1144,7 +1367,11 @@ function Invoke-OperationRepair {
                 -Extra @{ repairAttempted = $true; originalFindingCount = $originalFindingCount; errorClass = $execution.ErrorClass
                           attempts = $execution.Attempts; usageStateChanged = $execution.UsageStateChanged; ciStatus = 'not-checked' }
         }
-        $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -DeclaredNoCodeChange:$false -CiProbe $CiProbe
+        $pf = Resolve-WorkflowPostflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -Workflow $workflow `
+            -Operation $OperationNumber -IssueNumber $IssueNumber -Route $repairRoute -CiProbe $CiProbe -PrProbe $PrProbe `
+            -CheckLister $CheckLister -RemoteHeadProbe $RemoteHeadProbe -ExistingPrOnly
+        $workflow=Copy-WorkflowContext -Workflow $pf.workflow
+        if([string]$workflow.mode -eq 'pull-request'){Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow|Out-Null}
 
         # 재검수를 하지 않으므로 수리 성공을 "남은 findings 없음"으로 단정하지 않는다.
         # 판정: worker 실패/quota는 구분해 보고, postflight 게이트 통과 시 repair_completed_review_pending.
@@ -1155,7 +1382,15 @@ function Invoke-OperationRepair {
             'completed'                { $status = 'repair_completed_review_pending' }
             'completed_ci_pending'     { $status = 'repair_completed_review_pending' }
             'completed_ci_unavailable' { $status = 'repair_completed_review_pending' }
+            'pr_opened'                { $status = 'repair_completed_review_pending' }
+            'pr_ci_pending'            { $status = 'repair_pr_ci_pending' }
+            'pr_ci_failed'             { $status = 'repair_pr_ci_failed' }
+            'pr_ci_unavailable'        { $status = 'repair_pr_ci_unavailable' }
             default { $status = 'repair_postflight_failed' }
+        }
+        if([string]$workflow.mode -eq 'pull-request' -and $status -in @('repair_completed_review_pending','repair_pr_ci_pending','repair_pr_ci_failed','repair_pr_ci_unavailable')){
+            Save-RepairReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -RunReceipt $context.runReceipt `
+                -Postflight $pf -Route $repairRoute -Status $status -Workflow $workflow -WorkerResult $result | Out-Null
         }
         $lp = Write-RouterLog -Name "op$OperationNumber-issue$IssueNumber-repair" -Content ($log -join "`n")
 
@@ -1168,11 +1403,16 @@ function Invoke-OperationRepair {
                 repairPostflightStatus = $pf.status
                 originalFindingCount = $originalFindingCount
                 finalReviewRequired = $true
+                workflow=$workflow
+                workflowMode=$workflow.mode
+                baseBranch=$workflow.baseBranch
+                workBranch=$workflow.workBranch
                 note = '재검수 없음: 원래 findings의 해소 여부는 판정하지 않았다. 최종 PASS는 현재 세션 종료 검토에서만 한다.'
             }
         return $out
     } finally {
-        Remove-TempOrderFile -Path $promptPath
+        if($promptPath){Remove-TempOrderFile -Path $promptPath}
+        Exit-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Token $mutation.token | Out-Null
     }
 }
 
@@ -1182,11 +1422,13 @@ function Invoke-RepairCommand {
         [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
         [string]$RepoPath = (Get-Location).Path, [string]$Kind = 'logic',
         [string]$PostReviewHead, [string]$FindingsFile, [string]$Target,
-        [scriptblock]$IssueFetcher, [scriptblock]$RepairRunner, [scriptblock]$CiProbe
+        [scriptblock]$IssueFetcher, [scriptblock]$RepairRunner, [scriptblock]$CiProbe,
+        [scriptblock]$PrProbe,[scriptblock]$CheckLister,[scriptblock]$RemoteHeadProbe,[scriptblock]$ProcessProbe
     )
     $invoke = @{
         OperationNumber=$OperationNumber; IssueNumber=$IssueNumber; RepoPath=$RepoPath; Kind=$Kind
-        IssueFetcher=$IssueFetcher; RepairRunner=$RepairRunner; CiProbe=$CiProbe
+        IssueFetcher=$IssueFetcher; RepairRunner=$RepairRunner; CiProbe=$CiProbe;PrProbe=$PrProbe
+        CheckLister=$CheckLister;RemoteHeadProbe=$RemoteHeadProbe;ProcessProbe=$ProcessProbe
     }
     if ($PSBoundParameters.ContainsKey('PostReviewHead')) { $invoke.PostReviewHead = $PostReviewHead }
     if ($PSBoundParameters.ContainsKey('Target')) {
@@ -1211,7 +1453,8 @@ function Invoke-RepairCommand {
 function Invoke-RecoverCommand {
     param(
         [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
-        [string]$RepoPath = (Get-Location).Path, [scriptblock]$ProcessProbe, [scriptblock]$Clock, [scriptblock]$CiProbe
+        [string]$RepoPath = (Get-Location).Path, [scriptblock]$ProcessProbe, [scriptblock]$Clock, [scriptblock]$CiProbe,
+        [scriptblock]$PrProbe,[scriptblock]$CheckLister,[scriptblock]$IssueTitleFetcher,[scriptblock]$RemoteHeadProbe
     )
     try{$receipt = Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{$receipt=$null}
     if ($null -eq $receipt) {
@@ -1253,6 +1496,10 @@ function Invoke-RecoverCommand {
     }
     try {
         try{$receipt = Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='receipt_unreadable';workerCalls=0}}
+        $workflow=Get-ReceiptWorkflowContext -Receipt $receipt
+        $mutation=Enter-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Purpose 'recover' -ProcessProbe $ProcessProbe -Clock $Clock
+        if(-not $mutation.acquired){return $mutation}
+        try {
         $result = ConvertFrom-ExecutionResult -Receipt $receipt -RepoPath $RepoPath
         $receipt.status = 'recovering_postflight'
         Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
@@ -1260,13 +1507,21 @@ function Invoke-RecoverCommand {
         $route = [pscustomobject]@{ worker=$receipt.worker; model=$receipt.model; effort=$receipt.effort }
         Write-ExecutionProgressEvent -Receipt $receipt -Event postflight_started -Phase postflight -Summary 'recovery postflight started' | Out-Null
         if ($null -ne $result) {
-            $pf = Resolve-Postflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -DeclaredNoCodeChange:$false -CiProbe $CiProbe
+            $pf = Resolve-WorkflowPostflight -RepoPath $RepoPath -StartSnapshot $snapshot -WorkerResult $result -Workflow $workflow `
+                -Operation $OperationNumber -IssueNumber $IssueNumber -Route $route -CiProbe $CiProbe -PrProbe $PrProbe `
+                -CheckLister $CheckLister -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe
             $interrupted = $false; $recovered = $true
             $localVerificationComplete = if($result.PSObject.Properties.Name -contains 'LocalVerificationComplete'){[bool]$result.LocalVerificationComplete}else{$false}
             $resultEnvelopePresent = $true; $verificationProvenance = 'valid_worker_result_envelope_recovered_postflight'
             $workerStopReason = $result.WorkerStopReason; $interruptedReason = $null
         } else {
-            $pf = Resolve-RecoveryPostflight -RepoPath $RepoPath -StartSnapshot $snapshot -CiProbe $CiProbe
+            if([string]$workflow.mode -eq 'pull-request'){
+                $pf=Resolve-PullRequestRecoveryPostflight -RepoPath $RepoPath -StartSnapshot $snapshot -Workflow $workflow `
+                    -PrProbe $PrProbe -CheckLister $CheckLister -RemoteHeadProbe $RemoteHeadProbe
+            } else {
+                $pf = Resolve-RecoveryPostflight -RepoPath $RepoPath -StartSnapshot $snapshot -CiProbe $CiProbe
+                Add-Member -InputObject $pf -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $workflow) -Force
+            }
             $interrupted = $true; $recovered = $true; $localVerificationComplete = $false
             $resultEnvelopePresent = $false; $verificationProvenance = 'git_postflight_without_worker_result'
             $workerStopReason = 'external_interruption'; $interruptedReason = 'result_missing_after_process_exit'
@@ -1276,8 +1531,12 @@ function Invoke-RecoverCommand {
         $finalStatus = if ($boundary.Count -gt 0) { 'repo_boundary_violation' } else { $pf.status }
         $receipt.status = $finalStatus; $receipt.finalHead = $pf.finalHead; $receipt.workerExitCode = if ($null -ne $result) { $result.ExitCode } else { $null }
         $receipt.workerStopReason = $workerStopReason; $receipt.interruptedReason = $interruptedReason; $receipt.postflight = $pf
+        Add-Member -InputObject $receipt -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $pf.workflow) -Force
         $receipt.workerReportedVerification = if($null -ne $result -and $result.PSObject.Properties.Name -contains 'WorkerReportedVerification' -and $null -ne $result.WorkerReportedVerification){Protect-SecretText -Text ([string]$result.WorkerReportedVerification)}else{$null}
         $receipt.remainingProblems = @(Get-RemainingProblems -Status $finalStatus -Postflight $pf)
+        if($null -ne $result -and $result.PSObject.Properties.Name -contains 'WorkerRemainingProblems'){
+            $receipt.remainingProblems += @($result.WorkerRemainingProblems|ForEach-Object{Protect-SecretText -Text ([string]$_)})
+        }
         foreach ($item in @(@('interrupted',$interrupted),@('localVerificationComplete',$localVerificationComplete),@('recoveredByPostflight',$recovered),
                 @('resultEnvelopePresent',$resultEnvelopePresent),@('verificationProvenance',$verificationProvenance))) {
             if ($receipt.PSObject.Properties.Name -contains $item[0]) { $receipt.($item[0]) = $item[1] }
@@ -1289,26 +1548,129 @@ function Invoke-RecoverCommand {
         Add-Member -InputObject $receipt -NotePropertyName nextAction -NotePropertyValue (Get-WatchNextAction -Receipt $receipt -Status $finalStatus) -Force
         Write-ExecutionProgressEvent -Receipt $receipt -Event operation_terminal -Phase postflight -Summary "status=$finalStatus nextAction=$($receipt.nextAction)" | Out-Null
         Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
-        if ($OperationNumber -eq 1 -and $receipt.worker -in @('grok','gpt') -and ($null -eq $result -or $result.Success) -and
+        $workflow=Copy-WorkflowContext -Workflow $pf.workflow
+        if([string]$workflow.mode -eq 'pull-request'){Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow|Out-Null}
+        if (($OperationNumber -eq 1 -or [string]$workflow.mode -eq 'pull-request') -and $receipt.worker -in @('grok','gpt') -and ($null -eq $result -or $result.Success) -and
             $finalStatus -notin @('artifact_sanitization_failed','artifact_retention_failed')) {
             if ($null -eq $result) { Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath }
             Save-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $snapshot -Postflight $pf `
                 -Route $route -WorkerResult $result -StatusOverride $finalStatus -RemainingProblems $receipt.remainingProblems `
                 -ResultEnvelopePresent $resultEnvelopePresent -Interrupted $interrupted -InterruptedReason $interruptedReason `
                 -LocalVerificationComplete $localVerificationComplete -RecoveredByPostflight $recovered `
-                -VerificationProvenance $verificationProvenance | Out-Null
+                -VerificationProvenance $verificationProvenance -Workflow $workflow `
+                -ArtifactSanitizationStatus ([string]$receipt.artifactSanitizationStatus) `
+                -ArtifactRetentionStatus ([string]$receipt.artifactRetentionStatus) | Out-Null
         }
         $extra = @{
             executionId=$receipt.executionId; generation=$receipt.generation; interrupted=$interrupted
             workerExitCode=$receipt.workerExitCode; workerStopReason=$workerStopReason; interruptedReason=$interruptedReason
-            workerReportedVerification=if($null -ne $result){Protect-SecretText -Text ([string]$result.Output)}else{$null}
+            workerReportedVerification=if($null -ne $result -and $result.PSObject.Properties.Name -contains 'WorkerReportedVerification' -and
+                $null -ne $result.WorkerReportedVerification){Protect-SecretText -Text ([string]$result.WorkerReportedVerification)}else{$null}
             localVerificationComplete=$localVerificationComplete; recoveredByPostflight=$recovered; workerCalls=0
             resultEnvelopePresent=$resultEnvelopePresent; verificationProvenance=$verificationProvenance
+            workflow=$workflow;workflowMode=$workflow.mode;baseBranch=$workflow.baseBranch;workBranch=$workflow.workBranch
         }
         return New-FinalOutput -Operation $OperationNumber -RouteLabel 'recover' -Status $finalStatus `
             -Worker $receipt.worker -Model $receipt.model -Effort $receipt.effort -Snapshot $snapshot -Postflight $pf `
             -IssueNumber $IssueNumber -LogPath $receipt.logPath -RemainingProblems $receipt.remainingProblems -Extra $extra
+        } finally { Exit-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Token $mutation.token -RequireTerminal | Out-Null }
     } finally { $lock.Dispose() }
+}
+
+function Invoke-FinalizeCommand {
+    param(
+        [Parameter(Mandatory)][int]$OperationNumber,[Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][ValidateSet('PASS','REPAIR_REQUIRED')][string]$ReviewVerdict,
+        [string]$RepoPath=(Get-Location).Path,[scriptblock]$PrProbe,[scriptblock]$CheckLister,
+        [scriptblock]$RemoteHeadProbe,[scriptblock]$ProcessProbe
+    )
+    if($OperationNumber -notin @(1,2)){
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='finalize_not_eligible';reviewVerdict=$ReviewVerdict}
+    }
+    if($ReviewVerdict -ne 'PASS'){
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='review_required';reviewVerdict=$ReviewVerdict;mergeReady=$false}
+    }
+    $runReceipt=Get-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    if($null -eq $runReceipt -or -not (Test-ReceiptRepoMatch -Receipt $runReceipt -RepoPath $RepoPath)){
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='run_receipt_missing';mergeReady=$false}
+    }
+    $repairReceipt=Get-RepairReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $receipt=$runReceipt;$receiptPath=Get-RunReceiptPath -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    if($null -ne $repairReceipt){
+        if(-not (Test-ReceiptRepoMatch -Receipt $repairReceipt -RepoPath $RepoPath)){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='repository_receipt_mismatch';mergeReady=$false}
+        }
+        $receipt=$repairReceipt;$receiptPath=Get-RepairReceiptPath -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    }
+    if($OperationNumber -eq 1 -and [string]$runReceipt.worker -eq 'grok'){
+        $review=Get-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+        if($null -eq $review -or -not (Test-ReceiptRepoMatch -Receipt $review -RepoPath $RepoPath)){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='review_required';mergeReady=$false}
+        }
+        if($review.PSObject.Properties.Name -notcontains 'postReviewHead' -or [string]$review.postReviewHead -cne [string]$runReceipt.finalHead){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='review_receipt_mismatch';mergeReady=$false}
+        }
+        $runReviewWorkflow=Get-ReceiptWorkflowContext -Receipt $runReceipt
+        $reviewWorkflow=Get-ReceiptWorkflowContext -Receipt $review
+        if([string]$runReviewWorkflow.mode -cne [string]$reviewWorkflow.mode -or
+            ([string]$runReviewWorkflow.mode -eq 'pull-request' -and
+             ([string]$runReviewWorkflow.baseBranch -cne [string]$reviewWorkflow.baseBranch -or
+              [string]$runReviewWorkflow.workBranch -cne [string]$reviewWorkflow.workBranch -or
+              $null -eq $runReviewWorkflow.pr -or $null -eq $reviewWorkflow.pr -or
+              [int]$runReviewWorkflow.pr.number -ne [int]$reviewWorkflow.pr.number))){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='review_receipt_mismatch';mergeReady=$false}
+        }
+        if($null -eq $repairReceipt -and [string]$review.verdict -ne 'PASS'){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='repair_required';mergeReady=$false}
+        }
+        if($null -ne $repairReceipt -and [string]$review.verdict -ne 'REPAIR_REQUIRED'){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='review_receipt_mismatch';mergeReady=$false}
+        }
+    }
+    $workflow=Get-ReceiptWorkflowContext -Receipt $receipt
+    if([string]$workflow.mode -ne 'pull-request'){
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='direct_main_no_merge_ready';workflowMode='direct-main';mergeReady=$false}
+    }
+    try{$execution=Get-ExecutionReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath}catch{$execution=$null}
+    if($null -ne $execution -and (Test-ExecutionStatusActive -Status ([string]$execution.status))){
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='repository_execution_active';mergeReady=$false
+            executionId=$execution.executionId;watchCommand="-Command watch -Operation $OperationNumber -IssueNumber $IssueNumber -Follow"}
+    }
+    $mutation=Enter-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Purpose 'finalize' -ProcessProbe $ProcessProbe
+    if(-not $mutation.acquired){return $mutation}
+    try {
+        $readiness=Get-WorkflowMergeReadiness -RepoPath $RepoPath -Receipt $receipt -ReviewVerdict $ReviewVerdict `
+            -PrProbe $PrProbe -CheckLister $CheckLister -RemoteHeadProbe $RemoteHeadProbe
+        if(-not $readiness.ready){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status=$readiness.status
+                workflowMode='pull-request';mergeReady=$false;ciStatus=if($readiness.PSObject.Properties.Name -contains 'ciStatus'){$readiness.ciStatus}else{'not-checked'}}
+        }
+        $workflow=Copy-WorkflowContext -Workflow $readiness.workflow
+        if(-not (Set-PullRequestReady -RepoPath $RepoPath -Workflow $workflow -PrProbe $PrProbe)){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='pr_ready_failed';mergeReady=$false}
+        }
+        $lookup=Get-PullRequestForBranch -RepoPath $RepoPath -OwnerRepo (Get-GitOriginOwnerRepo -Path $RepoPath) -WorkBranch ([string]$workflow.workBranch) -PrProbe $PrProbe
+        if(-not $lookup.ok -or $lookup.items.Count -ne 1){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='pr_context_mismatch';mergeReady=$false}
+        }
+        $checked=Test-PullRequestContext -PullRequest $lookup.items[0] -BaseBranch ([string]$workflow.baseBranch) `
+            -WorkBranch ([string]$workflow.workBranch) -HeadSha ([string]$receipt.finalHead) `
+            -OwnerRepo (Get-GitOriginOwnerRepo -Path $RepoPath)
+        if(-not $checked.ok -or [bool]$checked.pr.draft){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='pr_ready_failed';mergeReady=$false}
+        }
+        $workflow.pr=$checked.pr
+        Add-Member -InputObject $receipt -NotePropertyName workflow -NotePropertyValue $workflow -Force
+        Add-Member -InputObject $receipt -NotePropertyName reviewVerdict -NotePropertyValue 'PASS' -Force
+        Write-JsonFile -Path $receiptPath -Object $receipt
+        Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow|Out-Null
+        return [pscustomobject]@{
+            status='merge_ready';operation=$OperationNumber;issueNumber=$IssueNumber;workflowMode='pull-request'
+            baseBranch=$workflow.baseBranch;workBranch=$workflow.workBranch;prNumber=[int]$workflow.pr.number
+            prUrl=$workflow.pr.url;prDraft=[bool]$workflow.pr.draft;ciStatus=$readiness.ciStatus
+            reviewVerdict='PASS';pushComplete=$true;mergeReady=$true;merged=$false
+        }
+    } finally {Exit-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Token $mutation.token|Out-Null}
 }
 
 function New-WatchResult {
@@ -1416,6 +1778,13 @@ if ($MyInvocation.InvocationName -ne '.') {
             Assert-ValidIssueNumber -Value ([string]$IssueNumber) | Out-Null
             Invoke-OperationReview -OperationNumber $Operation -IssueNumber $IssueNumber -RepoPath (Get-Location).Path `
                 -Kind $Kind -UseGptReviewReserve:$UseGptReviewReserve | ConvertTo-Json -Depth 12
+        }
+        'finalize' {
+            if (-not $Operation -or -not $IssueNumber -or -not $ReviewVerdict) { throw 'finalize requires -Operation, -IssueNumber, and -ReviewVerdict' }
+            Assert-ValidOperationNumber -Value ([string]$Operation) | Out-Null
+            Assert-ValidIssueNumber -Value ([string]$IssueNumber) | Out-Null
+            Invoke-FinalizeCommand -OperationNumber $Operation -IssueNumber $IssueNumber -ReviewVerdict $ReviewVerdict `
+                -RepoPath (Get-Location).Path | ConvertTo-Json -Depth 20
         }
         'repair' {
             # v2.2: -PostReviewHead/-FindingsFile/-Target은 선택 인수. 없으면 run/review 영수증에서 자동 복원한다.

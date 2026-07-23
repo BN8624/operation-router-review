@@ -5,6 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'git-workflow.ps1')
 
 # v2.4.5 watched critical-file 사후 무결성 검사. 선택한 정적 파일의 실행 전후 변경만 탐지하며
 # OS sandbox가 아니고 비감시 파일 접근·읽기·생성·전송을 차단하지 않는다.

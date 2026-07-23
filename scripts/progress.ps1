@@ -157,11 +157,11 @@ function ConvertFrom-GptProgressLine {
 }
 
 function Get-ExecutionObservableState {
-    param([Parameter(Mandatory)][string]$RepoPath)
+    param([Parameter(Mandatory)][string]$RepoPath,[string]$RemoteRef='origin/main')
     $head=$null;$status='';$ahead=$null;$behind=$null
     try{$head=Get-GitHead -Path $RepoPath}catch{}
     try{$worktree=Get-GitWorktreeStatus -Path $RepoPath;$status=[string]$worktree.Raw}catch{}
-    try{$ab=Get-GitAheadBehind -Path $RepoPath;$ahead=$ab.ahead;$behind=$ab.behind}catch{}
+    try{$ab=Get-GitAheadBehind -Path $RepoPath -RemoteRef $RemoteRef;$ahead=$ab.ahead;$behind=$ab.behind}catch{}
     $files=@($status -split "`r?`n" | Where-Object {-not [string]::IsNullOrWhiteSpace($_)} | ForEach-Object { if($_.Length -gt 3){$_.Substring(3).Trim()}else{$_.Trim()} } | Sort-Object -Unique)
     return [pscustomobject]@{head=$head;worktreeClean=[string]::IsNullOrWhiteSpace($status);status=$status;files=$files;ahead=$ahead;behind=$behind}
 }
@@ -176,7 +176,7 @@ function Format-ExecutionProgressLine {
 function Get-WatchNextAction {
     param([Parameter(Mandatory)]$Receipt,[string]$Status)
     if([string]::IsNullOrWhiteSpace($Status)){$Status=[string]$Receipt.status}
-    if($Status -notin @('completed','completed_ci_pending','completed_ci_unavailable')){if($Receipt.PSObject.Properties.Name -contains 'verificationProvenance' -and [string]$Receipt.verificationProvenance -eq 'git_postflight_without_worker_result'){return 'manual_verification'};return 'stop'}
+    if($Status -notin @('completed','completed_ci_pending','completed_ci_unavailable','pr_opened','pr_ci_pending','pr_ci_unavailable')){if($Receipt.PSObject.Properties.Name -contains 'verificationProvenance' -and [string]$Receipt.verificationProvenance -eq 'git_postflight_without_worker_result'){return 'manual_verification'};return 'stop'}
     if([int]$Receipt.operation -eq 1){if([string]$Receipt.worker -eq 'grok'){return 'review'};return 'opus_end_review'}
     if([int]$Receipt.operation -eq 2){return 'sonnet_end_review'}
     return 'report'

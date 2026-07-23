@@ -63,7 +63,7 @@ function Update-WorkerObservableProgress {
         }
         $script:ProcessedGptLines=$completeLines.Count
     }
-    $current=Get-ExecutionObservableState -RepoPath $RepoPath
+    $current=Get-ExecutionObservableState -RepoPath $RepoPath -RemoteRef $script:ObservableRemoteRef
     if([string]$current.status -cne [string]$script:LastObservable.status){
         $state=if($current.worktreeClean){'clean'}else{'dirty'}
         Write-WorkerProgress -Receipt $Receipt -Event git_state_changed -Summary "worktree $state"
@@ -75,7 +75,7 @@ function Update-WorkerObservableProgress {
         Write-WorkerProgress -Receipt $Receipt -Event commit_detected -Summary ([string]$current.head)
     }
     if($null -ne $current.ahead -and [int]$current.ahead -eq 0 -and $null -ne $script:LastObservable.ahead -and [int]$script:LastObservable.ahead -gt 0){
-        Write-WorkerProgress -Receipt $Receipt -Event push_detected -Summary 'origin/main synchronized'
+        Write-WorkerProgress -Receipt $Receipt -Event push_detected -Summary "$($script:ObservableRemoteRef) synchronized"
     }
     $script:LastObservable=$current
 }
@@ -116,7 +116,14 @@ try {
     $progressCfg=Get-ProgressConfig
     $script:LastWorkerOutputBytes=0
     $script:ProcessedGptLines=0
-    $script:LastObservable=Get-ExecutionObservableState -RepoPath ([string]$receipt.repoRoot)
+    $script:ObservableRemoteRef='origin/main'
+    if($receipt.PSObject.Properties.Name -contains 'workflow' -and $null -ne $receipt.workflow -and
+        [string]$receipt.workflow.mode -eq 'pull-request' -and
+        $receipt.workflow.PSObject.Properties.Name -contains 'remoteWorkBranch' -and
+        -not [string]::IsNullOrWhiteSpace([string]$receipt.workflow.remoteWorkBranch)){
+        $script:ObservableRemoteRef=[string]$receipt.workflow.remoteWorkBranch
+    }
+    $script:LastObservable=Get-ExecutionObservableState -RepoPath ([string]$receipt.repoRoot) -RemoteRef $script:ObservableRemoteRef
     $script:WorkerStartedAt=[DateTime]::UtcNow
     $script:LastWorkerProgressAt=$script:WorkerStartedAt
     $proc = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d','/s','/c',('"' + $wrapper + '"')) `
@@ -158,6 +165,7 @@ try {
         $success = $classification.Success; $errorClass = $classification.ErrorClass
         $stopReason = $classification.StopReason; $quota = $classification.QuotaExhausted
     }
+    $workerReport=ConvertFrom-WorkerCompletionReport -Text $output
     $sanitized = Complete-ExecutionArtifactSanitization -Receipt $receipt
     $receipt = $sanitized.receipt
     if (-not $sanitized.success) {
@@ -176,7 +184,9 @@ try {
         schemaVersion = 1; executionId = $receipt.executionId; generation = $receipt.generation
         worker = $receipt.worker; exitCode = $proc.ExitCode; success = [bool]$success
         quotaExhausted = [bool]$quota; errorClass = $errorClass; workerStopReason = $stopReason
-        workerReportedVerification = $null; localVerificationComplete = $false
+        workerReportedVerification = $workerReport.verification
+        localVerificationComplete = [bool]($workerReport.valid -and $workerReport.localVerificationComplete)
+        workerRemainingProblems = @($workerReport.remainingProblems); workerReportValid = [bool]$workerReport.valid
         stdoutPath = $receipt.stdoutPath; stderrPath = $receipt.stderrPath
         completedAt = (Get-Date).ToUniversalTime().ToString('o')
     }

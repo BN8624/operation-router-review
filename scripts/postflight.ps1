@@ -5,6 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'git-workflow.ps1')
 
 # CI 상태 조회 (v2.2): main 직접 push 검증이므로 gh pr checks가 아니라 GitHub Actions run을
 # 최종 HEAD(headSha)로 조회한다. 구분: success/failure/pending/unavailable/not-requested.

@@ -49,7 +49,12 @@ if (-not $InstalledIntegration -and $SkillsRoot.Equals($actualSkillsRoot, [Syste
 
 $Script:RuntimeRoot = $RouterRoot
 $Script:ConfigDir = Join-Path $RouterRoot 'config'
-$Script:ConfigPath = Join-Path $Script:ConfigDir 'config.json'
+$Script:ConfigPath = Join-Path $TestWorkRoot 'config.direct-main.json'
+$testConfig = Get-Content -LiteralPath (Join-Path $Script:ConfigDir 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$testConfig.gitWorkflow.mode = 'direct-main'
+$testConfig.gitWorkflow.createDraftPullRequest = $false
+$testConfig.gitWorkflow.fetchBeforeRun = $false
+[System.IO.File]::WriteAllText($Script:ConfigPath,($testConfig|ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
 $Script:StateDir = Split-Path -Parent $resolvedStatePath
 $Script:UsageStatePath = $resolvedStatePath
 $Script:PendingDir = Join-Path $Script:StateDir 'pending'
@@ -113,6 +118,164 @@ function Get-SkillFrontmatter {
 }
 $issue = { param($n,$p) "Do the thing verbatim body." }
 $ciNone = { param($p) 'not-requested' }
+
+function Set-TestGitWorkflow {
+    param([Parameter(Mandatory)][ValidateSet('direct-main','pull-request')][string]$Mode)
+    $source=Join-Path $Script:ConfigDir 'config.json'
+    $config=Get-Content -LiteralPath $source -Raw -Encoding UTF8|ConvertFrom-Json
+    $config.gitWorkflow.mode=$Mode
+    if($Mode -eq 'direct-main'){
+        $config.gitWorkflow.createDraftPullRequest=$false
+        $config.gitWorkflow.fetchBeforeRun=$false
+    } else {
+        $config.gitWorkflow.createDraftPullRequest=$true
+        $config.gitWorkflow.fetchBeforeRun=$true
+    }
+    [System.IO.File]::WriteAllText($Script:ConfigPath,($config|ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+}
+
+function New-PrFakeRepo {
+    param([switch]$WithWorkflow)
+    $root=Join-Path $env:TEMP ('operation-router-pr-'+[guid]::NewGuid().ToString('N'))
+    $repo=Join-Path $root 'work'
+    $remote=Join-Path $root 'owner\repo.git'
+    New-Item -ItemType Directory -Path $repo,(Split-Path -Parent $remote) -Force|Out-Null
+    git init -q --bare $remote
+    Push-Location $repo
+    try {
+        git init -q
+        git config user.email t@t.com
+        git config user.name t
+        'base'|Set-Content -LiteralPath a.txt -Encoding UTF8
+        if($WithWorkflow){
+            New-Item -ItemType Directory -Path '.github\workflows' -Force|Out-Null
+            "name: ci`non: [pull_request]`njobs: {}"|Set-Content -LiteralPath '.github\workflows\ci.yml' -Encoding UTF8
+        }
+        git add .
+        git commit -q -m init
+        git branch -M main
+        $remoteUri=([System.Uri]::new($remote)).AbsoluteUri
+        git remote add origin $remoteUri
+        git push -q origin main
+        git --git-dir=$remote symbolic-ref HEAD refs/heads/main
+        git branch --set-upstream-to=origin/main main *>$null
+    } finally {Pop-Location}
+    return [pscustomobject]@{Root=$root;Repo=$repo;Remote=$remote}
+}
+
+function Remove-PrFakeRepo {
+    param([Parameter(Mandatory)]$Fixture)
+    $root=[System.IO.Path]::GetFullPath([string]$Fixture.Root)
+    $temp=[System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\','/')+[System.IO.Path]::DirectorySeparatorChar
+    if(-not $root.StartsWith($temp,[System.StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $root) -notmatch '^operation-router-pr-[a-f0-9]{32}$'){
+        throw "unsafe PR fixture cleanup: $root"
+    }
+    if(Test-Path -LiteralPath $root){Remove-Item -LiteralPath $root -Recurse -Force}
+}
+
+function New-TestPullRequestProbe {
+    param([bool]$AutoAdvanceHead=$true)
+    $state=[pscustomobject]@{
+        Items=@();CreateCalls=0;ReadyCalls=0;LookupCalls=0;Body=$null;BodyPath=$null
+        BodyPathExistedDuringCreate=$false;Actions=@();AutoAdvanceHead=$AutoAdvanceHead
+        CreateFailure=$false;ReadyFailure=$false
+    }
+    $probe={
+        param($Action,$Context)
+        $state.Actions=@($state.Actions)+@($Action)
+        if($Action -eq 'lookup'){
+            $state.LookupCalls++
+            if($state.AutoAdvanceHead -and @($state.Items).Count -eq 1){
+                $head=(& git -C ([string]$Context.repoPath) rev-parse "refs/remotes/origin/$([string]$Context.workBranch)" 2>$null|Out-String).Trim()
+                if($head){$state.Items[0].headSha=$head}
+            }
+            return [pscustomobject]@{ok=$true;items=@($state.Items)}
+        }
+        if($Action -eq 'create'){
+            $state.CreateCalls++
+            $state.BodyPath=[string]$Context.bodyPath
+            $state.BodyPathExistedDuringCreate=Test-Path -LiteralPath $state.BodyPath
+            if($state.BodyPathExistedDuringCreate){$state.Body=Get-Content -LiteralPath $state.BodyPath -Raw -Encoding UTF8}
+            if($state.CreateFailure){return [pscustomobject]@{ok=$false;error='pr_create_failed';items=@()}}
+            $head=(& git -C ([string]$Context.repoPath) rev-parse HEAD|Out-String).Trim()
+            $state.Items=@([pscustomobject]@{number=42;url='https://example.invalid/pr/42';state='OPEN';draft=$true
+                baseBranch=[string]$Context.baseBranch;headBranch=[string]$Context.workBranch;headSha=$head
+                headRepository=[string]$Context.ownerRepo;merged=$false})
+            return [pscustomobject]@{ok=$true;url='https://example.invalid/pr/42';items=@()}
+        }
+        $state.ReadyCalls++
+        if($state.ReadyFailure){return [pscustomobject]@{ok=$false;error='pr_ready_failed'}}
+        if(@($state.Items).Count -eq 1){$state.Items[0].draft=$false}
+        return [pscustomobject]@{ok=$true}
+    }.GetNewClosure()
+    return [pscustomobject]@{State=$state;Probe=$probe}
+}
+
+function New-PrWorker {
+    param([ValidateSet('success','dirty','switch-main','main-push','no-commit','failed')][string]$Mode='success')
+    $workerMode=$Mode
+    return {
+        param($Route,$Repo,$Prompt)
+        if($workerMode -eq 'failed'){return [pscustomobject]@{ExitCode=1;Success=$false;QuotaExhausted=$false;Output='worker failed'}}
+        Push-Location $Repo
+        try {
+            if($workerMode -eq 'no-commit'){return [pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;Output='no change'}}
+            $assigned=(git branch --show-current).Trim()
+            "change-$workerMode"|Set-Content -LiteralPath "change-$([guid]::NewGuid().ToString('N')).txt" -Encoding UTF8
+            git add .
+            git commit -q -m "fixture $workerMode"
+            if($workerMode -eq 'switch-main'){
+                git switch -q main
+                'wrong branch'|Set-Content -LiteralPath wrong-branch.txt -Encoding UTF8
+                git add wrong-branch.txt
+                git commit -q -m 'wrong branch'
+                git push -q -u origin "HEAD:$assigned"
+            } else {
+                git push -q -u origin HEAD
+                if($workerMode -eq 'main-push'){git push -q origin HEAD:main}
+            }
+            if($workerMode -eq 'dirty'){'dirty'|Set-Content -LiteralPath dirty.txt -Encoding UTF8}
+            return [pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;ErrorClass='none'
+                Output='fixture tests passed';WorkerReportedVerification='fixture: 1 passed';LocalVerificationComplete=$true}
+        } finally {Pop-Location}
+    }.GetNewClosure()
+}
+
+function New-PrMergeFixture {
+    param([int]$IssueNumber=900,[int]$Operation=2)
+    Set-TestGitWorkflow -Mode pull-request
+    $fixture=New-PrFakeRepo
+    $probe=New-TestPullRequestProbe
+    $config=Get-Config
+    $pre=Initialize-GitWorkflowRun -RepoPath $fixture.Repo -IssueNumber $IssueNumber -Config $config -PrProbe $probe.Probe
+    if(-not $pre.ok){throw "merge fixture preflight failed: $($pre.reason)"}
+    $workflow=Copy-WorkflowContext -Workflow $pre.workflow
+    Add-Member -InputObject $workflow -NotePropertyName issueNumber -NotePropertyValue $IssueNumber -Force
+    Push-Location $fixture.Repo
+    try {
+        'ready'|Set-Content -LiteralPath ready.txt -Encoding UTF8
+        git add ready.txt
+        git commit -q -m ready
+        git push -q -u origin HEAD
+    } finally {Pop-Location}
+    $workflow.finalHead=Get-GitHead -Path $fixture.Repo
+    $probe.State.Items=@([pscustomobject]@{number=42;url='https://example.invalid/pr/42';state='OPEN';draft=$true
+        baseBranch=$workflow.baseBranch;headBranch=$workflow.workBranch;headSha=$workflow.finalHead
+        headRepository='owner/repo';merged=$false})
+    $workflow.pr=$probe.State.Items[0]
+    $pf=[pscustomobject]@{status='pr_opened';branch=$workflow.workBranch;startHead=$pre.snapshot.startHead;finalHead=$workflow.finalHead
+        headChanged=$true;commitCount=1;worktreeClean=$true;aheadBehindAvailable=$true;ahead=$null;behind=$null
+        pushComplete=$true;ciStatus='success';workerExitCode=0;workflow=$workflow}
+    $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='medium'}
+    $wr=[pscustomobject]@{Success=$true;ExitCode=0;Output='verified';WorkerReportedVerification='1 passed';LocalVerificationComplete=$true}
+    Save-RunReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $fixture.Repo -Snapshot $pre.snapshot -Postflight $pf `
+        -Route $route -WorkerResult $wr -StatusOverride 'pr_opened' -ResultEnvelopePresent $true -Interrupted $false `
+        -LocalVerificationComplete $true -VerificationProvenance 'valid_worker_result_envelope' -Workflow $workflow `
+        -ArtifactSanitizationStatus completed -ArtifactRetentionStatus completed|Out-Null
+    Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $fixture.Repo -Workflow $workflow|Out-Null
+    return [pscustomobject]@{Fixture=$fixture;Probe=$probe;Workflow=$workflow;Postflight=$pf
+        Receipt=(Get-RunReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $fixture.Repo)}
+}
 
 # v2.2+: 테스트용 verified run/review 영수증 생성
 function Save-TestRunReceipt {
@@ -1929,7 +2092,7 @@ Describe 'v2.4.4. 실행 세대 영속화·중복 차단·recover' {
                 $res = Invoke-RunOperation -OperationNumber $op -IssueNumber (300+$op) -RepoPath $repo -IssueFetcher $issue -GrokRunner $runner -CiProbe $ciNone
                 $res.status | Should Be 'completed'
                 $rc = Get-ExecutionReceipt -Operation $op -IssueNumber (300+$op) -RepoPath $repo
-                $rc.schemaVersion | Should Be 1; $rc.generation | Should Be 1; $rc.status | Should Be 'completed'
+                $rc.schemaVersion | Should Be 2; $rc.generation | Should Be 1; $rc.status | Should Be 'completed'
             } finally { Remove-Item -LiteralPath $repo -Recurse -Force }
         }
     }
@@ -2629,7 +2792,7 @@ Describe 'v2.4.7-4. 문서 watch-first 흐름 정합성' {
         $readme=Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
         $reentry=Get-Content -LiteralPath (Join-Path $RouterRoot 'REENTRY.md') -Raw -Encoding UTF8
         $readme|Should Match 'watch가 살아 있는 동안 recover를 수동 호출하지 않는다'
-        $reentry|Should Match 'watch가 살아 있는 동안 수동 호출하지 않는다'
+        $reentry|Should Match 'watch가 살아 있는 동안 recover를 수동 호출하지 않는다'
     }
 }
 
@@ -2879,9 +3042,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v2.4.7을 현재 버전으로 기록한다' {
+    It '12. README는 v3.0.0을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v2\.4\.7-1\)'
+        $readme | Should Match '^# operation-router \(v3\.0\.0\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {
@@ -3015,6 +3178,752 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         $r.Output | Should Match 'STDINLEN=0'
         $r.Output | Should Match '한글인수확인'
         (Test-Path env:OR_FG_EXE) | Should Be $false
+    }
+}
+
+Describe 'v3.0.0. issue branch와 Draft PR workflow' {
+    BeforeEach {
+        $script:v3SavedBoundary=$env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=Join-Path $TestWorkRoot 'v3-safe-boundary.txt'
+        if(-not (Test-Path -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)){
+            'safe'|Set-Content -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -Encoding UTF8
+        }
+        Set-TestGitWorkflow -Mode direct-main
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        Set-TestGitWorkflow -Mode direct-main
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=$script:v3SavedBoundary
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It '1. gitWorkflow 누락 설정은 direct-main legacy로 해석한다' {
+        $legacy=[pscustomobject]@{}
+        $policy=Get-GitWorkflowPolicy -Config $legacy
+        $policy.mode|Should Be 'direct-main'
+        $policy.legacyDefault|Should Be $true
+    }
+
+    It '2. mode direct-main은 기존 main 직접 push 계약을 유지한다' {
+        $config=Get-Content -LiteralPath (Join-Path $Script:ConfigDir 'config.json') -Raw -Encoding UTF8|ConvertFrom-Json
+        $config.gitWorkflow.mode='direct-main';$config.gitWorkflow.createDraftPullRequest=$false;$config.gitWorkflow.fetchBeforeRun=$false
+        (Get-GitWorkflowPolicy -Config $config).mode|Should Be 'direct-main'
+        (Get-FixedExecutionContract -Workflow ([pscustomobject]@{mode='direct-main'}))|Should Match 'origin/main'
+    }
+
+    It '3. mode pull-request는 실제 branch 값이 들어간 PR worker 계약을 사용한다' {
+        $w=[pscustomobject]@{mode='pull-request';baseBranch='main';baseHead=('a'*40);workBranch='operation-router/issue-3'
+            remoteWorkBranch='origin/operation-router/issue-3';issueNumber=3}
+        $order=New-OrderContent -IssueBody 'body' -Workflow $w
+        $order|Should Match 'workflow mode: pull-request'
+        $order|Should Match 'expected branch: operation-router/issue-3'
+    }
+
+    It '4. 알 수 없는 gitWorkflow mode는 fail-closed 한다' {
+        $config=Get-Content -LiteralPath (Join-Path $Script:ConfigDir 'config.json') -Raw -Encoding UTF8|ConvertFrom-Json
+        $config.gitWorkflow.mode='unsafe'
+        {Get-GitWorkflowPolicy -Config $config}|Should Throw
+        $config.gitWorkflow.mode='Pull-Request'
+        {Get-GitWorkflowPolicy -Config $config}|Should Throw
+        $config.gitWorkflow.mode='pull-request';$config.gitWorkflow.autoMerge='false'
+        {Get-GitWorkflowPolicy -Config $config}|Should Throw
+    }
+
+    It '5. 위험한 baseBranch와 branchPrefix는 모두 거부한다' {
+        $bad=@('bad branch','a..b','a~b','a^b','a:b','a?b','a*b','a[b','a\b','/main','main/','a//b','name.lock',"bad`nref",'main;whoami','a$(whoami)')
+        foreach($value in $bad){(Test-SafeGitRefPolicyValue -Value $value)|Should Be $false}
+        (Test-SafeGitRefPolicyValue -Value 'release/v3')|Should Be $true
+    }
+
+    It '6. clean synced main에서 issue 전용 branch를 origin main 기준으로 생성한다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 6 -Config (Get-Config) -PrProbe (New-TestPullRequestProbe).Probe
+            $pre.ok|Should Be $true
+            (Get-GitCurrentBranch -Path $f.Repo)|Should Be 'operation-router/issue-6'
+            $pre.workflow.workStartHead|Should Be $pre.workflow.baseRemoteHead
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '7. dirty main은 worker 호출 전에 중단한다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo
+        try {
+            'dirty'|Set-Content -LiteralPath (Join-Path $f.Repo 'dirty.txt') -Encoding UTF8
+            (Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 7 -Config (Get-Config)).reason|Should Be 'dirty_worktree'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '8. local main behind remote는 자동 pull 없이 중단한다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo;$peer=Join-Path $f.Root 'peer'
+        try {
+            git clone -q ([System.Uri]::new($f.Remote).AbsoluteUri) $peer
+            Push-Location $peer
+            try {git config user.email t@t.com;git config user.name t;'remote'|Set-Content remote.txt;git add .;git commit -q -m remote;git push -q origin main}finally{Pop-Location}
+            (Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 8 -Config (Get-Config)).reason|Should Be 'base_behind_remote'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '9. local main ahead remote는 자동 push 없이 중단한다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo
+        try {
+            Push-Location $f.Repo
+            try {'local'|Set-Content local.txt;git add .;git commit -q -m local}finally{Pop-Location}
+            (Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 9 -Config (Get-Config)).reason|Should Be 'base_ahead_remote'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '10. fetch 실패는 remote_sync_unavailable로 중단한다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 10 -Config (Get-Config) -FetchProbe {param($p,$b)$false}
+            $pre.reason|Should Be 'remote_sync_unavailable'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '11. base나 소유 work branch가 아닌 임의 branch에서 시작하면 중단한다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo
+        try {
+            Push-Location $f.Repo;try{git switch -q -c arbitrary}finally{Pop-Location}
+            (Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 11 -Config (Get-Config)).reason|Should Be 'not_on_base_or_work_branch'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '12. valid receipt가 소유한 기존 work branch는 재개할 수 있다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 12 -Config (Get-Config)
+            Add-Member -InputObject $pre.workflow -NotePropertyName issueNumber -NotePropertyValue 12 -Force
+            Push-Location $f.Repo
+            try {
+                'resume'|Set-Content -LiteralPath resume.txt -Encoding UTF8
+                git add resume.txt
+                git commit -q -m resume
+                git push -q -u origin HEAD
+            } finally {Pop-Location}
+            $pre.workflow.finalHead=Get-GitHead -Path $f.Repo
+            $pr.State.Items=@([pscustomobject]@{number=12;url='https://example.invalid/pr/12';state='OPEN';draft=$true
+                baseBranch='main';headBranch='operation-router/issue-12';headSha=$pre.workflow.finalHead
+                headRepository='owner/repo';merged=$false})
+            $pre.workflow.pr=$pr.State.Items[0]
+            Save-IssueWorkflowReceipt -IssueNumber 12 -RepoPath $f.Repo -Workflow $pre.workflow|Out-Null
+            (Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 12 -Config (Get-Config) -PrProbe $pr.Probe).ok|Should Be $true
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '12b. 라우터가 만든 미push 초기 branch는 Claude-only 재진입 전에 같은 receipt로 재개한다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $first=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 120 -Config (Get-Config) -PrProbe $pr.Probe
+            $first.ok|Should Be $true
+            $workflow=Copy-WorkflowContext -Workflow $first.workflow
+            Add-Member -InputObject $workflow -NotePropertyName issueNumber -NotePropertyValue 120 -Force
+            Save-IssueWorkflowReceipt -IssueNumber 120 -RepoPath $f.Repo -Workflow $workflow|Out-Null
+            $second=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 120 -Config (Get-Config) -PrProbe $pr.Probe
+            $second.ok|Should Be $true
+            $second.workflow.workBranch|Should Be 'operation-router/issue-120'
+            $pr.State.LookupCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '13. receipt 없는 기존 remote issue branch는 자동 채택하지 않는다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo
+        try {
+            Push-Location $f.Repo;try{git push -q origin 'main:refs/heads/operation-router/issue-13'}finally{Pop-Location}
+            (Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 13 -Config (Get-Config)).reason|Should Be 'work_branch_unowned'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '14. PR mode 주문서에 expected branch와 실제 issue number가 포함된다' {
+        $w=[pscustomobject]@{mode='pull-request';baseBranch='main';baseHead=('1'*40);workBranch='operation-router/issue-14'
+            remoteWorkBranch='origin/operation-router/issue-14';issueNumber=14}
+        $order=New-OrderContent -IssueBody 'x' -Workflow $w
+        $order|Should Match 'expected branch: operation-router/issue-14'
+        $order|Should Match 'issue number: 14'
+        $order|Should Match '\[ORH_WORKER_REPORT\].*localVerificationComplete'
+    }
+
+    It '14b. 실제 worker 최종 메시지의 엄격 완료 보고만 로컬 검증 증거로 읽는다' {
+        $marker='[ORH_WORKER_REPORT] {"localVerificationComplete":true,"verification":"12 tests passed","remainingProblems":[]}'
+        $plain=ConvertFrom-WorkerCompletionReport -Text $marker
+        $plain.valid|Should Be $true;$plain.localVerificationComplete|Should Be $true;$plain.verification|Should Be '12 tests passed'
+        $grok=ConvertFrom-WorkerCompletionReport -Text (([pscustomobject]@{text="done`n$marker";stopReason='EndTurn'}|ConvertTo-Json -Compress))
+        $grok.valid|Should Be $true
+        $gptLine=([pscustomobject]@{type='item.completed';item=[pscustomobject]@{type='agent_message';text="done`n$marker"}}|ConvertTo-Json -Compress)
+        (ConvertFrom-WorkerCompletionReport -Text $gptLine).valid|Should Be $true
+        (ConvertFrom-WorkerCompletionReport -Text '[ORH_WORKER_REPORT] {"localVerificationComplete":"true","verification":"x","remainingProblems":[]}').valid|Should Be $false
+        (ConvertFrom-WorkerCompletionReport -Text '[ORH_WORKER_REPORT] {"localVerificationComplete":true,"verification":"x","remainingProblems":"none"}').valid|Should Be $false
+    }
+
+    It '15. PR mode 주문서는 main checkout과 main push를 명시적으로 금지한다' {
+        $w=[pscustomobject]@{mode='pull-request';baseBranch='main';baseHead=('1'*40);workBranch='operation-router/issue-15'
+            remoteWorkBranch='origin/operation-router/issue-15';issueNumber=15}
+        $order=New-OrderContent -IssueBody 'x' -Workflow $w
+        $order|Should Match 'main으로 checkout하거나 main에 push하지 않는다'
+        $order|Should Match 'configured base branch\(main\)로 checkout하거나 그 branch에 push하지 않는다'
+        $order|Should Match 'PR과 이슈를 생성·수정·댓글·종료·병합하지 않는다'
+    }
+
+    It '16. direct-main 주문서는 main commit과 origin main push 계약을 회귀 유지한다' {
+        $order=New-OrderContent -IssueBody 'x' -Workflow ([pscustomobject]@{mode='direct-main'})
+        $order|Should Match '현재 main 브랜치에서만'
+        $order|Should Match 'origin/main에 push'
+    }
+
+    It '17. worker가 assigned branch를 바꾸면 postflight가 실패한다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $res=Invoke-RunOperation -OperationNumber 2 -IssueNumber 17 -RepoPath $f.Repo -IssueFetcher $issue `
+                -GrokRunner (New-PrWorker switch-main) -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $res.status|Should Be 'work_branch_mismatch'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '18. worker final commit이 origin main에 들어가면 base_branch_touched로 실패한다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $res=Invoke-RunOperation -OperationNumber 2 -IssueNumber 18 -RepoPath $f.Repo -IssueFetcher $issue `
+                -GrokRunner (New-PrWorker main-push) -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $res.status|Should Be 'base_branch_touched'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '19. work branch local HEAD와 origin HEAD가 같으면 pushComplete다' {
+        Set-TestGitWorkflow -Mode pull-request;$f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $res=Invoke-RunOperation -OperationNumber 2 -IssueNumber 19 -RepoPath $f.Repo -IssueFetcher $issue `
+                -GrokRunner (New-PrWorker success) -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $res.status|Should Be 'pr_opened'
+            $res.pushComplete|Should Be $true
+            $observable=Get-ExecutionObservableState -RepoPath $f.Repo -RemoteRef 'origin/operation-router/issue-19'
+            $observable.ahead|Should Be 0;$observable.behind|Should Be 0
+            (Get-Content -LiteralPath (Join-Path $RouterRoot 'scripts\worker-host.ps1') -Raw -Encoding UTF8)|Should Match 'ObservableRemoteRef'
+            $saved=Get-RunReceipt -Operation 2 -IssueNumber 19 -RepoPath $f.Repo
+            $remoteProbe={
+                param($repo,$branch)
+                if($branch -eq 'main'){return $null}
+                $text=(& git -C $repo ls-remote --heads origin "refs/heads/$branch"|Out-String).Trim()
+                if($text){return @($text -split '\s+')[0]}
+                return $null
+            }
+            $remoteFailure=Resolve-PullRequestPostflight -RepoPath $f.Repo -StartSnapshot ([pscustomobject]@{startHead=$saved.startHead}) `
+                -WorkerResult ([pscustomobject]@{Success=$true;ExitCode=0;WorkerReportedVerification='ok'}) -Workflow $saved.workflow `
+                -Operation 2 -IssueNumber 19 -Route ([pscustomobject]@{worker='grok';model='grok-4.5';effort='medium'}) `
+                -PrProbe $pr.Probe -RemoteHeadProbe $remoteProbe -ExistingPrOnly
+            $remoteFailure.status|Should Be 'remote_sync_unavailable'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '20. 같은 clone에서 다른 issue mutation은 repository_execution_active로 차단한다' {
+        $f=New-PrFakeRepo
+        try {
+            $first=Enter-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 20 -Purpose run
+            $second=Enter-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 21 -Purpose run
+            $second.status|Should Be 'repository_execution_active'
+            $second.activeIssueNumber|Should Be 20
+            Exit-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 20 -Token $first.token|Should Be $true
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '21. 같은 issue의 다른 Operation mutation도 차단한다' {
+        $f=New-PrFakeRepo
+        try {
+            $first=Enter-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 21 -Purpose run
+            (Enter-RepositoryMutation -RepoPath $f.Repo -Operation 2 -IssueNumber 21 -Purpose run).status|Should Be 'repository_execution_active'
+            (Enter-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 21 -Purpose repair).status|Should Be 'repository_execution_active'
+            Exit-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 21 -Token $first.token|Out-Null
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '22. watch와 terminal receipt 읽기는 mutation lock 중에도 차단되지 않는다' {
+        $f=New-PrFakeRepo
+        try {
+            $first=Enter-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 22 -Purpose run
+            (Get-RepositoryMutationReceipt -RepoPath $f.Repo).issueNumber|Should Be 22
+            (Invoke-WatchCommand -OperationNumber 1 -IssueNumber 22 -RepoPath $f.Repo).status|Should Be 'receipt_unreadable'
+            Exit-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 22 -Token $first.token|Out-Null
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '23. terminal 또는 stale 판정 전에는 잘못된 token으로 lock을 해제할 수 없다' {
+        $f=New-PrFakeRepo
+        try {
+            $first=Enter-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 23 -Purpose run
+            (Exit-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 23 -Token 'wrong')|Should Be $false
+            (Get-RepositoryMutationReceipt -RepoPath $f.Repo)|Should Not Be $null
+            Exit-RepositoryMutation -RepoPath $f.Repo -Operation 1 -IssueNumber 23 -Token $first.token|Out-Null
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '24. 다른 clone namespace의 mutation lock은 독립적이다' {
+        $a=New-PrFakeRepo;$b=New-PrFakeRepo
+        try {
+            $la=Enter-RepositoryMutation -RepoPath $a.Repo -Operation 1 -IssueNumber 24 -Purpose run
+            $lb=Enter-RepositoryMutation -RepoPath $b.Repo -Operation 2 -IssueNumber 24 -Purpose run
+            $la.acquired|Should Be $true;$lb.acquired|Should Be $true
+            Exit-RepositoryMutation -RepoPath $a.Repo -Operation 1 -IssueNumber 24 -Token $la.token|Out-Null
+            Exit-RepositoryMutation -RepoPath $b.Repo -Operation 2 -IssueNumber 24 -Token $lb.token|Out-Null
+        } finally {Remove-PrFakeRepo $a;Remove-PrFakeRepo $b}
+    }
+}
+
+Describe 'v3.0.0. Draft PR와 PR CI workflow' {
+    BeforeEach {
+        $script:v3SavedBoundary=$env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=Join-Path $TestWorkRoot 'v3-safe-boundary.txt'
+        if(-not (Test-Path -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)){'safe'|Set-Content -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -Encoding UTF8}
+        Set-TestGitWorkflow -Mode pull-request
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        Set-TestGitWorkflow -Mode direct-main
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=$script:v3SavedBoundary
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It '25. branch push 검증 뒤 Draft PR을 생성한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $res=Invoke-RunOperation -OperationNumber 2 -IssueNumber 25 -RepoPath $f.Repo -IssueFetcher $issue `
+                -GrokRunner (New-PrWorker success) -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $res.status|Should Be 'pr_opened'
+            $res.prNumber|Should Be 42
+            $res.prDraft|Should Be $true
+            $pr.State.CreateCalls|Should Be 1
+            $pr.State.Items[0].draft|Should Be $true
+            $pr.State.Items[0].baseBranch|Should Be 'main'
+            $pr.State.Items[0].headBranch|Should Be 'operation-router/issue-25'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '26. 동일 base와 head의 기존 Draft PR은 재사용한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $first=Invoke-RunOperation -OperationNumber 2 -IssueNumber 26 -RepoPath $f.Repo -IssueFetcher $issue `
+                -GrokRunner (New-PrWorker success) -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $first.status|Should Be 'pr_opened'
+            $second=Invoke-RunOperation -OperationNumber 2 -IssueNumber 26 -RepoPath $f.Repo -IssueFetcher $issue `
+                -GrokRunner (New-PrWorker success) -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $second.status|Should Be 'pr_opened'
+            $pr.State.CreateCalls|Should Be 1
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '27. 다른 base의 PR은 fail-closed 한다' {
+        $p=[pscustomobject]@{number=1;state='OPEN';draft=$true;baseBranch='develop';headBranch='operation-router/issue-27';headSha=('a'*40)}
+        (Test-PullRequestContext -PullRequest $p -BaseBranch main -WorkBranch 'operation-router/issue-27' -HeadSha ('a'*40) -RequireDraft).status|Should Be 'pr_context_mismatch'
+    }
+
+    It '28. 다른 head의 PR은 fail-closed 한다' {
+        $p=[pscustomobject]@{number=1;state='OPEN';draft=$true;baseBranch='main';headBranch='other';headSha=('a'*40)}
+        (Test-PullRequestContext -PullRequest $p -BaseBranch main -WorkBranch 'operation-router/issue-28' -HeadSha ('a'*40) -RequireDraft).status|Should Be 'pr_context_mismatch'
+        $wrongRepo=[pscustomobject]@{number=2;state='OPEN';draft=$true;baseBranch='main';headBranch='operation-router/issue-28'
+            headSha=('a'*40);headRepository='other/fork'}
+        (Test-PullRequestContext -PullRequest $wrongRepo -BaseBranch main -WorkBranch 'operation-router/issue-28' -HeadSha ('a'*40) `
+            -OwnerRepo 'owner/repo' -RequireDraft).status|Should Be 'pr_context_mismatch'
+    }
+
+    It '29. closed PR은 재사용하지 않는다' {
+        $p=[pscustomobject]@{number=1;state='CLOSED';draft=$true;baseBranch='main';headBranch='operation-router/issue-29';headSha=('a'*40)}
+        (Test-PullRequestContext -PullRequest $p -BaseBranch main -WorkBranch 'operation-router/issue-29' -HeadSha ('a'*40) -RequireDraft).status|Should Be 'pr_already_closed'
+    }
+
+    It '30. merged PR은 재사용하지 않는다' {
+        $p=[pscustomobject]@{number=1;state='MERGED';draft=$false;merged=$true;baseBranch='main';headBranch='operation-router/issue-30';headSha=('a'*40)}
+        (Test-PullRequestContext -PullRequest $p -BaseBranch main -WorkBranch 'operation-router/issue-30' -HeadSha ('a'*40) -RequireDraft).status|Should Be 'pr_already_merged'
+    }
+
+    It '31. 예기치 않은 non-draft PR은 fail-closed 한다' {
+        $p=[pscustomobject]@{number=1;state='OPEN';draft=$false;baseBranch='main';headBranch='operation-router/issue-31';headSha=('a'*40)}
+        (Test-PullRequestContext -PullRequest $p -BaseBranch main -WorkBranch 'operation-router/issue-31' -HeadSha ('a'*40) -RequireDraft).status|Should Be 'pr_not_draft'
+    }
+
+    It '32. PR 생성 실패를 branch push 성공으로 위장하지 않는다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe;$pr.State.CreateFailure=$true
+        try {
+            $res=Invoke-RunOperation -OperationNumber 2 -IssueNumber 32 -RepoPath $f.Repo -IssueFetcher $issue `
+                -GrokRunner (New-PrWorker success) -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $res.status|Should Be 'pr_create_failed'
+            $res.pushComplete|Should Be $true
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '33. PR body는 secret을 마스킹하고 prompt와 raw output 원문을 포함하지 않는다' {
+        $w=[pscustomobject]@{baseBranch='main';baseHead=('a'*40);workBranch='operation-router/issue-33';workStartHead=('a'*40);finalHead=('b'*40)}
+        $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+        $secret='Authorization: Bearer abcdefghij1234567890'
+        $body=New-PullRequestBody -Operation 1 -IssueNumber 33 -Route $route -Workflow $w -VerificationSummary $secret
+        $body|Should Not Match 'abcdefghij1234567890'
+        $body|Should Match '\*\*\*MASKED\*\*\*'
+        $body|Should Not Match 'GitHub 이슈 원문'
+    }
+
+    It '34. PR body 임시 파일은 create 호출 뒤 제거된다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $res=Invoke-RunOperation -OperationNumber 2 -IssueNumber 34 -RepoPath $f.Repo -IssueFetcher $issue `
+                -GrokRunner (New-PrWorker success) -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $res.status|Should Be 'pr_opened'
+            $pr.State.BodyPathExistedDuringCreate|Should Be $true
+            (Test-Path -LiteralPath $pr.State.BodyPath)|Should Be $false
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '35. 동일 PR head의 모든 check가 success면 success다' {
+        $f=New-PrFakeRepo
+        try {
+            $ci=Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'},[pscustomobject]@{status='success';conclusion='success'})}}
+            $ci|Should Be 'success'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '36. 하나라도 failure check가 있으면 failure다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'},[pscustomobject]@{status='completed';conclusion='failure'})}})|Should Be 'failure'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '37. 실패가 없고 pending check가 있으면 pending이다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'},[pscustomobject]@{status='in_progress';conclusion=$null})}})|Should Be 'pending'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '38. neutral skipped unknown conclusion은 unavailable이다' {
+        $f=New-PrFakeRepo
+        try {
+            foreach($value in @('neutral','skipped','mystery')){
+                $wanted=$value
+                $lister={param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion=$wanted})}}.GetNewClosure()
+                (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 -CheckLister $lister)|Should Be 'unavailable'
+            }
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '39. workflow가 있는데 polling 종료까지 check가 없으면 unavailable이다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}})|Should Be 'unavailable'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '40. workflow와 check가 모두 없으면 not-requested다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $false -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}})|Should Be 'not-requested'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '41. PR check API나 JSON probe 오류는 unavailable이다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$false;checks=@()}})|Should Be 'unavailable'
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)throw 'mock API failure'})|Should Be 'unavailable'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '42. 첫 check만 성공이어도 뒤 check 실패를 포함해 전체를 집계한다' {
+        $f=New-PrFakeRepo
+        try {
+            $checks=@([pscustomobject]@{status='completed';conclusion='success'},[pscustomobject]@{status='completed';conclusion='cancelled'})
+            $all=$checks
+            $lister={param($p,$n,$h)[pscustomobject]@{ok=$true;checks=$all}}.GetNewClosure()
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 -CheckLister $lister)|Should Be 'failure'
+        } finally {Remove-PrFakeRepo $f}
+    }
+}
+
+Describe 'v3.0.0. workflow receipt와 merge_ready' {
+    BeforeEach {
+        $script:v3SavedBoundary=$env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=Join-Path $TestWorkRoot 'v3-safe-boundary.txt'
+        if(-not (Test-Path -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)){'safe'|Set-Content -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -Encoding UTF8}
+        Set-TestGitWorkflow -Mode pull-request
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        Set-TestGitWorkflow -Mode direct-main
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=$script:v3SavedBoundary
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It '43. workflow context는 JSON receipt에 round-trip 된다' {
+        $f=New-PrFakeRepo
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 43 -Config (Get-Config)
+            Add-Member -InputObject $pre.workflow -NotePropertyName issueNumber -NotePropertyValue 43 -Force
+            Save-IssueWorkflowReceipt -IssueNumber 43 -RepoPath $f.Repo -Workflow $pre.workflow|Out-Null
+            $saved=Get-IssueWorkflowReceipt -IssueNumber 43 -RepoPath $f.Repo
+            $saved.schemaVersion|Should Be 2
+            $saved.workflow.mode|Should Be 'pull-request'
+            $saved.workflow.workBranch|Should Be 'operation-router/issue-43'
+            $saved.workflow.baseHead|Should Be $pre.workflow.baseHead
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '44. schemaVersion 1 receipt는 pull-request로 추측하지 않고 direct-main legacy다' {
+        $legacy=[pscustomobject]@{schemaVersion=1;operation=1;status='completed'}
+        $w=Get-ReceiptWorkflowContext -Receipt $legacy
+        $w.mode|Should Be 'direct-main'
+        $w.legacyReceipt|Should Be $true
+    }
+
+    It '45. active receipt mode는 이후 config mode 변경으로 바뀌지 않는다' {
+        $f=New-PrFakeRepo
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 45 -Config (Get-Config)
+            Save-IssueWorkflowReceipt -IssueNumber 45 -RepoPath $f.Repo -Workflow $pre.workflow|Out-Null
+            Set-TestGitWorkflow -Mode direct-main
+            (Get-ReceiptWorkflowContext -Receipt (Get-IssueWorkflowReceipt -IssueNumber 45 -RepoPath $f.Repo)).mode|Should Be 'pull-request'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '46. review는 current branch mismatch를 worker 호출 전에 차단한다' {
+        $f=New-PrFakeRepo
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 46 -Config (Get-Config)
+            $head=Get-GitHead -Path $f.Repo
+            $receipt=[pscustomobject]@{finalHead=$head;workflow=$pre.workflow}
+            Push-Location $f.Repo;try{git switch -q main}finally{Pop-Location}
+            (Test-PullRequestReviewContext -RunReceipt $receipt -RepoPath $f.Repo).status|Should Be 'work_branch_mismatch'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '47. review는 PR head SHA mismatch를 차단한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe -AutoAdvanceHead:$false
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 47 -Config (Get-Config)
+            $head=Get-GitHead -Path $f.Repo
+            $pr.State.Items=@([pscustomobject]@{number=47;url='x';state='OPEN';draft=$true;baseBranch='main'
+                headBranch='operation-router/issue-47';headSha=('f'*40);headRepository='owner/repo';merged=$false})
+            $receipt=[pscustomobject]@{finalHead=$head;workflow=$pre.workflow}
+            (Test-PullRequestReviewContext -RunReceipt $receipt -RepoPath $f.Repo -PrProbe $pr.Probe).status|Should Be 'pr_context_mismatch'
+            $pr.State.Items[0].headSha=$head
+            $pre.workflow.pr=[pscustomobject]@{number=99;headSha=$head}
+            (Test-PullRequestReviewContext -RunReceipt $receipt -RepoPath $f.Repo -PrProbe $pr.Probe).status|Should Be 'pr_context_mismatch'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '48. repair는 기존 work branch와 같은 Draft PR을 재사용한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe;$checks={param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}
+        }
+        try {
+            $run=Invoke-RunOperation -OperationNumber 1 -IssueNumber 48 -RepoPath $f.Repo -IssueFetcher $issue `
+                -GrokRunner (New-PrWorker success) -PrProbe $pr.Probe -CheckLister $checks
+            $run.status|Should Be 'pr_opened'
+            $review=Invoke-OperationReview -OperationNumber 1 -IssueNumber 48 -RepoPath $f.Repo -IssueFetcher $issue -PrProbe $pr.Probe `
+                -GptReviewRunner {param($p,$o,$r)[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;Output='{"verdict":"REPAIR_REQUIRED","findings":[{"severity":"high","file":"a.txt","issue":"x","requiredFix":"y"}]}'}}
+            $review.verdict|Should Be 'REPAIR_REQUIRED'
+            $repair=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 48 -RepoPath $f.Repo -IssueFetcher $issue `
+                -RepairRunner (New-PrWorker success) -PrProbe $pr.Probe -CheckLister $checks
+            $repair.status|Should Be 'repair_completed_review_pending'
+            $pr.State.CreateCalls|Should Be 1
+            $repair.workflow.pr.number|Should Be 42
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '49. repair postflight는 PR이 없을 때 새 PR을 생성하지 않는다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 49 -Config (Get-Config)
+            Add-Member -InputObject $pre.workflow -NotePropertyName issueNumber -NotePropertyValue 49 -Force
+            $pre.workflow.finalHead=Get-GitHead -Path $f.Repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='medium'}
+            $res=Ensure-DraftPullRequest -RepoPath $f.Repo -Operation 1 -IssueNumber 49 -Route $route -Workflow $pre.workflow -PrProbe $pr.Probe -ExistingOnly
+            $res.status|Should Be 'pr_context_mismatch'
+            $pr.State.CreateCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '50. pull-request recover는 result가 없으면 unverified 자격을 유지한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe;$issueNumber=50
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber $issueNumber -Config (Get-Config)
+            Add-Member -InputObject $pre.workflow -NotePropertyName issueNumber -NotePropertyValue $issueNumber -Force
+            Push-Location $f.Repo
+            try {'recover'|Set-Content recover.txt;git add .;git commit -q -m recover;git push -q -u origin HEAD}finally{Pop-Location}
+            $head=Get-GitHead -Path $f.Repo
+            $pr.State.Items=@([pscustomobject]@{number=50;url='x';state='OPEN';draft=$true;baseBranch='main'
+                headBranch='operation-router/issue-50';headSha=$head;headRepository='owner/repo';merged=$false})
+            $pf=Resolve-PullRequestRecoveryPostflight -RepoPath $f.Repo -StartSnapshot $pre.snapshot -Workflow $pre.workflow `
+                -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $pf.status|Should Be 'recovered_pr_commit_unverified'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '51. final PASS와 CI success가 모두 확인되면 merge_ready이고 Draft를 해제한다' {
+        $m=New-PrMergeFixture -IssueNumber 51
+        try {
+            $res=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 51 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'})}}
+            $res.status|Should Be 'merge_ready'
+            $res.prDraft|Should Be $false
+            $res.merged|Should Be $false
+            $m.Probe.State.ReadyCalls|Should Be 1
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '52. PASS여도 CI pending이면 merge_ready가 아니다' {
+        $m=New-PrMergeFixture -IssueNumber 52
+        try {
+            $res=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 52 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='in_progress';conclusion=$null})}}
+            $res.status|Should Be 'pr_ci_pending';$res.mergeReady|Should Be $false;$m.Probe.State.ReadyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '53. PASS여도 CI failed면 merge_ready가 아니다' {
+        $m=New-PrMergeFixture -IssueNumber 53
+        try {
+            $res=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 53 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='failure'})}}
+            $res.status|Should Be 'pr_ci_failed';$res.mergeReady|Should Be $false;$m.Probe.State.ReadyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '54. PASS여도 CI unavailable이면 merge_ready가 아니다' {
+        $m=New-PrMergeFixture -IssueNumber 54
+        try {
+            $res=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 54 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$false;checks=@()}}
+            $res.status|Should Be 'pr_ci_unavailable';$res.mergeReady|Should Be $false;$m.Probe.State.ReadyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '55. repair 뒤 종료 검토 verdict가 PASS가 아니면 merge_ready가 아니다' {
+        $m=New-PrMergeFixture -IssueNumber 55
+        try {
+            Add-Member -InputObject $m.Receipt -NotePropertyName finalReviewRequired -NotePropertyValue $true -Force
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $m.Receipt -ReviewVerdict REPAIR_REQUIRED -PrProbe $m.Probe.Probe).status|Should Be 'review_required'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '56. boundary violation receipt는 merge_ready 자격이 없다' {
+        $m=New-PrMergeFixture -IssueNumber 56
+        try {
+            $m.Receipt.status='repo_boundary_violation'
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $m.Receipt -ReviewVerdict PASS -PrProbe $m.Probe.Probe).status|Should Be 'repo_boundary_violation'
+            $m.Receipt.status='pr_opened';$m.Receipt.artifactSanitizationStatus='failed'
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $m.Receipt -ReviewVerdict PASS -PrProbe $m.Probe.Probe).status|Should Be 'artifact_sanitization_failed'
+            $m.Receipt.artifactSanitizationStatus='completed';$m.Receipt.artifactRetentionStatus='failed'
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $m.Receipt -ReviewVerdict PASS -PrProbe $m.Probe.Probe).status|Should Be 'artifact_retention_failed'
+            $m.Receipt.artifactRetentionStatus='completed';$m.Receipt.localVerificationComplete=$false
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $m.Receipt -ReviewVerdict PASS -PrProbe $m.Probe.Probe).status|Should Be 'worker_result_unverified'
+            $m.Receipt.localVerificationComplete=$true
+            Add-Member -InputObject $m.Receipt -NotePropertyName workerRemainingProblems -NotePropertyValue @('manual verification still needed') -Force
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $m.Receipt -ReviewVerdict PASS -PrProbe $m.Probe.Probe).status|Should Be 'worker_reported_remaining_problems'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '57. finalize는 ready-for-review만 호출하고 자동 merge를 호출하지 않는다' {
+        $m=New-PrMergeFixture -IssueNumber 57
+        try {
+            $res=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 57 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'})}}
+            $res.status|Should Be 'merge_ready'
+            @($m.Probe.State.Actions|Where-Object{$_ -eq 'merge'}).Count|Should Be 0
+            (Get-Content -LiteralPath (Join-Path $ScriptsDir 'git-workflow.ps1') -Raw -Encoding UTF8)|Should Not Match 'gh\s+pr\s+merge'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+}
+
+Describe 'v3.0.0. direct-main과 기존 안전 회귀 보존' {
+    BeforeEach {
+        $script:v3SavedBoundary=$env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=Join-Path $TestWorkRoot 'v3-safe-boundary.txt'
+        if(-not (Test-Path -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)){'safe'|Set-Content -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -Encoding UTF8}
+        Set-TestGitWorkflow -Mode direct-main
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        Set-TestGitWorkflow -Mode direct-main
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=$script:v3SavedBoundary
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It '58. direct-main 기존 정상 경로는 main push 뒤 completed다' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $runner={param($r,$p,$o)Push-Location $p;try{'v3'|Set-Content v3.txt;git add .;git commit -q -m v3;git push -q origin main;[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;Output='ok'}}finally{Pop-Location}}
+            (Invoke-RunOperation -OperationNumber 2 -IssueNumber 58 -RepoPath $repo -IssueFetcher $issue -GrokRunner $runner -CiProbe $ciNone).status|Should Be 'completed'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It '59. direct-main weekly fallback routing은 GPT Plan B를 유지한다' {
+        $route=Resolve-OperationRoute -OperationNumber 2 -GrokState (GS exhausted 100) -GptState (GS available 0) -Config (Get-Config)
+        $route.status|Should Be 'routed'
+        $route.worker|Should Be 'gpt'
+    }
+
+    It '60. direct-main 독립 review 회귀 테스트 정의를 삭제하거나 skip하지 않는다' {
+        $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-tree.Tests.ps1') -Raw -Encoding UTF8
+        $source|Should Match 'review 실제 mock GPT 호출'
+        $source|Should Match 'review 영수증 자동 복원'
+    }
+
+    It '61. direct-main repair 회귀 테스트 정의를 유지한다' {
+        $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-tree.Tests.ps1') -Raw -Encoding UTF8
+        $source|Should Match '수리 결과 정직 판정'
+        $source|Should Match '모든 repair 경로의 verified run/review receipt'
+    }
+
+    It '62. direct-main recover 회귀 테스트 정의를 유지한다' {
+        $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-tree.Tests.ps1') -Raw -Encoding UTF8
+        $source|Should Match '실행 세대 영속화·중복 차단·recover'
+        $source|Should Match 'result 유실 recover의 review 자격 차단'
+    }
+
+    It '63. watch-first terminal nextAction 회귀를 유지한다' {
+        $receipt=[pscustomobject]@{operation=2;worker='grok';status='completed'}
+        (Get-WatchNextAction -Receipt $receipt -Status completed)|Should Be 'sonnet_end_review'
+        (Get-WatchNextAction -Receipt $receipt -Status pr_opened)|Should Be 'sonnet_end_review'
+    }
+
+    It '64. artifact sanitization 회귀 테스트 정의를 유지한다' {
+        $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-tree.Tests.ps1') -Raw -Encoding UTF8
+        $source|Should Match 'execution artifact sanitization과 retention'
+        $source|Should Match 'terminal 후 raw·prompt가 사라지며'
+    }
+
+    It '65. artifact retention의 namespace 전체 receipt 보호 회귀를 유지한다' {
+        $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-tree.Tests.ps1') -Raw -Encoding UTF8
+        $source|Should Match 'retention의 namespace 전체 최신 execution receipt 참조 보호'
+    }
+
+    It '66. clone namespace identity는 canonical root hash로 계속 격리된다' {
+        $a=New-FakeRepo -WithRemote;$b=New-FakeRepo -WithRemote
+        try {(Get-PendingNamespacePath -RepoPath $a)|Should Not Be (Get-PendingNamespacePath -RepoPath $b)}
+        finally {Remove-Item -LiteralPath $a,$b -Recurse -Force}
+    }
+
+    It '67. UTF-8 stdin과 비ASCII 인수 회귀 테스트 정의를 유지한다' {
+        $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-tree.Tests.ps1') -Raw -Encoding UTF8
+        $source|Should Match 'Windows PowerShell 전경 실행이 한글 stdin'
+        $source|Should Match '비ASCII 인수 전경 실행'
+    }
+
+    It '68. 기존 mock 전체는 skip이나 실패 무시 구문 없이 정식 runner에 남아 있다' {
+        $runner=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'run-tests.ps1') -Raw -Encoding UTF8
+        $runner|Should Match 'Strict=\$true'
+        $runner|Should Match 'FailedCount -gt 0'
+        $runner|Should Not Match 'SkippedCount\s*='
+    }
+
+    It '68b. installed fixture는 실제 사용자 홈 모델 cache를 읽지 않고 합성한다' {
+        $fixture=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'run-installed-fixture.ps1') -Raw -Encoding UTF8
+        $fixture|Should Match '\$fixtureModels\s*='
+        $fixture|Should Match "'gpt-5\.6-sol'"
+        $fixture|Should Not Match '\$sourceModels'
+        $fixture|Should Not Match 'Copy-Item[^\r\n]+models_cache'
+        $fixture|Should Not Match 'Join-Path\s+\$originalProfile\s+''\.codex'
     }
 }
 

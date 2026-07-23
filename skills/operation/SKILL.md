@@ -1,13 +1,13 @@
 ---
 name: operation
-description: operation-router 보조 명령. /operation status|doctor|set|reset과 중단 복구용 recover를 제공한다. 작전 실행은 /operation-1, /operation-2, /operation-3 를 쓴다.
-argument-hint: status | doctor | recover <작전번호> <이슈번호> | set grok <0-100|available|exhausted> | set gpt <0-100|available|reserved|exhausted> | reset
+description: operation-router 보조 명령. status|doctor|set|reset, 새 세션 재진입용 recover, 최종 검토 뒤 finalize를 제공한다. 작전 실행은 /operation-1, /operation-2, /operation-3를 쓴다.
+argument-hint: status | doctor | watch <작전번호> <이슈번호> | recover <작전번호> <이슈번호> | finalize <작전번호> <이슈번호> | set grok <0-100|available|exhausted> | set gpt <0-100|available|reserved|exhausted> | reset
 disable-model-invocation: true
 model: claude-haiku-4-5-20251001
 effort: low
 ---
 
-## v2.4.7 watch 명령
+## v3 watch 명령
 
 `/operation watch <작전번호> <이슈번호>`는 기존 worker를 새로 호출하지 않고 현재 execution의 progress journal과 완료 상태를 추적한다. `-Follow`를 사용하면 terminal 상태까지 기다리며, watch를 종료하거나 다시 연결해도 worker나 generation은 바뀌지 않는다.
 
@@ -59,10 +59,17 @@ PowerShell 경로는 `$env:USERPROFILE\.claude\operation-router\operation-router
 ```
 
 ### `/operation recover <작전번호> <이슈번호>`
-중단된 실행 세대의 프로세스·result·Git·CI·postflight만 확인한다. 외부 Grok/GPT worker를 새로 호출하거나 자동 재시도하지 않는다. 정상 result가 없으면 `recovered_*_unverified`로 반환하며 작전 1 review/repair 자격이 없고 검증 재실행 또는 수동 종료 검토가 필요하다.
+Claude 세션이 이미 종료됐거나 사용자가 나중에 새 세션으로 재진입했고 살아 있는 watch가 없을 때만 사용한다. receipt에 고정된 workflow mode와 branch/PR context로 프로세스·result·Git·CI·postflight만 확인한다. 외부 worker를 새로 호출하거나 자동 재시도하지 않는다. 정상 result가 없으면 `recovered_*_unverified`로 반환하며 작전 1 review/repair 자격이 없다.
 ```
 & "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command recover -Operation <작전번호> -IssueNumber <이슈번호>
 # Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command recover -Operation <작전번호> -IssueNumber <이슈번호>
+```
+
+### `/operation finalize <작전번호> <이슈번호>`
+Operation 1 Opus 또는 Operation 2 Sonnet의 최종 종료 검토가 PASS일 때만 호출한다. 라우터는 receipt·현재 branch/HEAD·Draft PR base/head/head SHA·push·CI·sanitization·retention·boundary 상태를 다시 검증한다. 조건을 모두 만족하면 Draft를 ready-for-review로 바꾸고 `merge_ready`를 반환하지만 자동 병합하지 않는다.
+```
+& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command finalize -Operation <작전번호> -IssueNumber <이슈번호> -ReviewVerdict PASS
+# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command finalize -Operation <작전번호> -IssueNumber <이슈번호> -ReviewVerdict PASS
 ```
 
 ## 출력

@@ -1,43 +1,63 @@
-# VERIFICATION_MATRIX — operation-router v2.4.7-1
+# VERIFICATION_MATRIX — operation-router v3.0.0
 
-현재 계약은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` 순서다. recover는 watch 없이 새 세션으로 재진입할 때만 사용한다.
+현재 실행 계약은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` → final review → `finalize` 순서다. recover는 watch가 없는 새 세션 재진입에만 사용한다.
 
-## 격리 검증 요약
+## 검증 원칙
 
-| 구분 | 수량/결과 | 근거 |
-|---|---:|---|
-| source-tree Pester | 247/247 PASS | `tests/run-tests.ps1` |
-| v2.4.6 hotfix 회귀 | 2/2 PASS | receipt null poll, repair optional CLI binding |
-| v2.4.7 progress | 6/6 PASS | metadata/schema/masking/limit/GPT parser/Git/injected worker |
-| v2.4.7 detach/watch | 8/8 PASS | single start, active reuse, one-shot, follow/recover, generation guard, unverified, nextAction, stable read |
-| v2.4.7-1 Skill 계약 | 4/4 PASS | Operation 1/2 watch-first·nextAction·recover 재진입과 Operation 3 report-only |
-| v2.4.7-1 문서 정합성 | 1/1 PASS | README·REENTRY·CHANGELOG·VERIFICATION_MATRIX 순서와 legacy 안내 부재 |
-| 기존 v2.4.4 execution/recover 회귀 | 9/9 PASS | persistent receipt, duplicate guard, recover, OS process fixture |
-| installed fixture | 6/6 Skill byte-identical, failure 0 | `tests/run-installed-fixture.ps1` |
-| paid AI live call | 0 | Grok/GPT/Claude 미호출 |
+- source tree의 정식 `tests/run-tests.ps1`을 Windows PowerShell 5.1과 Pester 3.4 strict mode로 실행한다.
+- fake Git repository와 bare remote, 주입 worker, mock PR probe, 격리 process와 고유 임시 USERPROFILE만 사용한다.
+- 실제 사용자 홈의 설치 Skill이나 runtime state를 읽거나 수정하지 않는다.
+- 실제 Grok, GPT, Claude 유료 호출과 실제 GitHub PR 생성·수정·병합은 수행하지 않는다.
+- 테스트 실패 catch 무시, skip, 기준 완화, 자동 merge는 허용하지 않는다.
 
-전체 suite는 mock runner, fake Git remote, 임시 repository, 일반 PowerShell child process, 격리 USERPROFILE을 사용한다. 실제 provider CLI 호출은 사용하지 않는다.
+## v3 필수 회귀 매핑
 
-## 기능별 판정
+| 번호 | 영역 | 검증 내용 |
+|---:|---|---|
+| 1–5 | 설정 | 누락 legacy direct-main, 명시 mode, PR 계약, 잘못된 mode와 위험 ref 거부 |
+| 6–13 | branch preflight | synced base 생성, dirty/ahead/behind/fetch/임의 branch 차단, 완전한 receipt+Draft PR 재개, 무소유 remote branch 차단 |
+| 14–19 | worker/postflight | 실제 expected branch·issue·remote·엄격 완료 보고 계약, main 금지, branch 변경·base 직접 push 차단, work branch push 확인 |
+| 20–24 | clone mutation lock | 다른 이슈·Operation 동시 mutation 차단, watch 읽기 허용, 안전한 해제, clone namespace 격리 |
+| 25–34 | Draft PR | push 뒤 생성, 정확한 OPEN Draft 재사용, base/head/repository/state/Draft 불일치 차단, 생성 실패, body 마스킹·임시 파일 정리 |
+| 35–42 | PR CI | 모든 success, failure 우선, pending, neutral/skipped/unknown, no-check 정책, API 오류, 전체 check 집계 |
+| 43–50 | receipt/review/repair/recover | workflow round-trip, v1 legacy, mode pin, branch/PR SHA review gate, 같은 PR repair, 새 PR 금지, unverified recover |
+| 51–57 | finalize | PASS+CI success만 merge_ready, pending/failed/unavailable·repair 미검토·boundary/artifact/local verification 차단, ready만 호출 |
+| 58–68b | direct-main와 안전 회귀 | 정상 run, fallback, review, repair, recover, watch-first, sanitization, retention, clone 격리, UTF-8 stdin, 기존 mock 유지, installed fixture 실제 홈 cache 비참조 |
 
-| 기능 | 판정 | 핵심 확인 |
+## 상태별 기대 판정
+
+| 기능 | 허용 결과 | fail-closed 결과 |
 |---|---|---|
-| `run -Detach` | PASS | receipt 선저장, host 1회, 즉시 pending, active 재호출 workerCalls=0 |
-| watch-first 계약 | PASS | run → watch → terminal → nextAction, checkpoint는 같은 execution/generation의 watch만 반복 |
-| progress journal | PASS | JSONL 필수 필드, lock 내 seq, BOM 없음, secret masking, 500자, size suppression |
-| GPT progress parser | PASS | command/file/agent update 분리, reasoning·malformed·unknown 무시, worker result parser와 독립 |
-| Grok progress fallback | PASS(격리) | raw output 크기, Git/worktree/file/commit/push, heartbeat 기반 |
-| watch one-shot/follow | PASS | generation 고정, 재접속 무변경, recover/postflight 1회, terminal marker |
-| nextAction | PASS | op1 Grok/GPT, op2, op3, unverified, failure 분기 |
-| stable receipt read | PASS | not-found/empty/parse/IO transient bounded retry, 최종 fail-closed |
-| secret 보호 | PASS | progress와 watch에 prompt/raw/env/reasoning 원문 없음 |
-| 기존 routing/fallback | PASS | v2.4.6 정책 유지 회귀군 |
-| manifest | PASS | 배포 대상 전부 포함, 중복·누락 없음, manifest 자신 제외 |
+| PR preflight | receipt 소유 신규/기존 issue branch | `dirty_worktree`, `base_*`, `work_branch_*`, `remote_sync_unavailable` |
+| PR postflight | `pr_opened`, `pr_ci_pending`, `pr_ci_unavailable` | worker/commit/branch/upstream/push/base/artifact/boundary/PR/CI failure |
+| review | OPEN Draft PR와 current branch/HEAD/head SHA 일치 | `pr_ci_failed`, unverified recover, dirty/mismatched context |
+| repair | verified run+REPAIR_REQUIRED review, 같은 branch·Draft PR | 다른 mode/branch/HEAD/PR, 새 PR 필요, lock 충돌 |
+| recover | receipt에 고정된 mode로 result 또는 Git/PR/CI 확인 | result 부재 시 계속 `recovered_*_unverified` |
+| finalize | 최종 PASS, current CI success, 모든 gate 정상 | pending/failed/unavailable, 미검토 repair, unverified/artifact/boundary/context 문제 |
 
-## 과거 live/E2E와 구분
+## 하위 호환과 비목표
 
-v2.4.4 이전의 E2E·live probe 기록은 역사 자료일 뿐 v2.4.7 PASS 근거로 승격하지 않는다. v2.4.7은 유료 live 호출 없이 정적·격리 fixture로 검증했다.
+`direct-main`은 설정 누락 legacy 또는 명시적 rollback mode에서 v2 상태와 계약을 유지한다. 독립 review 전에 main에 들어갈 위험이 있으므로 기본값이 아니다.
+
+`merge_ready`는 Draft 해제이며 병합 완료가 아니다. 자동 merge, merge queue, branch 삭제, local main fast-forward, rebase, conflict 해결, 여러 이슈의 한 checkout 병렬 mutation은 검증 대상도 구현 대상도 아니다.
+
+## 실행 결과
+
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1`
+  - 종료 코드 0, 912.15초
+  - 318 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-installed-fixture.ps1`
+  - 종료 코드 0, 907.03초
+  - source tree 318 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  - installed integration 실행, Skill 6종 byte-equivalence 실패 0
+- 최종 집중 검증
+  - 재현성·manifest 22 passed, Skill watch-first 4 passed, 문서 흐름 1 passed
+  - PowerShell 15개 파일 구문 검사, config JSON 파싱, manifest 34개 SHA-256, `git diff --check` 통과
+- 신규 테스트는 fake Git/bare remote, 주입 worker, mock PR/check probe, 합성 model cache와 고유 임시 USERPROFILE만 사용했다.
+- 실제 GitHub PR/check 변경과 유료 Grok·GPT·Claude 호출은 0회다.
+
+상세 수치는 `evidence/source-tree-test-result.txt`에 보존한다.
 
 ## 외부 검토 상태
 
-사용자 지시에 따라 다른 Grok·Claude·Codex worker를 호출하지 않았다. 별도 외부 AI review는 미실행이다.
+사용자 지시에 따라 다른 Grok, Claude, Codex worker나 하위 agent를 호출하지 않았다. 별도 외부 AI review는 미실행이다.
