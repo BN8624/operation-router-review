@@ -7,6 +7,14 @@ model: claude-haiku-4-5-20251001
 effort: low
 ---
 
+## v2.4.7 공통 watch
+
+진행 상태가 필요하면 다음 공통 watch를 사용할 수 있다. Operation 3은 terminal `nextAction=report`만 표시하며 별도 review나 종료 검토를 자동 추가하지 않는다.
+
+```
+& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command watch -Operation 3 -IssueNumber $0 -Follow
+```
+
 # 작전 3 (명확한 소규모 작업)
 
 이 Skill은 Claude Haiku 4.5 / low 세션에서만 실행된다 (frontmatter 고정).

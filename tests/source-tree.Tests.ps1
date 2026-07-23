@@ -2581,6 +2581,31 @@ Describe 'v2.4.7-2. detach 실행과 generation 고정 watch terminal handoff' {
     }
 }
 
+Describe 'v2.4.7-3. Skill 자동 follow와 종료 검토 연결' {
+    It 'operation-1은 run detach 후 watch follow와 모든 nextAction 분기를 명시한다' {
+        $raw=Get-Content -LiteralPath (Join-Path $SkillsRoot 'operation-1\SKILL.md') -Raw -Encoding UTF8
+        $raw|Should Match '-Command run -Operation 1 -IssueNumber \$0 -Detach'
+        $raw|Should Match '-Command watch -Operation 1 -IssueNumber \$0 -Follow'
+        foreach($action in @('review','opus_end_review','manual_verification','stop')){$raw|Should Match ('nextAction='+$action)}
+        $raw|Should Match 'run.*다시 호출하지 말고'
+    }
+
+    It 'operation-2는 detach/follow 뒤 Sonnet 종료 검토와 stop을 명시한다' {
+        $raw=Get-Content -LiteralPath (Join-Path $SkillsRoot 'operation-2\SKILL.md') -Raw -Encoding UTF8
+        $raw|Should Match '-Command run -Operation 2 -IssueNumber \$0 -Detach'
+        $raw|Should Match '-Command watch -Operation 2 -IssueNumber \$0 -Follow'
+        $raw|Should Match 'nextAction=sonnet_end_review';$raw|Should Match 'nextAction=stop'
+        $raw|Should Match '새 generation 생성의 근거가 아니다'
+    }
+
+    It 'operation 보조 Skill은 watch 명령을 제공하고 operation-3은 report 외 자동 검토를 추가하지 않는다' {
+        $dispatcher=Get-Content -LiteralPath (Join-Path $SkillsRoot 'operation\SKILL.md') -Raw -Encoding UTF8
+        $op3=Get-Content -LiteralPath (Join-Path $SkillsRoot 'operation-3\SKILL.md') -Raw -Encoding UTF8
+        $dispatcher|Should Match '/operation watch';$dispatcher|Should Match '-Command watch -Operation <작전번호> -IssueNumber <이슈번호> -Follow'
+        $op3|Should Match 'nextAction=report';$op3|Should Match '별도 review나 종료 검토를 자동 추가하지 않는다'
+    }
+}
+
 Describe 'v2.4.6-2. retention의 namespace 전체 최신 execution receipt 참조 보호' {
     It '여러 이슈의 latest와 active generation은 count를 초과해도 모두 보호한다' {
         $repo=New-FakeRepo

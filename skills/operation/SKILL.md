@@ -7,6 +7,15 @@ model: claude-haiku-4-5-20251001
 effort: low
 ---
 
+## v2.4.7 watch 명령
+
+`/operation watch <작전번호> <이슈번호>`는 기존 worker를 새로 호출하지 않고 현재 execution의 progress journal과 완료 상태를 추적한다. `-Follow`를 사용하면 terminal 상태까지 기다리며, watch를 종료하거나 다시 연결해도 worker나 generation은 바뀌지 않는다.
+
+```
+& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command watch -Operation <작전번호> -IssueNumber <이슈번호> -Follow
+# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command watch -Operation <작전번호> -IssueNumber <이슈번호> -Follow
+```
+
 # operation (보조 명령 디스패처)
 
 이 Skill은 가벼운 상태 관리 전용이다. 실제 작전 구현은 `/operation-1`, `/operation-2`, `/operation-3`가 담당한다 (각각 정적 모델·effort가 고정된 별도 Skill).
