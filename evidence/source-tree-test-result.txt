@@ -29,7 +29,7 @@ Final focused integrity checks:
   v2.3.4 reproducibility / manifest group: 22 passed, 0 failed
   v2.4.7 Skill watch-first group: 4 passed, 0 failed
   v2.4.7 cross-document workflow group: 1 passed, 0 failed
-  PowerShell parser: 15 files passed
+  PowerShell parser: 17 files passed
   config JSON parse: passed
   manifest SHA-256: 38 entries passed
   git diff --check: passed
