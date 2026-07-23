@@ -1,14 +1,20 @@
-# REENTRY — operation-router v2.4.7 observable execution
+# REENTRY — operation-router v2.4.7-1 watch-first execution
 
 ## 현재 상태
 
-- 기준 버전은 v2.4.7이다.
+- 기준 버전은 v2.4.7-1이다.
 - 라우팅 모델, Grok 85/95 임계값, GPT 60/80 tier, weekly/transient/provider 분류, fallback, Claude-only 모델·effort 정책은 v2.4.6과 동일하다.
 - `run -Detach`는 receipt와 progress journal을 만든 뒤 worker-host를 한 번 시작하고 즉시 반환한다.
 - `watch -Follow`는 repository identity, execution ID, generation에 고정되어 진행 이벤트를 표시하고 worker 종료 뒤 기존 recover/postflight를 한 번 재개한다.
 - Operation 1은 terminal `review`/`opus_end_review`/`manual_verification`/`stop`, Operation 2는 `sonnet_end_review`/`stop`, Operation 3은 `report`를 반환한다.
+- v2.4.7부터 `run -Detach`는 `watch -Follow`와 함께 사용하며 `operation_terminal` 뒤 `nextAction`을 수행한다.
+- recover는 Claude 세션이 이미 종료되었거나 사용자가 나중에 새 세션으로 재진입할 때만 사용한다. watch가 살아 있는 동안 수동 호출하지 않는다.
 - result envelope가 유실된 recover는 계속 unverified이며 Operation 1 review/repair 자격이 없다.
 - active prompt/raw artifact, terminal sanitization, execution retention, watched critical-file 검사 정책은 유지된다.
+
+```text
+run -Detach → watch -Follow → operation_terminal → nextAction
+```
 
 ## 주요 파일
 
@@ -27,7 +33,7 @@ git diff --check
 git rev-list --left-right --count origin/main...HEAD
 ```
 
-예상·확정 기준은 source-tree 245/245, failed/skipped/pending/inconclusive 0, installed Skill 6/6 일치, installed integration failures 0이다. 유료 Grok/GPT/Claude live 호출은 0회다.
+예상·확정 기준은 source-tree 247/247, failed/skipped/pending/inconclusive 0, installed Skill 6/6 일치, installed integration failures 0이다. 유료 Grok/GPT/Claude live 호출은 0회다.
 
 ## 알려진 한계
 

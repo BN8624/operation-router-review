@@ -2619,6 +2619,20 @@ Describe 'v2.4.7-3. Skill 자동 follow와 종료 검토 연결' {
     }
 }
 
+Describe 'v2.4.7-4. 문서 watch-first 흐름 정합성' {
+    It 'README, REENTRY, CHANGELOG, VERIFICATION_MATRIX는 run, watch, terminal, nextAction 순서를 사용한다' {
+        foreach($relative in @('README.md','REENTRY.md','CHANGELOG.md','VERIFICATION_MATRIX.md')) {
+            $raw=Get-Content -LiteralPath (Join-Path $RouterRoot $relative) -Raw -Encoding UTF8
+            $raw|Should Match '(?s)run -Detach.*?watch -Follow.*?operation_terminal.*?nextAction'
+            $raw|Should Not Match 'recover만 안내|recover 명령만 반환'
+        }
+        $readme=Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
+        $reentry=Get-Content -LiteralPath (Join-Path $RouterRoot 'REENTRY.md') -Raw -Encoding UTF8
+        $readme|Should Match 'watch가 살아 있는 동안 recover를 수동 호출하지 않는다'
+        $reentry|Should Match 'watch가 살아 있는 동안 수동 호출하지 않는다'
+    }
+}
+
 Describe 'v2.4.6-2. retention의 namespace 전체 최신 execution receipt 참조 보호' {
     It '여러 이슈의 latest와 active generation은 count를 초과해도 모두 보호한다' {
         $repo=New-FakeRepo
@@ -2867,7 +2881,7 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
 
     It '12. README는 v2.4.7을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v2\.4\.7\)'
+        $readme | Should Match '^# operation-router \(v2\.4\.7-1\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {

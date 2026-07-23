@@ -1,21 +1,22 @@
-operation-router v2.4.7 verification result
+operation-router v2.4.7-1 verification result
 Date: 2026-07-23 (KST)
 Runner: Windows PowerShell 5.1, Pester 3.4 (-Strict)
 
 Source-tree command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
-Expected/final: Passed 245, Failed 0, Skipped 0, Pending 0, Inconclusive 0
+Expected/final: Passed 247, Failed 0, Skipped 0, Pending 0, Inconclusive 0
 
 Installed fixture command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixture.ps1
-Expected/final: source-tree 245/245, installed Skill 6/6 byte-identical,
+Expected/final: source-tree 247/247, installed Skill 6/6 byte-identical,
   installedIntegrationFailures 0, isolated USERPROFILE removed after run
 
-Focused additions: 19
+Focused additions: 21
   v2.4.6 runtime hotfix regressions: 2
   v2.4.7 progress journal/parser: 6
   v2.4.7 detach/watch/nextAction/stable-read: 8
-  v2.4.7 Skill auto-follow: 3
+  v2.4.7-1 Skill watch-first contract: 4
+  v2.4.7-1 documentation consistency: 1
 
 Additional existing execution/recover regression run: 9/9 PASS.
 Test categories: Pester mocks, fake Git repositories/remotes, ordinary OS process

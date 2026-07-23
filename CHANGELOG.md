@@ -2,6 +2,12 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
+## v2.4.7-1 (2026-07-23)
+
+- docs: removed the legacy recover-first contract and documented `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` as the single current flow.
+- skills: unified Operation 1/2 on the watch-first execution contract; active statuses immediately follow the same execution, while recover is reserved for a later new-session reentry.
+- tests: prevent legacy recover guidance, ordering, unsupported `nextAction`, recover-purpose, and cross-document workflow regressions.
+
 ## v2.4.7 (2026-07-23)
 
 - Added `run -Detach` and generation-pinned `watch -Follow`; detaching or reattaching never starts a duplicate worker.

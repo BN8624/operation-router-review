@@ -1,14 +1,17 @@
-# VERIFICATION_MATRIX — operation-router v2.4.7
+# VERIFICATION_MATRIX — operation-router v2.4.7-1
+
+현재 계약은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` 순서다. recover는 watch 없이 새 세션으로 재진입할 때만 사용한다.
 
 ## 격리 검증 요약
 
 | 구분 | 수량/결과 | 근거 |
 |---|---:|---|
-| source-tree Pester | 245/245 PASS | `tests/run-tests.ps1` |
+| source-tree Pester | 247/247 PASS | `tests/run-tests.ps1` |
 | v2.4.6 hotfix 회귀 | 2/2 PASS | receipt null poll, repair optional CLI binding |
 | v2.4.7 progress | 6/6 PASS | metadata/schema/masking/limit/GPT parser/Git/injected worker |
 | v2.4.7 detach/watch | 8/8 PASS | single start, active reuse, one-shot, follow/recover, generation guard, unverified, nextAction, stable read |
-| v2.4.7 Skill 통합 | 3/3 PASS | Operation 1/2 follow와 Operation 3 report-only |
+| v2.4.7-1 Skill 계약 | 4/4 PASS | Operation 1/2 watch-first·nextAction·recover 재진입과 Operation 3 report-only |
+| v2.4.7-1 문서 정합성 | 1/1 PASS | README·REENTRY·CHANGELOG·VERIFICATION_MATRIX 순서와 legacy 안내 부재 |
 | 기존 v2.4.4 execution/recover 회귀 | 9/9 PASS | persistent receipt, duplicate guard, recover, OS process fixture |
 | installed fixture | 6/6 Skill byte-identical, failure 0 | `tests/run-installed-fixture.ps1` |
 | paid AI live call | 0 | Grok/GPT/Claude 미호출 |
@@ -20,6 +23,7 @@
 | 기능 | 판정 | 핵심 확인 |
 |---|---|---|
 | `run -Detach` | PASS | receipt 선저장, host 1회, 즉시 pending, active 재호출 workerCalls=0 |
+| watch-first 계약 | PASS | run → watch → terminal → nextAction, checkpoint는 같은 execution/generation의 watch만 반복 |
 | progress journal | PASS | JSONL 필수 필드, lock 내 seq, BOM 없음, secret masking, 500자, size suppression |
 | GPT progress parser | PASS | command/file/agent update 분리, reasoning·malformed·unknown 무시, worker result parser와 독립 |
 | Grok progress fallback | PASS(격리) | raw output 크기, Git/worktree/file/commit/push, heartbeat 기반 |

@@ -1,6 +1,6 @@
-# operation-router (v2.4.7)
+# operation-router (v2.4.7-1)
 
-## v2.4.7 observable execution
+## v2.4.7-1 watch-first observable execution
 
 작업자 실행을 분리하고 안전한 진행 이벤트를 따라갈 수 있다.
 
@@ -9,8 +9,19 @@ operation-router.cmd -Command run -Operation 1 -IssueNumber 15 -Detach
 operation-router.cmd -Command watch -Operation 1 -IssueNumber 15 -Follow
 ```
 
+현재 Skill의 실행 흐름은 하나다.
+
+```text
+run -Detach
+→ watch -Follow
+→ worker 종료 뒤 watch 내부 recover/postflight
+→ operation_terminal
+→ nextAction
+→ Operation 1 review·Opus 종료 검토·수동 검증 또는 Operation 2 Sonnet 종료 검토
+```
+
 - `run -Detach`는 실행 receipt와 `progress.jsonl`을 먼저 만든 뒤 worker-host를 정확히 한 번 시작하고 `worker_starting` 또는 `execution_already_active`와 `watchCommand`를 즉시 반환한다.
-- `watch -Follow`는 기존 `executionId`와 `generation`에 고정되어 진행 이벤트를 출력한다. watch 종료·재접속은 worker를 종료하거나 재호출하거나 새 generation을 만들지 않는다.
+- `watch -Follow`는 기존 `executionId`와 `generation`에 고정되어 진행 이벤트를 출력하고 worker 종료 뒤 recover/postflight를 한 번 수행한다. watch 종료·재접속은 worker를 종료하거나 재호출하거나 새 generation을 만들지 않는다.
 - 진행 이벤트는 process 시작, CLI 출력 활동, command/file/Git 상태, test, commit/push, heartbeat, worker 종료, sanitization, postflight, terminal을 나타낸다. 이는 관찰 가능한 사실이며 모델 reasoning이나 chain-of-thought가 아니다.
 - GPT `--json` 출력은 command/file/짧은 agent update만 별도 progress parser가 해석한다. malformed·unknown·reasoning 이벤트는 worker 성공 판정과 무관하게 무시한다.
 - Grok streaming 지원이 확인되지 않은 환경에서는 raw 출력 크기, Git/worktree/file/commit/push 변화와 heartbeat로 진행을 표시한다.
@@ -32,7 +43,7 @@ Claude Code 전역 작전 라우터. GitHub 이슈를 작전 1/2/3으로 Grok CL
 
 - **장시간 실행 영속화·중단 복구**: 작전 1·2·3의 Grok/GPT 구현 호출 전에 실행 세대 영수증과 runtime log를 만들고, 독립 `worker-host.ps1`이 heartbeat와 출력을 지속 저장한다. active 동안만 `prompt.txt`와 raw stdout/stderr가 존재하며 terminal 전환 시 `Protect-SecretText`가 적용된 `stdout.log`·`stderr.log`로 바꾼 뒤 raw와 prompt를 삭제한다. sanitization·retention 실패는 성공으로 보고하지 않는다.
 - **clone별 namespace와 참조 안전 보존**: namespace는 origin `owner/repo`와 canonical repository root의 SHA-256 앞 16자를 함께 사용한다. 같은 origin의 복수 clone도 execution·lock·run/review receipt를 공유하지 않는다. 모든 최신 execution receipt가 참조하는 generation과 active·불완전 marker generation을 먼저 보호하고, `executionRetentionCount` 10은 미참조 terminal generation에만 적용한다. 보호 generation 때문에 실제 보존 수가 10개를 넘을 수 있으며 보호 집합을 완성하지 못하면 삭제 없이 fail-closed 한다.
-- **정직한 recover provenance**: `/operation recover <작전번호> <이슈번호>`는 worker를 재호출하지 않는다. 정상 result envelope가 없으면 `recovered_*_unverified`, `resultEnvelopePresent=false`, `localVerificationComplete=false`로 남기며 작전 1 Sol review와 repair 자격을 주지 않는다. 정상 envelope가 있는 recover만 기존 postflight와 review 자격을 유지한다.
+- **재진입 전용 recover provenance**: `/operation recover <작전번호> <이슈번호>`는 watch 없이 Claude 세션이 이미 종료되었거나 사용자가 나중에 새 세션으로 재진입할 때만 사용하며 worker를 재호출하지 않는다. 정상 result envelope가 없으면 `recovered_*_unverified`, `resultEnvelopePresent=false`, `localVerificationComplete=false`로 남기며 작전 1 Sol review와 repair 자격을 주지 않는다. 정상 envelope가 있는 recover만 기존 postflight와 review 자격을 유지한다.
 - **watched critical-file 사후 무결성 검사**: 전역 `.gitconfig`·`CLAUDE.md`·`AGENTS.md`, 라우터 `operation-router.cmd`, `config/**/*.json`, `scripts/**/*.ps1`, `skills/**/SKILL.md`, 설치 operation 스킬의 추가·수정·삭제를 실행 전후 비교한다. 호환 상태명은 `repo_boundary_violation`이지만 OS sandbox가 아니며 비감시 파일 접근·읽기·생성·전송을 막지 못한다.
 - **deny 1차 차단 확장**: Grok 헤드리스 `--deny` 목록은 위험 명령을 1차 차단하지만 패턴 우회가 가능하고 Grok 워커에만 적용된다. watched-file 검사도 선택 파일의 사후 탐지일 뿐 이 한계를 없애지 않는다.
 - **정책 A/B/C**: operation-1/2/3 자연어 호출 허용 + soft confirmation policy(코드 강제 게이트 아님), 작전 1 Claude-only effort high, 작전 1 고위험 경고. secret 마스킹 강화(Authorization/AWS/고엔트로피, SHA·UUID 오탐 제외).
@@ -122,21 +133,22 @@ Claude-only resumeCommand 라우팅: 작전 1 → `/operation-1-claude <n>`, 작
 
 ```
 -Command run       -Operation N -IssueNumber X [-Kind ..] [-ClaudeOnly] [-FinishCurrent] [-UseGptReviewReserve]
+-Command watch     -Operation N -IssueNumber X -Follow    # 현재 executionId·generation을 terminal까지 관찰
 -Command review    -Operation 1 -IssueNumber X    # run 영수증 자동 복원 (StartHead 수동 입력 없음), GPT Sol 실제 검수, 엄격 JSON
 -Command repair    -Operation 1 -IssueNumber X    # review 영수증에서 findings/postReviewHead/원래 worker 자동 복원, 최대 1회
 -Command postflight -Operation N -IssueNumber X    # --claude-only 지시 후 세션이 구현을 마치면 호출
--Command recover    -Operation N -IssueNumber X    # 중단된 최신 실행 세대 확인·postflight 재개, worker 재호출 없음
+-Command recover    -Operation N -IssueNumber X    # 새 세션 재진입 전용, worker 재호출 없음
 ```
 
 작전 1 `run` 완료 시 실행 영수증이 `state/pending/op1-issue<n>-run.json`에 자동 저장되고, review가 REPAIR_REQUIRED면 findings가 `state/pending/op1-issue<n>-review.json`에 자동 저장된다. repair에는 두 영수증이 모두 필수다. `-PostReviewHead`/`-FindingsFile`/`-Target`을 명시해도 override가 되지 않고 receipt assertion으로만 검사된다.
 
 `--claude-only`로 `run`을 부르면 워커를 호출하지 않고 `claude_execute` 지시(요구 모델·orderPath·postflight 명령)를 반환한다. 현재 세션이 요구 모델이면 그 주문서를 직접 수행한 뒤 `postflight` 하위 명령으로 완료 검증을 받는다. 재귀 handoff는 없다.
 
-### 장시간 실행과 recover
+### 장시간 실행과 재진입 recover
 
-예를 들어 `/operation-2 9`로 이슈 9를 시작한 뒤 Claude 세션이나 전경 shell 호출이 끊겼다면 `/operation recover 2 9`를 실행한다. 활성 프로세스면 `worker_running`과 기존 `executionId`·`logPath`를 반환하고 postflight를 실행하지 않는다. 정상 result envelope가 있으면 정상 postflight를 이어간다. result 없이 커밋·push만 남았으면 `recovered_commit_unverified` 또는 CI별 `recovered_ci_*_unverified`로 판정하며 자동 PASS나 작전 1 review 자격을 만들지 않는다. recover는 Grok/GPT 구현 worker를 다시 호출하지 않는다.
+작전 1/2의 정상 경로는 `run -Detach` 직후 `watch -Follow`를 실행해 `operation_terminal`과 `nextAction`까지 같은 세션에서 기다리는 것이다. watch가 살아 있는 동안 recover를 수동 호출하지 않는다. Claude 세션이 이미 종료되었거나 사용자가 나중에 새 세션으로 재진입했고 watch가 없다면 `/operation recover 2 9`로 최신 실행을 복구한다. 활성 프로세스면 `worker_running`과 기존 `executionId`·`logPath`를 반환하고 postflight를 실행하지 않는다. 정상 result envelope가 있으면 정상 postflight를 이어간다. result 없이 커밋·push만 남았으면 `recovered_commit_unverified` 또는 CI별 `recovered_ci_*_unverified`로 판정하며 자동 PASS나 작전 1 review 자격을 만들지 않는다. recover는 Grok/GPT 구현 worker를 다시 호출하지 않는다.
 
-동일 저장소·작전·이슈의 활성 상태(`worker_starting`, `worker_running`, `worker_exited_postflight_pending`, `interrupted_postflight_pending`)에서 `run`을 다시 호출하면 `execution_already_active`와 recover 명령만 반환한다. PID와 프로세스 시작시각을 함께 비교하고 result 부재와 heartbeat 정체까지 확인하기 전에는 stale로 간주하지 않는다.
+동일 저장소·작전·이슈의 활성 상태(`worker_starting`, `worker_running`, `worker_exited_postflight_pending`, `interrupted_postflight_pending`)에서 `run`을 다시 호출하면 `execution_already_active`와 기존 실행의 `watchCommand`를 반환한다. 이때 새 `run`을 시작하지 않고 같은 `executionId`·`generation`의 watch만 다시 실행한다. PID와 프로세스 시작시각을 함께 비교하고 result 부재와 heartbeat 정체까지 확인하기 전에는 stale로 간주하지 않는다.
 
 기본 검증 계층은 worker가 targeted test·관련 정적 검사/lint·typecheck·핵심 시뮬레이션·커밋 전 최소 회귀를 수행하고, 전체 장시간 suite·멀티브라우저 E2E·dist·release asset·Pages는 CI로 확인하는 방식이다. 주문서가 전체 로컬 검증을 명시하면 이를 임의로 삭제하지 않는다.
 
