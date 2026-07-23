@@ -2349,6 +2349,69 @@ Describe 'v2.4.5-3. execution artifact sanitization과 retention' {
     }
 }
 
+Describe 'v2.4.7-0. v2.4.6 runtime hotfix 회귀 고정' {
+    It 'atomic replace 중 receipt null은 result 변환에 전달하지 않고 다음 poll에서 정상 완료한다' {
+        $repo=New-FakeRepo -WithRemote
+        $prompt=Join-Path $TestWorkRoot 'hotfix-null-poll.txt'
+        Set-Content -LiteralPath $prompt -Value 'fixture' -Encoding UTF8
+        $snapshot=Get-StartSnapshot -RepoPath $repo
+        $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
+        $localConfig=Get-Config
+        $localConfig.execution.foregroundWaitSeconds=2
+        $localConfig.execution.pollIntervalMilliseconds=100
+        $originalGet=${function:Get-ExecutionReceipt}
+        $originalStart=${function:Start-ExecutionWorkerHost}
+        $script:v247PollCalls=0
+        $script:v247PollReceipt=$null
+        try {
+            Set-Item function:Get-ExecutionReceipt -Value {
+                param([int]$Operation,[int]$IssueNumber,[string]$RepoPath)
+                $script:v247PollCalls++
+                if($script:v247PollCalls -eq 2){return $null}
+                if($null -ne $script:v247PollReceipt){return $script:v247PollReceipt}
+                return (& $originalGet -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath)
+            }
+            Set-Item function:Start-ExecutionWorkerHost -Value {
+                param($Receipt,$Route,$Config,[string]$RepoPath)
+                $script:v247PollReceipt=$Receipt
+                Write-AtomicJsonFile -Path ([string]$Receipt.resultPath) -Object ([pscustomobject]@{
+                    schemaVersion=1;executionId=$Receipt.executionId;generation=$Receipt.generation;worker='grok'
+                    exitCode=0;success=$true;quotaExhausted=$false;errorClass='none';workerStopReason='EndTurn'
+                    localVerificationComplete=$false;stdoutPath=$Receipt.rawStdoutPath;stderrPath=$Receipt.rawStderrPath
+                })
+                return [pscustomobject]@{Id=1234}
+            }
+            $result=Invoke-PersistentRouteWorker -Route $route -RepoPath $repo -PromptPath $prompt -Config $localConfig `
+                -OperationNumber 1 -IssueNumber 440 -Kind logic -Snapshot $snapshot -RunId 'hotfix-null-poll'
+            $result.Success | Should Be $true
+            $script:v247PollCalls | Should BeGreaterThan 2
+        } finally {
+            Set-Item function:Get-ExecutionReceipt -Value $originalGet
+            Set-Item function:Start-ExecutionWorkerHost -Value $originalStart
+            Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'repair CLI 선택 인수 생략은 receipt 복원을 유지하고 repair runner를 정확히 1회 호출한다' {
+        $source=Get-Content -LiteralPath (Join-Path $ScriptsDir 'run-operation.ps1') -Raw -Encoding UTF8
+        $source | Should Match 'if \(\$PSBoundParameters\.ContainsKey\(''PostReviewHead''\)\) \{ \$repairArgs\.PostReviewHead'
+        $source | Should Match 'if \(\$PSBoundParameters\.ContainsKey\(''FindingsFile''\)\) \{ \$repairArgs\.FindingsFile'
+        $source | Should Match 'if \(\$PSBoundParameters\.ContainsKey\(''Target''\)\) \{ \$repairArgs\.Target'
+        $repo=New-FakeRepo -WithRemote
+        $findings=@([pscustomobject]@{severity='high';file='a.txt';issue='fixture';requiredFix='fix it'})
+        try {
+            Save-TestRepairReceipts -Repo $repo -IssueNum 441 -Findings $findings
+            $script:v247RepairCalls=0
+            $runner={param($r,$path,$promptPath)$script:v247RepairCalls++;[pscustomobject]@{ExitCode=1;Success=$false;QuotaExhausted=$false;ErrorClass='provider_failure';Output='fixture provider failure'}}
+            $result=Invoke-RepairCommand -OperationNumber 1 -IssueNumber 441 -RepoPath $repo -IssueFetcher $issue -RepairRunner $runner -CiProbe $ciNone
+            $result.status | Should Be 'repair_provider_failure'
+            $result.status | Should Not Be 'repair_argument_receipt_mismatch'
+            $result.repairAttempted | Should Be $true
+            $script:v247RepairCalls | Should Be 1
+        } finally { Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 Describe 'v2.4.6-2. retention의 namespace 전체 최신 execution receipt 참조 보호' {
     It '여러 이슈의 latest와 active generation은 count를 초과해도 모두 보호한다' {
         $repo=New-FakeRepo
