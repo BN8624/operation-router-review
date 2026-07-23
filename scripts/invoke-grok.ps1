@@ -38,13 +38,16 @@ function ConvertFrom-GrokHeadlessJson {
 }
 
 # grok 워커 결과 분류 (순수 함수, 테스트 가능). exit code 0을 성공으로 간주하지 않는다.
-# 우선순위: (1) 텍스트가 명시적 weekly/transient/provider/quota_unknown이면 그대로 (기존 v2.3 분류 보존)
+# F1: 텍스트 오류 분류는 "실패 여부"가 아니라 "어떤 실패인가"만 답한다. 실패 여부는 JSON 파싱·
+# stopReason·종료코드로 판정하고, 이 신호가 모두 정상이면 성공이다. 정상 종료의 어시스턴트 완료
+# 보고 텍스트에 우연히 든 'permission'/'billing'/'429' 같은 단어로 성공을 실패로 뒤집지 않는다.
+# 우선순위: (0) JSON 파싱 실패·stopReason 오류계열·exit≠0 중 하나라도 있으면 실패 경로, 아니면 성공.
+#           (1) 실패 경로에서 텍스트가 명시적 weekly/transient/provider/quota_unknown이면 그대로 (v2.3 분류 보존)
 #           (2) JSON 파싱 실패 → worker_protocol_error
 #           (3) stopReason Cancelled/Aborted → worker_cancelled
 #           (4) stopReason MaxTurns/turn limit → worker_turn_limit
 #           (5) stopReason Error/Refusal → worker_error(일반 실패)
-#           (6) exit code != 0 → worker_failed
-#           (7) 그 외(정상 종료) → 성공
+#           (6) 그 외 실패(exit≠0) → worker_failed
 function Get-GrokResultClassification {
     param([Parameter(Mandatory)][int]$ExitCode, [Parameter(Mandatory)][AllowEmptyString()][string]$Output)
     $textClass = Get-WorkerErrorClass -Text $Output
@@ -52,8 +55,15 @@ function Get-GrokResultClassification {
     $stopReason = $null
     if ($parsed.parsed) { $stopReason = [string]$parsed.stopReason }
 
+    # 실행이 실제로 실패를 가리키는 신호. 하나도 없으면 정상 종료이며 텍스트 오류 스캔을 적용하지 않는다.
+    $stopReasonFailed = ($null -ne $stopReason -and $stopReason -match '(?i)cancel|abort|max.?turns|turn.?limit|error|refus')
+    $runFailed = ((-not $parsed.parsed) -or $stopReasonFailed -or ($ExitCode -ne 0))
+
     $success = $false
-    if ($textClass -in @('weekly_exhausted','transient_rate_limit','provider_failure','quota_unknown')) {
+    if (-not $runFailed) {
+        $errClass = 'none'; $success = $true
+    }
+    elseif ($textClass -in @('weekly_exhausted','transient_rate_limit','provider_failure','quota_unknown')) {
         $errClass = $textClass
     }
     elseif (-not $parsed.parsed) {
@@ -68,11 +78,8 @@ function Get-GrokResultClassification {
     elseif ($stopReason -match '(?i)error|refus') {
         $errClass = 'worker_error'
     }
-    elseif ($ExitCode -ne 0) {
-        $errClass = 'worker_failed'
-    }
     else {
-        $errClass = 'none'; $success = $true
+        $errClass = 'worker_failed'
     }
 
     return [pscustomobject]@{
