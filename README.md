@@ -344,7 +344,7 @@ CI 기대 여부는 mutable worktree가 아니라 preflight에서 고정한 base
 
 기본 검증은 source tree만 대상으로 하며 사용자 홈의 상태·로그·설치 Skill을 사용하지 않는다.
 
-v3 검증은 Pester mock/fake Git·bare remote/mock gh·격리 OS process와 임시 사용자 홈 installed fixture만 사용한다. 유료 Grok·GPT·Claude live 호출은 실행하지 않는다. 과거 live probe 기록은 이번 버전의 PASS 근거로 승격하지 않는다.
+v3 검증은 Pester mock/fake Git·bare remote/mock gh·격리 OS process와 임시 사용자 홈 installed fixture만 사용한다. 저장소 Actions는 Pester 3.4.0을 고정하고 임시 CLI·합성 모델 cache로 `doctor`의 설치 탐지를 재현하므로 호스팅 runner의 우연한 도구 설치 상태나 secret에 의존하지 않는다. 유료 Grok·GPT·Claude live 호출은 실행하지 않는다. 과거 live probe 기록은 이번 버전의 PASS 근거로 승격하지 않는다.
 
 ## 롤백 (1인 사용)
 

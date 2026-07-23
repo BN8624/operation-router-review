@@ -59,6 +59,16 @@ jobs:
             ConvertFrom-Json |
             Out-Null
 
+      - name: Create isolated doctor fixtures
+        shell: powershell
+        run: |
+          $binRoot = (Resolve-Path .\tests\fixtures\ci-bin).Path
+          $modelSource = (Resolve-Path .\tests\fixtures\models-cache.ci.json).Path
+          $modelRoot = Join-Path $HOME '.codex'
+          New-Item -ItemType Directory -Path $modelRoot -Force | Out-Null
+          Copy-Item -LiteralPath $modelSource -Destination (Join-Path $modelRoot 'models_cache.json') -Force
+          $binRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Run source-tree tests
         shell: powershell
         run: |

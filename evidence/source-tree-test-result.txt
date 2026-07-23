@@ -31,7 +31,7 @@ Final focused integrity checks:
   v2.4.7 cross-document workflow group: 1 passed, 0 failed
   PowerShell parser: 15 files passed
   config JSON parse: passed
-  manifest SHA-256: 35 entries passed
+  manifest SHA-256: 38 entries passed
   git diff --check: passed
 
 Isolation:

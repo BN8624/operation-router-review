@@ -4303,8 +4303,19 @@ Describe 'v3.0.0 외부 비판적 검토 결함 회귀' {
         $raw|Should Match 'Language\.Parser'
         $raw|Should Match 'config\\config\.json'
         $raw|Should Match 'manifest-sha256\.txt'
+        $raw|Should Match 'Create isolated doctor fixtures'
+        $raw|Should Match 'tests\\fixtures\\ci-bin'
+        $raw|Should Match 'tests\\fixtures\\models-cache\.ci\.json'
         $raw|Should Not Match 'pull_request_target'
         $raw|Should Not Match '\$\{\{\s*secrets\.'
+        (Test-Path -LiteralPath (Join-Path $RouterRoot 'tests\fixtures\ci-bin\codex.ps1'))|Should Be $true
+        (Test-Path -LiteralPath (Join-Path $RouterRoot 'tests\fixtures\ci-bin\grok.ps1'))|Should Be $true
+        $models=Get-Content -LiteralPath (Join-Path $RouterRoot 'tests\fixtures\models-cache.ci.json') -Raw -Encoding UTF8|ConvertFrom-Json
+        $slugs=@($models.models|ForEach-Object{$_.slug})
+        $slugs.Count|Should Be 3
+        $slugs[0]|Should Be 'gpt-5.6-sol'
+        $slugs[1]|Should Be 'gpt-5.6-terra'
+        $slugs[2]|Should Be 'gpt-5.6-luna'
     }
 }
 

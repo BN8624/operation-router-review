@@ -9,7 +9,7 @@
 - PR check provenance: commit SHA의 모든 check/status를 인정하지 않고 실제 PR 번호와 head SHA에 연결된 `pull_request` check suite와 Actions run만 사용한다. push-only 결과는 제외하고 context별 최신 rerun을 집계하며 PR event 연관성을 증명할 수 없는 legacy status는 fail-closed 한다.
 - finalize: `merge_ready` 판정에서 Draft를 자동 해제하지 않는다. 원격 상태 변경 뒤 receipt 저장 실패가 생기던 복구 불가능 창을 없애고 Ready 전환과 병합을 사용자 동작으로 남겼다.
 - review: 40,000자 단일 truncation 대신 파일별 30,000자 청크를 모두 검토한다. 성공 또는 `INCOMPLETE` receipt에 changed/reviewed/truncated files와 coverage를 기록하며 누락·청크 실패는 PASS가 아니다.
-- CI: 저장소 자체에 Windows `pull_request`/main push Actions를 추가해 source-tree, installed fixture, PowerShell 구문, config JSON, manifest를 검증한다. `pull_request_target`과 secret은 사용하지 않는다.
+- CI: 저장소 자체에 Windows `pull_request`/main push Actions를 추가해 source-tree, installed fixture, PowerShell 구문, config JSON, manifest를 검증한다. Pester 3.4.0과 임시 doctor CLI·합성 model cache를 고정하며 `pull_request_target`과 secret은 사용하지 않는다.
 
 ## v3.0.0 (2026-07-23)
 
