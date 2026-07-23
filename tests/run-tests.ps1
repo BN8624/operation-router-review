@@ -31,7 +31,7 @@ if ([string]::IsNullOrWhiteSpace($LogRoot)) { $LogRoot = Join-Path $testWorkRoot
 $result = $null
 $fatal = $null
 try {
-    Import-Module Pester -MinimumVersion 3.4 -ErrorAction Stop
+    Import-Module Pester -RequiredVersion 3.4.0 -ErrorAction Stop
     $spec = @{
         Path = Join-Path $PSScriptRoot 'source-tree.Tests.ps1'
         Parameters = @{

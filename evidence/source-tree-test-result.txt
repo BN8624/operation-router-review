@@ -11,7 +11,7 @@ Final source-tree command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 Final result:
   exit code: 0
-  duration: 1046.24 seconds
+  duration: 1056 seconds
   339 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   installedIntegrationTests: not-requested
 
@@ -19,7 +19,7 @@ Installed fixture command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixture.ps1
 Final result:
   exit code: 0
-  duration: 1048.47 seconds
+  duration: 1051.51 seconds
   source tree: 339 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   installedIntegrationTests: executed
   installedIntegrationFailures: 0
