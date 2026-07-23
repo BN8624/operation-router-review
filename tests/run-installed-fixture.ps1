@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $routerRoot = Split-Path -Parent $PSScriptRoot
-$fixtureHome = Join-Path ([System.IO.Path]::GetTempPath()) ('operation-router-installed-v244-' + [guid]::NewGuid().ToString('N'))
+$fixtureHome = Join-Path ([System.IO.Path]::GetTempPath()) ('operation-router-installed-v247-' + [guid]::NewGuid().ToString('N'))
 $installedRoot = Join-Path $fixtureHome '.claude\skills'
 $originalProfile = $env:USERPROFILE
 $originalModuleCache = [Environment]::GetEnvironmentVariable('PSModuleAnalysisCachePath','Process')
@@ -33,6 +33,6 @@ try {
     $full = [System.IO.Path]::GetFullPath($fixtureHome)
     $tempPrefix = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\','/') + [System.IO.Path]::DirectorySeparatorChar
     if (-not $full.StartsWith($tempPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
-        (Split-Path -Leaf $full) -notmatch '^operation-router-installed-v244-[a-f0-9]{32}$') { throw "refusing unsafe installed fixture cleanup: $full" }
+        (Split-Path -Leaf $full) -notmatch '^operation-router-installed-v247-[a-f0-9]{32}$') { throw "refusing unsafe installed fixture cleanup: $full" }
     if (Test-Path -LiteralPath $full) { Remove-Item -LiteralPath $full -Recurse -Force }
 }

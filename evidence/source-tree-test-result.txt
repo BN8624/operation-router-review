@@ -1,22 +1,22 @@
-operation-router v2.4.6 source-tree test result
-Date: 2026-07-22 (KST)
+operation-router v2.4.7 verification result
+Date: 2026-07-23 (KST)
 Runner: Windows PowerShell 5.1, Pester 3.4 (-Strict)
 
-Final full run:
-  Command: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
-  Passed: 226  Failed: 0  Skipped: 0  Pending: 0  Inconclusive: 0
-  sourceTreeTests: executed
-  installedIntegrationTests: executed
-  installedIntegrationFailures: 0
-  installed fixture: generated user home, 6/6 Skill files byte-identical, removed after the run
-  statePath: isolated-temp-state
-  logRoot: isolated-temp-logs
+Source-tree command:
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
+Expected/final: Passed 245, Failed 0, Skipped 0, Pending 0, Inconclusive 0
 
-Focused v2.4.6 receipt invariant regressions added: 7
-  repair run/review eligibility and manual argument assertions: 4
-  namespace-wide execution receipt retention protection: 3
+Installed fixture command:
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixture.ps1
+Expected/final: source-tree 245/245, installed Skill 6/6 byte-identical,
+  installedIntegrationFailures 0, isolated USERPROFILE removed after run
 
-The full suite uses Pester mocks, fake Git repositories, and isolated OS
-processes. It covers receipt generation, review/repair fail-closed, Plan B,
-quota/transient/provider errors, source-tree, manifest, log retention, UTF-8,
-and the v2.4.6 receipt invariant regressions. Paid Grok/GPT/Claude live calls: 0.
+Focused additions: 19
+  v2.4.6 runtime hotfix regressions: 2
+  v2.4.7 progress journal/parser: 6
+  v2.4.7 detach/watch/nextAction/stable-read: 8
+  v2.4.7 Skill auto-follow: 3
+
+Additional existing execution/recover regression run: 9/9 PASS.
+Test categories: Pester mocks, fake Git repositories/remotes, ordinary OS process
+fixture, isolated installed fixture. Paid Grok/GPT/Claude live calls: 0.

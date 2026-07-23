@@ -1,4 +1,30 @@
-# operation-router (v2.4.6)
+# operation-router (v2.4.7)
+
+## v2.4.7 observable execution
+
+작업자 실행을 분리하고 안전한 진행 이벤트를 따라갈 수 있다.
+
+```powershell
+operation-router.cmd -Command run -Operation 1 -IssueNumber 15 -Detach
+operation-router.cmd -Command watch -Operation 1 -IssueNumber 15 -Follow
+```
+
+- `run -Detach`는 실행 receipt와 `progress.jsonl`을 먼저 만든 뒤 worker-host를 정확히 한 번 시작하고 `worker_starting` 또는 `execution_already_active`와 `watchCommand`를 즉시 반환한다.
+- `watch -Follow`는 기존 `executionId`와 `generation`에 고정되어 진행 이벤트를 출력한다. watch 종료·재접속은 worker를 종료하거나 재호출하거나 새 generation을 만들지 않는다.
+- 진행 이벤트는 process 시작, CLI 출력 활동, command/file/Git 상태, test, commit/push, heartbeat, worker 종료, sanitization, postflight, terminal을 나타낸다. 이는 관찰 가능한 사실이며 모델 reasoning이나 chain-of-thought가 아니다.
+- GPT `--json` 출력은 command/file/짧은 agent update만 별도 progress parser가 해석한다. malformed·unknown·reasoning 이벤트는 worker 성공 판정과 무관하게 무시한다.
+- Grok streaming 지원이 확인되지 않은 환경에서는 raw 출력 크기, Git/worktree/file/commit/push 변화와 heartbeat로 진행을 표시한다.
+- 각 summary는 `Protect-SecretText` 적용 후 개행 정규화, 최대 500자로 제한된다. prompt 원문, 환경 전체, raw stdout 전체는 progress에 기록하지 않는다.
+- active 실행 중에는 `prompt.txt`와 raw stdout/stderr가 일시적으로 존재한다. terminal sanitization 후 prompt/raw는 제거되고 마스킹된 로그만 유지된다.
+- terminal `nextAction`은 Operation 1 Grok=`review`, Operation 1 GPT=`opus_end_review`, Operation 2=`sonnet_end_review`, Operation 3=`report`, unverified=`manual_verification`, 실패=`stop`이다.
+
+```text
+[ORH][14:02:11] START     grok-4.5 / high process started
+[ORH][14:03:42] COMMAND   command completed exit=0
+[ORH][14:05:34] COMMIT    4ab12cd
+[ORH][14:06:00] RUNNING   running 229s, output 18240 bytes, worktree clean, HEAD changed
+[ORH_TERMINAL] {"schemaVersion":1,"operation":1,"issueNumber":15,"status":"completed","nextAction":"review"}
+```
 
 Claude Code 전역 작전 라우터. GitHub 이슈를 작전 1/2/3으로 Grok CLI / Codex CLI(GPT) / Claude 중 하나에게 라우팅한다. 모델 ID·CLI 옵션·Skill frontmatter 지원은 설치본에서 실측했다. 작전 1/2/3의 실전 E2E와 실패·격리 경로의 mock 검증은 [VERIFICATION_MATRIX.md](VERIFICATION_MATRIX.md)에, 방어층은 [SECURITY.md](SECURITY.md)에, 변경 이력은 [CHANGELOG.md](CHANGELOG.md)에 있다.
 

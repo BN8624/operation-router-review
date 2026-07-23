@@ -2,6 +2,15 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
+## v2.4.7 (2026-07-23)
+
+- Added `run -Detach` and generation-pinned `watch -Follow`; detaching or reattaching never starts a duplicate worker.
+- Added append-only sanitized `progress.jsonl` journals, receipt progress metadata, heartbeat/Git/output events, and a pure Codex JSONL observable-event parser.
+- Added bounded stable receipt reads shared by foreground polling, worker-host, recover, and watch.
+- Added terminal `nextAction` handoff and Operation 1/2 Skill auto-follow into Sol/Opus/Sonnet/manual end-review paths.
+- Preserved the v2.4.6 receipt-null polling and repair optional-argument hotfixes with two focused regressions.
+- Added 19 tests for 245 total. Paid Grok/GPT/Claude live calls: 0.
+
 ## v2.4.6 (2026-07-22)
 
 - review와 repair가 같은 verified run provenance helper를 사용한다. repair core는 정상 Grok run receipt와 유효한 REPAIR_REQUIRED review receipt를 다시 검증하며, unverified recover·legacy provenance 누락·receipt 부재 상태는 어떤 수동 인수 조합으로도 worker를 호출하지 않는다.
