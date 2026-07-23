@@ -366,6 +366,65 @@ function ConvertFrom-WorkerCompletionReport {
     }
 }
 
+function ConvertFrom-ClaudeCompletionReport {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Json,
+        [Parameter(Mandatory)][int]$ExpectedOperation,
+        [Parameter(Mandatory)][int]$ExpectedIssueNumber,
+        [Parameter(Mandatory)][string]$ExpectedHead,
+        [Parameter(Mandatory)][string]$ExpectedWorkBranch
+    )
+    $invalid = {
+        param([string]$Reason)
+        [pscustomobject]@{
+            valid=$false;reason=$Reason;localVerificationComplete=$false
+            verification=$null;remainingProblems=@();head=$null;workBranch=$null
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($Json)) { return (& $invalid 'claude_completion_report_missing') }
+    try { $report = $Json | ConvertFrom-Json -ErrorAction Stop }
+    catch { return (& $invalid 'claude_completion_report_invalid_json') }
+    if ($null -eq $report) { return (& $invalid 'claude_completion_report_null') }
+    $props=@($report.PSObject.Properties.Name)
+    $allowed=@('schemaVersion','operation','issueNumber','head','workBranch','localVerificationComplete','verification','remainingProblems')
+    if ($props.Count -ne $allowed.Count -or @($props | Where-Object { $_ -notin $allowed }).Count -gt 0) {
+        return (& $invalid 'claude_completion_report_schema_mismatch')
+    }
+    if ($report.schemaVersion -isnot [int] -or [int]$report.schemaVersion -ne 1 -or
+        $report.operation -isnot [int] -or [int]$report.operation -ne $ExpectedOperation -or
+        $report.issueNumber -isnot [int] -or [int]$report.issueNumber -ne $ExpectedIssueNumber -or
+        $report.head -isnot [string] -or $report.workBranch -isnot [string] -or
+        $report.localVerificationComplete -isnot [bool] -or $report.verification -isnot [string] -or
+        $report.remainingProblems -isnot [System.Array]) {
+        return (& $invalid 'claude_completion_report_schema_mismatch')
+    }
+    if ([string]$report.head -cne $ExpectedHead) { return (& $invalid 'claude_completion_report_head_mismatch') }
+    if ([string]$report.workBranch -cne $ExpectedWorkBranch) { return (& $invalid 'claude_completion_report_branch_mismatch') }
+    if ([string]::IsNullOrWhiteSpace([string]$report.verification) -or
+        ([string]$report.verification).Trim().Equals(
+            'current Claude session completed implementation',
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        return (& $invalid 'claude_completion_report_verification_invalid')
+    }
+    $remaining=@()
+    foreach ($problem in @($report.remainingProblems)) {
+        if ($problem -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$problem)) {
+            return (& $invalid 'claude_completion_report_schema_mismatch')
+        }
+        $safe=Protect-SecretText -Text ([string]$problem)
+        if ($safe.Length -gt 300) { $safe=$safe.Substring(0,300)+'...[truncated]' }
+        $remaining+=$safe
+        if ($remaining.Count -gt 20) { return (& $invalid 'claude_completion_report_too_many_problems') }
+    }
+    $verification=Protect-SecretText -Text ([string]$report.verification)
+    if ($verification.Length -gt 2000) { $verification=$verification.Substring(0,2000)+'...[truncated]' }
+    return [pscustomobject]@{
+        valid=$true;reason=$null;localVerificationComplete=[bool]$report.localVerificationComplete
+        verification=$verification;remainingProblems=@($remaining)
+        head=[string]$report.head;workBranch=[string]$report.workBranch
+    }
+}
+
 function Test-WorkerResultSuccess {
     param([Parameter(Mandatory)]$Result)
     if ($null -eq $Result) { return $false }
@@ -514,6 +573,38 @@ function Get-GitDiff {
     $t = $r.Text
     if ($t.Length -gt $MaxChars) { return $t.Substring(0, $MaxChars) + "`n...[diff truncated at $MaxChars chars]..." }
     return $t
+}
+
+function Get-GitReviewDiffChunks {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$SinceHead,
+        [int]$MaxChunkChars = 30000
+    )
+    if ($MaxChunkChars -lt 1000) { throw 'MaxChunkChars must be at least 1000.' }
+    $changed=@(Get-GitChangedFiles -Path $Path -SinceHead $SinceHead)
+    $chunks=@()
+    $truncated=@()
+    foreach ($file in $changed) {
+        $r=Invoke-GitRaw -Path $Path -GitArgs @('diff','--binary','--full-index',"$SinceHead..HEAD",'--',[string]$file)
+        if ($r.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace([string]$r.Text)) {
+            $truncated+=[string]$file
+            continue
+        }
+        $text=[string]$r.Text
+        $count=[Math]::Max(1,[int][Math]::Ceiling($text.Length/[double]$MaxChunkChars))
+        for ($index=0;$index -lt $count;$index++) {
+            $offset=$index*$MaxChunkChars
+            $length=[Math]::Min($MaxChunkChars,$text.Length-$offset)
+            $chunks += [pscustomobject]@{
+                file=[string]$file;chunkIndex=$index+1;chunkCount=$count
+                text=$text.Substring($offset,$length)
+            }
+        }
+    }
+    return [pscustomobject]@{
+        changedFiles=@($changed);chunks=@($chunks);truncatedFiles=@($truncated)
+    }
 }
 
 # ---------- 검수 JSON 엄격 파싱 (v2.2: valid 플래그 반환, 모든 위반은 fail-closed) ----------
@@ -1053,6 +1144,37 @@ function Get-PendingOrderPath {
     $key = Get-PendingKey -Operation $Operation -IssueNumber $IssueNumber
     return (Join-Path (Get-PendingNamespacePath -RepoPath $RepoPath) "order-$key.txt")
 }
+function Get-ClaudeCompletionReportPath {
+    param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
+    $key = Get-PendingKey -Operation $Operation -IssueNumber $IssueNumber
+    return (Join-Path (Get-PendingNamespacePath -RepoPath $RepoPath) "claude-report-$key.json")
+}
+function Read-ClaudeCompletionReport {
+    param(
+        [Parameter(Mandatory)][int]$Operation,
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)][string]$ExpectedHead,
+        [Parameter(Mandatory)][string]$ExpectedWorkBranch,
+        [string]$ReportPath
+    )
+    $expectedPath=Get-ClaudeCompletionReportPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $expectedFull=[System.IO.Path]::GetFullPath($expectedPath)
+    $selected=if ([string]::IsNullOrWhiteSpace($ReportPath)) { $expectedFull } else { [System.IO.Path]::GetFullPath($ReportPath) }
+    Assert-PathWithinRoot -Path $selected -Root $Script:PendingDir | Out-Null
+    if (-not $selected.Equals($expectedFull,[System.StringComparison]::OrdinalIgnoreCase)) {
+        return (ConvertFrom-ClaudeCompletionReport -Json '' -ExpectedOperation $Operation -ExpectedIssueNumber $IssueNumber `
+            -ExpectedHead $ExpectedHead -ExpectedWorkBranch $ExpectedWorkBranch)
+    }
+    if (-not (Test-Path -LiteralPath $selected -PathType Leaf)) {
+        return (ConvertFrom-ClaudeCompletionReport -Json '' -ExpectedOperation $Operation -ExpectedIssueNumber $IssueNumber `
+            -ExpectedHead $ExpectedHead -ExpectedWorkBranch $ExpectedWorkBranch)
+    }
+    try { $json=Get-Content -LiteralPath $selected -Raw -Encoding UTF8 -ErrorAction Stop }
+    catch { $json='' }
+    return (ConvertFrom-ClaudeCompletionReport -Json $json -ExpectedOperation $Operation -ExpectedIssueNumber $IssueNumber `
+        -ExpectedHead $ExpectedHead -ExpectedWorkBranch $ExpectedWorkBranch)
+}
 function Save-PendingSnapshot {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)]$Snapshot,
           [Parameter(Mandatory)][string]$RepoPath, [string]$Kind = 'logic', [AllowNull()]$Workflow)
@@ -1233,7 +1355,8 @@ function Save-ReviewReceipt {
         [Parameter(Mandatory)][string]$RepoPath,
         [Parameter(Mandatory)][string]$Verdict, [Parameter(Mandatory)]$Findings,
         [Parameter(Mandatory)][string]$PostReviewHead, [Parameter(Mandatory)][string]$OriginalWorker,
-        [AllowNull()]$Workflow
+        [AllowNull()]$Workflow, $ChangedFiles=@(), $ReviewedFiles=@(), $TruncatedFiles=@(),
+        [string]$ReviewStatus='reviewed', [System.Nullable[bool]]$CoverageCompleteOverride=$null
     )
     Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
     $id = Get-RepoIdentity -RepoPath $RepoPath
@@ -1252,6 +1375,14 @@ function Save-ReviewReceipt {
         findings       = @($Findings)
         postReviewHead = $PostReviewHead
         originalWorker = $OriginalWorker
+        changedFiles    = @($ChangedFiles)
+        reviewedFiles   = @($ReviewedFiles)
+        truncatedFiles  = @($TruncatedFiles)
+        coverageComplete = if($null -ne $CoverageCompleteOverride){[bool]$CoverageCompleteOverride}else{
+            (@($TruncatedFiles).Count -eq 0 -and
+             @($ChangedFiles | Where-Object { @($ReviewedFiles) -notcontains $_ }).Count -eq 0)
+        }
+        reviewStatus    = $ReviewStatus
         createdAt      = (Get-Date).ToUniversalTime().ToString('o')
     }
     if ($null -ne $Workflow) { Add-Member -InputObject $payload -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $Workflow) -Force }

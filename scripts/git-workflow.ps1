@@ -91,6 +91,34 @@ function Get-GitRemoteBranchHead {
     return $first.ToLowerInvariant()
 }
 
+function Get-GitWorkflowSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)][string]$Ref
+    )
+    $resolved=Get-GitRefHead -RepoPath $RepoPath -Ref $Ref
+    if (-not $resolved) {
+        return [pscustomobject]@{ok=$false;ref=$Ref;head=$null;exists=$false;files=@();digest=$null}
+    }
+    $tree=Invoke-GitRaw -Path $RepoPath -GitArgs @('ls-tree','-r','--full-tree',$resolved,'--','.github/workflows')
+    if ($tree.ExitCode -ne 0) {
+        return [pscustomobject]@{ok=$false;ref=$Ref;head=$resolved;exists=$false;files=@();digest=$null}
+    }
+    $entries=@()
+    foreach ($line in @($tree.Text -split "`r?`n")) {
+        if ($line -notmatch '^\d+\s+blob\s+([0-9a-fA-F]{40,64})\t(.+)$') { continue }
+        $path=[string]$Matches[2]
+        if ($path -notmatch '(?i)\.ya?ml$') { continue }
+        $entries += [pscustomobject]@{path=$path;blobSha=([string]$Matches[1]).ToLowerInvariant()}
+    }
+    $entries=@($entries | Sort-Object path)
+    $canonical=(@($entries | ForEach-Object { "$($_.path)`t$($_.blobSha)" }) -join "`n")
+    return [pscustomobject]@{
+        ok=$true;ref=$Ref;head=$resolved;exists=($entries.Count -gt 0)
+        files=@($entries);digest=(Get-Sha256Text -Text $canonical)
+    }
+}
+
 function Test-GitCommitAncestor {
     param([Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$Ancestor, [Parameter(Mandatory)][string]$Descendant)
     if ([string]::IsNullOrWhiteSpace($Ancestor) -or [string]::IsNullOrWhiteSpace($Descendant)) { return $false }
@@ -158,7 +186,7 @@ function ConvertTo-NormalizedPullRequest {
 }
 
 function Invoke-DefaultPullRequestProbe {
-    param([Parameter(Mandatory)][ValidateSet('lookup','create','ready')][string]$Action, [Parameter(Mandatory)]$Context)
+    param([Parameter(Mandatory)][ValidateSet('lookup','create')][string]$Action, [Parameter(Mandatory)]$Context)
     if ($null -eq (Get-Command gh -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ok=$false;error='pr_tool_unavailable';items=@()} }
     $ErrorActionPreference = 'Continue'
     Push-Location ([string]$Context.repoPath)
@@ -177,15 +205,12 @@ function Invoke-DefaultPullRequestProbe {
             if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ok=$false;error='pr_create_failed';items=@()} }
             return [pscustomobject]@{ok=$true;error=$null;url=(($out | Out-String).Trim());items=@()}
         }
-        $out = & gh pr ready ([string]$Context.prNumber) --repo ([string]$Context.ownerRepo) 2>&1
-        if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ok=$false;error='pr_ready_failed'} }
-        return [pscustomobject]@{ok=$true;error=$null}
     } finally { Pop-Location }
 }
 
 function Invoke-PullRequestProbe {
     param(
-        [Parameter(Mandatory)][ValidateSet('lookup','create','ready')][string]$Action,
+        [Parameter(Mandatory)][ValidateSet('lookup','create')][string]$Action,
         [Parameter(Mandatory)]$Context, [scriptblock]$PrProbe
     )
     try {
@@ -195,7 +220,7 @@ function Invoke-PullRequestProbe {
         $error = switch ($Action) {
             'lookup' { 'pr_lookup_failed' }
             'create' { 'pr_create_failed' }
-            default  { 'pr_ready_failed' }
+            default  { 'pr_create_failed' }
         }
         return [pscustomobject]@{ok=$false;error=$error;items=@()}
     }
@@ -408,12 +433,15 @@ function Initialize-GitWorkflowRun {
         }
     }
     $snap = Get-StartSnapshot -RepoPath $RepoPath
+    $baseWorkflow=Get-GitWorkflowSnapshot -RepoPath $RepoPath -Ref $localBase
+    if (-not $baseWorkflow.ok) { return [pscustomobject]@{ok=$false;reason='remote_sync_unavailable'} }
     $workflow = [pscustomobject]@{
         mode='pull-request';baseBranch=$base;baseHead=$localBase;baseLocalHead=$localBase;baseRemoteHead=$remoteBase
         workBranch=$work;remoteWorkBranch="origin/$work";workStartHead=$snap.startHead;workRemoteHeadAtStart=$remoteWork;finalHead=$null
         initialUpstream=(Get-GitUpstream -RepoPath $RepoPath);baseAdvanced=$false;pr=$priorPr
         createDraftPullRequest=[bool]$policy.createDraftPullRequest;autoMerge=$false
         requireCiWhenWorkflowPresent=[bool]$policy.requireCiWhenWorkflowPresent
+        baseWorkflow=$baseWorkflow;headWorkflow=$null
     }
     Add-Member -InputObject $snap -NotePropertyName workflow -NotePropertyValue $workflow -Force
     return [pscustomobject]@{ok=$true;snapshot=$snap;ownerRepo=$ownerRepo;workflow=$workflow;policy=$policy}
@@ -634,30 +662,124 @@ function Ensure-DraftPullRequest {
 }
 
 function Get-DefaultPullRequestChecks {
-    param([Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$OwnerRepo, [Parameter(Mandatory)][string]$HeadSha)
+    param(
+        [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)][string]$OwnerRepo,
+        [Parameter(Mandatory)][int]$PrNumber,
+        [Parameter(Mandatory)][string]$HeadSha
+    )
     if ($null -eq (Get-Command gh -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ok=$false;checks=@()} }
     $ErrorActionPreference='Continue'
     Push-Location $RepoPath
     try {
-        $checksOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' "repos/$OwnerRepo/commits/$HeadSha/check-runs?per_page=100" 2>&1
+        # GitHub Actions check suite의 pull_requests 목록만으로는 push 실행과 PR 실행을
+        # 구분할 수 없다. 먼저 실제 pull_request workflow run을 조회해 허용 suite를 고정한다.
+        $actionOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' `
+            "repos/$OwnerRepo/actions/runs?head_sha=$HeadSha&event=pull_request&per_page=100" 2>&1
         if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;checks=@()}}
-        $statusOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' "repos/$OwnerRepo/commits/$HeadSha/statuses?per_page=100" 2>&1
+        try{$actionPages=(($actionOut|Out-String)|ConvertFrom-Json)}catch{return [pscustomobject]@{ok=$false;checks=@()}}
+        $pullRequestActionSuites=@{}
+        foreach($page in @($actionPages)){
+            if($null -eq $page -or $page.PSObject.Properties.Name -notcontains 'workflow_runs'){continue}
+            foreach($run in @($page.workflow_runs)){
+                $runProps=@($run.PSObject.Properties.Name)
+                if(@('event','head_sha','pull_requests','check_suite_id')|Where-Object{$runProps -notcontains $_}){continue}
+                if([string]$run.event -cne 'pull_request' -or [string]$run.head_sha -cne $HeadSha){continue}
+                if($runProps -contains 'repository' -and $null -ne $run.repository -and
+                    $run.repository.PSObject.Properties.Name -contains 'full_name' -and
+                    [string]$run.repository.full_name -cne $OwnerRepo){continue}
+                $linked=$false
+                foreach($linkedPr in @($run.pull_requests)){
+                    if($null -ne $linkedPr -and $linkedPr.PSObject.Properties.Name -contains 'number' -and
+                        [int]$linkedPr.number -eq $PrNumber){$linked=$true;break}
+                }
+                if($linked){
+                    $pullRequestActionSuites[[string][int64]$run.check_suite_id]=[pscustomobject]@{
+                        runAttempt=if($runProps -contains 'run_attempt'){[int64]$run.run_attempt}else{0}
+                        updatedAt=if($runProps -contains 'updated_at'){[string]$run.updated_at}else{''}
+                    }
+                }
+            }
+        }
+        $suiteOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' "repos/$OwnerRepo/commits/$HeadSha/check-suites?per_page=100" 2>&1
         if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;checks=@()}}
-        try{$checkPages=(($checksOut|Out-String)|ConvertFrom-Json);$statusPages=(($statusOut|Out-String)|ConvertFrom-Json)}catch{return [pscustomobject]@{ok=$false;checks=@()}}
+        try{$suitePages=(($suiteOut|Out-String)|ConvertFrom-Json)}catch{return [pscustomobject]@{ok=$false;checks=@()}}
+        $suites=@()
+        foreach($page in @($suitePages)){
+            if($null -ne $page -and $page.PSObject.Properties.Name -contains 'check_suites'){
+                $suites+=@($page.check_suites)
+            }
+        }
         $all=@()
-        foreach($page in @($checkPages)){
-            if($null -ne $page -and $page.PSObject.Properties.Name -contains 'check_runs'){
-                foreach($c in @($page.check_runs)){$all+=[pscustomobject]@{status=[string]$c.status;conclusion=[string]$c.conclusion;kind='check'}}
+        foreach($suite in $suites){
+            $suiteProps=@($suite.PSObject.Properties.Name)
+            if($suiteProps -notcontains 'id' -or $suiteProps -notcontains 'head_sha' -or
+                [string]$suite.head_sha -cne $HeadSha -or $suiteProps -notcontains 'pull_requests'){
+                continue
+            }
+            $linked=$false
+            foreach($linkedPr in @($suite.pull_requests)){
+                if($null -ne $linkedPr -and $linkedPr.PSObject.Properties.Name -contains 'number' -and
+                    [int]$linkedPr.number -eq $PrNumber){
+                    if($linkedPr.PSObject.Properties.Name -contains 'head' -and $null -ne $linkedPr.head -and
+                        $linkedPr.head.PSObject.Properties.Name -contains 'sha' -and
+                        [string]$linkedPr.head.sha -cne $HeadSha){continue}
+                    $linked=$true
+                    break
+                }
+            }
+            if(-not $linked){continue}
+            $suiteApp='unknown'
+            if($suiteProps -contains 'app' -and $null -ne $suite.app -and
+                $suite.app.PSObject.Properties.Name -contains 'slug'){$suiteApp=[string]$suite.app.slug}
+            $actionRun=$null
+            if($suiteApp -eq 'github-actions'){
+                $suiteKey=[string][int64]$suite.id
+                if(-not $pullRequestActionSuites.ContainsKey($suiteKey)){continue}
+                $actionRun=$pullRequestActionSuites[$suiteKey]
+            }
+            $runOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' "repos/$OwnerRepo/check-suites/$([int64]$suite.id)/check-runs?per_page=100" 2>&1
+            if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;checks=@()}}
+            try{$runPages=(($runOut|Out-String)|ConvertFrom-Json)}catch{return [pscustomobject]@{ok=$false;checks=@()}}
+            foreach($page in @($runPages)){
+                if($null -eq $page -or $page.PSObject.Properties.Name -notcontains 'check_runs'){continue}
+                foreach($c in @($page.check_runs)){
+                    if($c.PSObject.Properties.Name -notcontains 'head_sha' -or [string]$c.head_sha -cne $HeadSha){continue}
+                    $app='unknown'
+                    if($c.PSObject.Properties.Name -contains 'app' -and $null -ne $c.app -and
+                        $c.app.PSObject.Properties.Name -contains 'slug'){$app=[string]$c.app.slug}
+                    $updated=if($c.PSObject.Properties.Name -contains 'completed_at' -and $c.completed_at){[string]$c.completed_at}elseif(
+                        $c.PSObject.Properties.Name -contains 'started_at' -and $c.started_at){[string]$c.started_at}else{''}
+                    $all+=[pscustomobject]@{
+                        context="$app/$([string]$c.name)";status=[string]$c.status;conclusion=[string]$c.conclusion
+                        event='pull_request';prNumber=$PrNumber;headSha=$HeadSha;updatedAt=$updated
+                        id=if($c.PSObject.Properties.Name -contains 'id'){[int64]$c.id}else{0}
+                        runAttempt=if($null -ne $actionRun){[int64]$actionRun.runAttempt}else{0}
+                        associationVerified=$true
+                    }
+                }
             }
         }
+        # Legacy commit status는 API 응답만으로 push와 pull_request 연관성을 구분할 수 없다.
+        # 존재 자체를 숨기지 않고 미확인 context로 전달해 상위 집계가 unavailable로 닫히게 한다.
+        $statusOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' `
+            "repos/$OwnerRepo/commits/$HeadSha/status?per_page=100" 2>&1
+        if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;checks=@()}}
+        try{$statusPages=(($statusOut|Out-String)|ConvertFrom-Json)}catch{return [pscustomobject]@{ok=$false;checks=@()}}
         foreach($page in @($statusPages)){
-            if($page -is [System.Array]){
-                foreach($s in @($page)){$all+=[pscustomobject]@{status=[string]$s.state;conclusion=[string]$s.state;kind='status'}}
-            } elseif($null -ne $page -and $page.PSObject.Properties.Name -contains 'state'){
-                $all+=[pscustomobject]@{status=[string]$page.state;conclusion=[string]$page.state;kind='status'}
+            if($null -eq $page -or $page.PSObject.Properties.Name -notcontains 'statuses'){continue}
+            foreach($statusContext in @($page.statuses)){
+                $all+=[pscustomobject]@{
+                    context=if($statusContext.PSObject.Properties.Name -contains 'context'){[string]$statusContext.context}else{'legacy-status'}
+                    status=if($statusContext.PSObject.Properties.Name -contains 'state'){[string]$statusContext.state}else{'unknown'}
+                    conclusion=$null;event='unknown';prNumber=$PrNumber;headSha=$HeadSha
+                    updatedAt=if($statusContext.PSObject.Properties.Name -contains 'updated_at'){[string]$statusContext.updated_at}else{''}
+                    id=if($statusContext.PSObject.Properties.Name -contains 'id'){[int64]$statusContext.id}else{0}
+                    runAttempt=0;associationVerified=$false
+                }
             }
         }
-        return [pscustomobject]@{ok=$true;checks=@($all)}
+        return [pscustomobject]@{ok=$true;associationVerified=$true;checks=@($all)}
     } finally { Pop-Location }
 }
 
@@ -665,23 +787,75 @@ function Get-PullRequestCiStatus {
     param(
         [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][int]$PrNumber,
         [Parameter(Mandatory)][string]$HeadSha, [scriptblock]$CheckLister,
-        $WorkflowPresent=$null,[bool]$RequireCiWhenWorkflowPresent=$true,
+        $BaseWorkflow=$null,$HeadWorkflow=$null,$WorkflowPresent=$null,
+        [bool]$RequireCiWhenWorkflowPresent=$true,
         [int]$PollIntervalSeconds=-1, [int]$MaxAttempts=-1
     )
     $cfg=Get-Config
     if($PollIntervalSeconds -lt 0){$PollIntervalSeconds=[int]$cfg.ciPolling.intervalSeconds}
     if($MaxAttempts -lt 1){$MaxAttempts=[int]$cfg.ciPolling.maxAttempts}
-    $wfPresent=if($WorkflowPresent -is [bool]){[bool]$WorkflowPresent}else{Test-CiWorkflowPresent -RepoPath $RepoPath}
+    $basePresent=$false;$headPresent=$false;$workflowEvidence=$false
+    if($null -ne $BaseWorkflow -or $null -ne $HeadWorkflow){
+        if($null -eq $BaseWorkflow -or $null -eq $HeadWorkflow){return 'unavailable'}
+        foreach($snapshot in @($BaseWorkflow,$HeadWorkflow)){
+            if($snapshot.PSObject.Properties.Name -notcontains 'ok' -or -not [bool]$snapshot.ok -or
+                $snapshot.PSObject.Properties.Name -notcontains 'exists'){return 'unavailable'}
+        }
+        $basePresent=[bool]$BaseWorkflow.exists;$headPresent=[bool]$HeadWorkflow.exists;$workflowEvidence=$true
+        if($basePresent -and -not $headPresent){return 'required_workflow_removed'}
+    } elseif($WorkflowPresent -is [bool]){
+        $headPresent=[bool]$WorkflowPresent;$workflowEvidence=$true
+    } else {
+        return 'unavailable'
+    }
+    $wfPresent=($basePresent -or $headPresent)
     $owner=Get-GitOriginOwnerRepo -Path $RepoPath
     for($attempt=1;$attempt -le $MaxAttempts;$attempt++){
         try {
-            $res=if($null -ne $CheckLister){& $CheckLister $RepoPath $PrNumber $HeadSha}else{Get-DefaultPullRequestChecks -RepoPath $RepoPath -OwnerRepo $owner -HeadSha $HeadSha}
+            $res=if($null -ne $CheckLister){& $CheckLister $RepoPath $PrNumber $HeadSha}else{
+                Get-DefaultPullRequestChecks -RepoPath $RepoPath -OwnerRepo $owner -PrNumber $PrNumber -HeadSha $HeadSha
+            }
         } catch { return 'unavailable' }
         if($null -eq $res -or -not [bool]$res.ok){return 'unavailable'}
         $checks=@($res.checks)
         if($checks.Count -gt 0){
-            $failure=$false;$pending=$false;$unknown=$false
+            $associated=@();$associationUnknown=$false
             foreach($c in $checks){
+                $props=@($c.PSObject.Properties.Name)
+                if($props -contains 'associationVerified' -and -not [bool]$c.associationVerified){
+                    $associationUnknown=$true
+                    continue
+                }
+                if(@('event','prNumber','headSha','context')|Where-Object{$props -notcontains $_}){
+                    $associationUnknown=$true
+                    continue
+                }
+                if([string]$c.event -cne 'pull_request'){continue}
+                if([int]$c.prNumber -ne $PrNumber -or [string]$c.headSha -cne $HeadSha){continue}
+                if([string]::IsNullOrWhiteSpace([string]$c.context)){$associationUnknown=$true;continue}
+                $associated+=$c
+            }
+            if($associationUnknown){return 'unavailable'}
+            if($associated.Count -eq 0){
+                if(-not $wfPresent -or -not $RequireCiWhenWorkflowPresent){return 'not-requested'}
+                if($attempt -lt $MaxAttempts -and $PollIntervalSeconds -gt 0){Start-Sleep -Seconds $PollIntervalSeconds}
+                continue
+            }
+            $latest=@()
+            foreach($group in @($associated|Group-Object -Property context)){
+                $current=@($group.Group|Sort-Object -Property `
+                    @{Expression={
+                        if($_.PSObject.Properties.Name -contains 'updatedAt' -and -not [string]::IsNullOrWhiteSpace([string]$_.updatedAt)){
+                            try{return [DateTime]::Parse([string]$_.updatedAt).ToUniversalTime().Ticks}catch{}
+                        }
+                        return [int64]0
+                    };Descending=$true},`
+                    @{Expression={if($_.PSObject.Properties.Name -contains 'runAttempt'){[int64]$_.runAttempt}else{0}};Descending=$true},`
+                    @{Expression={if($_.PSObject.Properties.Name -contains 'id'){[int64]$_.id}else{0}};Descending=$true})
+                $latest+=$current[0]
+            }
+            $failure=$false;$pending=$false;$unknown=$false
+            foreach($c in $latest){
                 $status='';$conclusion=''
                 if($c.PSObject.Properties.Name -contains 'status'){$status=([string]$c.status).ToLowerInvariant()}
                 if($c.PSObject.Properties.Name -contains 'conclusion'){$conclusion=([string]$c.conclusion).ToLowerInvariant()}
@@ -693,6 +867,7 @@ function Get-PullRequestCiStatus {
             }
             if($failure){return 'failure'};if($pending){return 'pending'};if($unknown){return 'unavailable'};return 'success'
         }
+        if(-not $workflowEvidence){return 'unavailable'}
         if(-not $wfPresent -or -not $RequireCiWhenWorkflowPresent){return 'not-requested'}
         if($attempt -lt $MaxAttempts -and $PollIntervalSeconds -gt 0){Start-Sleep -Seconds $PollIntervalSeconds}
     }
@@ -725,7 +900,13 @@ function Resolve-PullRequestPostflight {
     elseif(-not $remoteBase){$status='remote_sync_unavailable'}
     elseif($remoteBase -and (Test-GitCommitAncestor -RepoPath $RepoPath -Ancestor $final -Descendant $remoteBase)){$status='base_branch_touched'}
     $w.finalHead=$final
+    $w.headWorkflow=Get-GitWorkflowSnapshot -RepoPath $RepoPath -Ref $final
     $w.baseAdvanced=($remoteBase -and $remoteBase -cne [string]$w.baseRemoteHead -and -not (Test-GitCommitAncestor -RepoPath $RepoPath -Ancestor $final -Descendant $remoteBase))
+    if($null -eq $status -and ($w.PSObject.Properties.Name -notcontains 'baseWorkflow' -or -not [bool]$w.baseWorkflow.ok -or
+        -not [bool]$w.headWorkflow.ok)){$status='pr_ci_unavailable'}
+    if($null -eq $status -and [bool]$w.baseWorkflow.exists -and -not [bool]$w.headWorkflow.exists){
+        $status='required_workflow_removed';$ci='required_workflow_removed'
+    }
     if($null -eq $status){
         $boundary=@();if($StartSnapshot.PSObject.Properties.Name -contains 'boundaryWatch'){$boundary=@(Test-RepoBoundaryViolation -BeforeSnapshot $StartSnapshot.boundaryWatch)}
         if($boundary.Count -gt 0){$status='repo_boundary_violation'}
@@ -745,8 +926,9 @@ function Resolve-PullRequestPostflight {
         if(-not $ensured.ok){$status=[string]$ensured.status}else{
             $pr=$ensured.pr;$w.pr=$pr
             $ci=Get-PullRequestCiStatus -RepoPath $RepoPath -PrNumber ([int]$pr.number) -HeadSha $final -CheckLister $CheckLister `
+                -BaseWorkflow $w.baseWorkflow -HeadWorkflow $w.headWorkflow `
                 -RequireCiWhenWorkflowPresent (Get-WorkflowRequireCi -Workflow $w)
-            if($ci -eq 'failure'){$status='pr_ci_failed'}elseif($ci -eq 'pending'){$status='pr_ci_pending'}elseif($ci -eq 'unavailable'){$status='pr_ci_unavailable'}else{$status='pr_opened'}
+            if($ci -eq 'required_workflow_removed'){$status='required_workflow_removed'}elseif($ci -eq 'failure'){$status='pr_ci_failed'}elseif($ci -eq 'pending'){$status='pr_ci_pending'}elseif($ci -eq 'unavailable'){$status='pr_ci_unavailable'}else{$status='pr_opened'}
         }
     }
     return [pscustomobject]@{
@@ -794,9 +976,11 @@ function Resolve-PullRequestRecoveryPostflight {
             $checked=Test-PullRequestContext -PullRequest $lookup.items[0] -BaseBranch ([string]$w.baseBranch) -WorkBranch ([string]$w.workBranch) -HeadSha $head `
                 -OwnerRepo (Get-GitOriginOwnerRepo -Path $RepoPath) -RequireDraft
             if($checked.ok){
-                $w.pr=$checked.pr;$w.finalHead=$head;$ci=Get-PullRequestCiStatus -RepoPath $RepoPath -PrNumber ([int]$checked.pr.number) -HeadSha $head -CheckLister $CheckLister `
+                $w.pr=$checked.pr;$w.finalHead=$head;$w.headWorkflow=Get-GitWorkflowSnapshot -RepoPath $RepoPath -Ref $head
+                $ci=Get-PullRequestCiStatus -RepoPath $RepoPath -PrNumber ([int]$checked.pr.number) -HeadSha $head -CheckLister $CheckLister `
+                    -BaseWorkflow $(if($w.PSObject.Properties.Name -contains 'baseWorkflow'){$w.baseWorkflow}else{$null}) -HeadWorkflow $w.headWorkflow `
                     -RequireCiWhenWorkflowPresent (Get-WorkflowRequireCi -Workflow $w)
-                if($ci -eq 'pending'){$status='recovered_pr_ci_pending_unverified'}elseif($ci -eq 'failure'){$status='recovered_pr_ci_failed_unverified'}elseif($ci -eq 'unavailable'){$status='recovered_pr_ci_unavailable_unverified'}else{$status='recovered_pr_commit_unverified'}
+                if($ci -eq 'required_workflow_removed'){$status='recovered_pr_context_mismatch'}elseif($ci -eq 'pending'){$status='recovered_pr_ci_pending_unverified'}elseif($ci -eq 'failure'){$status='recovered_pr_ci_failed_unverified'}elseif($ci -eq 'unavailable'){$status='recovered_pr_ci_unavailable_unverified'}else{$status='recovered_pr_commit_unverified'}
             }
         }
     }
@@ -825,13 +1009,6 @@ function Test-PullRequestReviewContext {
     return [pscustomobject]@{ok=$true;status='ok';workflow=$w;pr=$check.pr}
 }
 
-function Set-PullRequestReady {
-    param([Parameter(Mandatory)][string]$RepoPath,[Parameter(Mandatory)]$Workflow,[scriptblock]$PrProbe)
-    $ctx=[pscustomobject]@{repoPath=$RepoPath;ownerRepo=(Get-GitOriginOwnerRepo -Path $RepoPath);prNumber=[int]$Workflow.pr.number}
-    $res=Invoke-PullRequestProbe -Action ready -Context $ctx -PrProbe $PrProbe
-    return ($null -ne $res -and [bool]$res.ok)
-}
-
 function Get-WorkflowMergeReadiness {
     param(
         [Parameter(Mandatory)][string]$RepoPath,[Parameter(Mandatory)]$Receipt,[Parameter(Mandatory)][string]$ReviewVerdict,
@@ -850,7 +1027,9 @@ function Get-WorkflowMergeReadiness {
     if(-not [bool]$Receipt.resultEnvelopePresent -or [bool]$Receipt.interrupted -or -not [bool]$Receipt.localVerificationComplete){
         return [pscustomobject]@{ready=$false;status='worker_result_unverified';workflow=$w}
     }
-    if([string]$Receipt.verificationProvenance -notin @('valid_worker_result_envelope','valid_worker_result_envelope_recovered_postflight','valid_repair_worker_result')){
+    if([string]$Receipt.verificationProvenance -notin @(
+        'valid_worker_result_envelope','valid_worker_result_envelope_recovered_postflight',
+        'valid_repair_worker_result','valid_claude_completion_report')){
         return [pscustomobject]@{ready=$false;status='worker_result_unverified';workflow=$w}
     }
     if($Receipt.PSObject.Properties.Name -contains 'workerRemainingProblems' -and
@@ -885,6 +1064,13 @@ function Get-WorkflowMergeReadiness {
         return [pscustomobject]@{ready=$false;status='base_branch_touched';workflow=$w}
     }
     $w.baseAdvanced=($remoteBase -cne [string]$w.baseRemoteHead)
+    $w.headWorkflow=Get-GitWorkflowSnapshot -RepoPath $RepoPath -Ref $head
+    if($w.PSObject.Properties.Name -notcontains 'baseWorkflow' -or -not [bool]$w.baseWorkflow.ok -or -not [bool]$w.headWorkflow.ok){
+        return [pscustomobject]@{ready=$false;status='pr_ci_unavailable';ciStatus='unavailable';workflow=$w}
+    }
+    if([bool]$w.baseWorkflow.exists -and -not [bool]$w.headWorkflow.exists){
+        return [pscustomobject]@{ready=$false;status='required_workflow_removed';ciStatus='required_workflow_removed';workflow=$w}
+    }
     $lookup=Get-PullRequestForBranch -RepoPath $RepoPath -OwnerRepo (Get-GitOriginOwnerRepo -Path $RepoPath) -WorkBranch ([string]$w.workBranch) -PrProbe $PrProbe
     if(-not $lookup.ok -or $lookup.items.Count -ne 1){return [pscustomobject]@{ready=$false;status='pr_context_mismatch';workflow=$w}}
     $check=Test-PullRequestContext -PullRequest $lookup.items[0] -BaseBranch ([string]$w.baseBranch) -WorkBranch ([string]$w.workBranch) -HeadSha $head `
@@ -892,7 +1078,9 @@ function Get-WorkflowMergeReadiness {
     if(-not $check.ok){return [pscustomobject]@{ready=$false;status=$check.status;workflow=$w}}
     $w.pr=$check.pr
     $ci=Get-PullRequestCiStatus -RepoPath $RepoPath -PrNumber ([int]$check.pr.number) -HeadSha $head -CheckLister $CheckLister `
+        -BaseWorkflow $w.baseWorkflow -HeadWorkflow $w.headWorkflow `
         -RequireCiWhenWorkflowPresent (Get-WorkflowRequireCi -Workflow $w)
+    if($ci -eq 'required_workflow_removed'){return [pscustomobject]@{ready=$false;status='required_workflow_removed';ciStatus=$ci;workflow=$w}}
     if($ci -eq 'pending'){return [pscustomobject]@{ready=$false;status='pr_ci_pending';ciStatus=$ci;workflow=$w}}
     if($ci -eq 'failure'){return [pscustomobject]@{ready=$false;status='pr_ci_failed';ciStatus=$ci;workflow=$w}}
     if($ci -eq 'unavailable'){return [pscustomobject]@{ready=$false;status='pr_ci_unavailable';ciStatus=$ci;workflow=$w}}

@@ -16,6 +16,7 @@ param(
     [string]$StartHead,
     [string]$PostReviewHead,
     [string]$FindingsFile,
+    [string]$WorkerReportPath,
     [ValidateSet('grok','gpt')][string]$Target,
     [ValidateSet('PASS','REPAIR_REQUIRED')][string]$ReviewVerdict,
     [string]$Value
@@ -188,6 +189,8 @@ function Get-RemainingProblems {
         'pr_ci_pending' { $probs += 'PR checks are still pending; merge_ready is forbidden' }
         'pr_ci_failed' { $probs += 'at least one PR check failed; review and merge_ready are forbidden' }
         'pr_ci_unavailable' { $probs += 'PR check result is unavailable; merge_ready is forbidden' }
+        'required_workflow_removed' { $probs += 'base commit had CI workflows but the PR head removed all of them; merge_ready is forbidden' }
+        'review_coverage_incomplete' { $probs += 'not every changed file and diff chunk was reviewed; PASS and merge_ready are forbidden' }
         'worker_reported_remaining_problems' { $probs += 'worker reported unresolved problems; merge_ready is forbidden' }
         'recovered_pr_commit_unverified' { $probs += 'PR commit recovered without a trusted worker result; manual verification is required' }
         'recovered_pr_ci_pending_unverified' { $probs += 'PR commit recovered without a worker result and checks are pending' }
@@ -282,12 +285,27 @@ function Invoke-ClaudeExecution {
     if ($null -ne $ClaudeImplementer) {
         $Log.Add("claude execution ($Mode) model=$($Target.model) effort=$($Target.effort): running injected implementer")
         $impl = & $ClaudeImplementer $RepoPath $Order $Target
-        # implementer 결과를 WorkerResult 형태로 정규화 (현재 세션이 수행 → 기본 성공)
+        # implementer 결과와 별개로 HEAD/작전/이슈/브랜치에 묶인 완료 보고를 엄격히 검증한다.
         $success = $true; $exit = 0
         if ($null -ne $impl -and ($impl.PSObject.Properties.Name -contains 'Success')) { $success = [bool]$impl.Success }
         if ($null -ne $impl -and ($impl.PSObject.Properties.Name -contains 'ExitCode')) { $exit = [int]$impl.ExitCode }
-        $wr = [pscustomobject]@{ Success = $success; ExitCode = $exit; QuotaExhausted = $false; Output = 'claude-executed'
-            WorkerReportedVerification='current Claude session completed implementation';LocalVerificationComplete=$success }
+        $expectedHead=Get-GitHead -Path $RepoPath
+        $expectedBranch=if([string]$Workflow.mode -eq 'pull-request'){[string]$Workflow.workBranch}else{[string](Get-GitCurrentBranch -Path $RepoPath)}
+        $reportJson=''
+        if($null -ne $impl -and $impl.PSObject.Properties.Name -contains 'CompletionReportJson' -and $null -ne $impl.CompletionReportJson){
+            $reportJson=[string]$impl.CompletionReportJson
+        } elseif($null -ne $impl -and $impl.PSObject.Properties.Name -contains 'CompletionReport' -and $null -ne $impl.CompletionReport){
+            $reportJson=$impl.CompletionReport|ConvertTo-Json -Depth 10 -Compress
+        }
+        $completion=ConvertFrom-ClaudeCompletionReport -Json $reportJson -ExpectedOperation $Operation -ExpectedIssueNumber $IssueNumber `
+            -ExpectedHead $expectedHead -ExpectedWorkBranch $expectedBranch
+        $wr = [pscustomobject]@{
+            Success=$success;ExitCode=$exit;QuotaExhausted=$false;Output='claude-executed'
+            WorkerReportedVerification=if($completion.valid){$completion.verification}else{$null}
+            WorkerRemainingProblems=@($completion.remainingProblems)
+            LocalVerificationComplete=([bool]$completion.valid -and [bool]$completion.localVerificationComplete)
+        }
+        $provenance=if($completion.valid){'valid_claude_completion_report'}else{[string]$completion.reason}
         $route = [pscustomobject]@{worker='claude';model=$Target.model;effort=$Target.effort}
         $pf = Resolve-WorkflowPostflight -RepoPath $RepoPath -StartSnapshot $Snapshot -WorkerResult $wr -Workflow $Workflow `
             -Operation $Operation -IssueNumber $IssueNumber -Route $route -CiProbe $CiProbe -PrProbe $PrProbe `
@@ -297,8 +315,9 @@ function Invoke-ClaudeExecution {
             Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $Workflow|Out-Null
             Save-RunReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $Snapshot -Postflight $pf `
                 -Route $route -WorkerResult $wr -StatusOverride $pf.status -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
-                -ResultEnvelopePresent $true -Interrupted $false -LocalVerificationComplete $success -RecoveredByPostflight $false `
-                -VerificationProvenance 'valid_worker_result_envelope' -Workflow $Workflow `
+                -ResultEnvelopePresent ([bool]$completion.valid) -Interrupted $false `
+                -LocalVerificationComplete ([bool]$wr.LocalVerificationComplete) -RecoveredByPostflight $false `
+                -VerificationProvenance $provenance -Workflow $Workflow `
                 -ArtifactSanitizationStatus 'not-applicable' -ArtifactRetentionStatus 'not-applicable'|Out-Null
         }
         Remove-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
@@ -307,13 +326,30 @@ function Invoke-ClaudeExecution {
             -Worker 'claude' -Model $Target.model -Effort $Target.effort -Snapshot $Snapshot -Postflight $pf `
             -IssueNumber $IssueNumber -LogPath $lp -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
             -Extra @{ executedBy = 'claude'; mode = $Mode; workflow=$Workflow
-                workflowMode=$Workflow.mode; baseBranch=$Workflow.baseBranch; workBranch=$Workflow.workBranch }
+                workflowMode=$Workflow.mode; baseBranch=$Workflow.baseBranch; workBranch=$Workflow.workBranch
+                localVerificationComplete=[bool]$wr.LocalVerificationComplete
+                resultEnvelopePresent=[bool]$completion.valid;verificationProvenance=$provenance
+                completionReportReason=$completion.reason }
     }
     # 지시 모드: 주문서를 pending(저장소 네임스페이스)에 보존하고 postflight 명령을 안내 (재귀 resumeCommand 없음)
     Save-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -Snapshot $Snapshot -Kind $Kind -RepoPath $RepoPath -Workflow $Workflow | Out-Null
     $orderPath = Get-PendingOrderPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $reportPath = Get-ClaudeCompletionReportPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     Assert-PathWithinRoot -Path $orderPath -Root $Script:PendingDir | Out-Null
-    Set-Content -LiteralPath $orderPath -Value $Order -Encoding UTF8 -NoNewline
+    Assert-PathWithinRoot -Path $reportPath -Root $Script:PendingDir | Out-Null
+    $expectedBranch=if([string]$Workflow.mode -eq 'pull-request'){[string]$Workflow.workBranch}else{[string]$Snapshot.branch}
+    $reportContract=@"
+
+[Claude 구조화 완료 보고 계약]
+구현과 검증을 마친 뒤 postflight를 호출하기 전에 다음 경로에 JSON 객체 하나를 UTF-8로 저장한다.
+$reportPath
+정확한 스키마:
+{"schemaVersion":1,"operation":$Operation,"issueNumber":$IssueNumber,"head":"<현재 HEAD>","workBranch":"$expectedBranch","localVerificationComplete":true,"verification":"<실행한 검증과 결과>","remainingProblems":[]}
+head는 모든 커밋과 push 뒤의 현재 HEAD여야 한다. operation, issueNumber, workBranch는 위 값과 정확히 같아야 한다.
+localVerificationComplete가 false이거나 remainingProblems가 비어 있지 않으면 merge_ready가 될 수 없다.
+고정 문구 current Claude session completed implementation은 검증 증거로 인정되지 않는다.
+"@
+    Set-Content -LiteralPath $orderPath -Value ($Order+$reportContract) -Encoding UTF8 -NoNewline
     $Log.Add("claude execution ($Mode) directive: order persisted, awaiting current-session implementation + postflight")
     $lp = Write-RouterLog -Name "op$Operation-issue$IssueNumber-claude" -Content ($Log -join "`n")
     return New-FinalOutput -Operation $Operation -RouteLabel $Mode -Status 'claude_execute' `
@@ -321,8 +357,8 @@ function Invoke-ClaudeExecution {
         -IssueNumber $IssueNumber -LogPath $lp `
         -Extra @{
             requiredModel = $Target.model; requiredEffort = $Target.effort
-            orderPath = $orderPath; startHead = $Snapshot.startHead
-            postflightCommand = "-Command postflight -Operation $Operation -IssueNumber $IssueNumber"
+            orderPath = $orderPath; workerReportPath=$reportPath; startHead = $Snapshot.startHead
+            postflightCommand = "-Command postflight -Operation $Operation -IssueNumber $IssueNumber -WorkerReportPath `"$reportPath`""
             workflow = $Workflow; workflowMode=$Workflow.mode; baseBranch=$Workflow.baseBranch; workBranch=$Workflow.workBranch
             note = '현재 세션이 요구 모델이면 고정 실행 계약+이슈 원문(orderPath)을 직접 수행한 뒤 postflightCommand를 실행하라. 재라우팅/재귀 handoff 없음.'
         }
@@ -332,7 +368,8 @@ function Invoke-ClaudeExecution {
 function Invoke-PostflightCommand {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber,
           [string]$RepoPath = (Get-Location).Path, [scriptblock]$CiProbe,
-          [scriptblock]$PrProbe,[scriptblock]$CheckLister,[scriptblock]$IssueTitleFetcher,[scriptblock]$RemoteHeadProbe)
+          [scriptblock]$PrProbe,[scriptblock]$CheckLister,[scriptblock]$IssueTitleFetcher,[scriptblock]$RemoteHeadProbe,
+          [string]$WorkerReportPath)
     $pend = Get-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     if ($null -eq $pend) {
         return [pscustomobject]@{ operation = $Operation; issueNumber = $IssueNumber; status = 'no_pending_snapshot'
@@ -352,9 +389,19 @@ function Invoke-PostflightCommand {
     $workflow = Get-ReceiptWorkflowContext -Receipt $pend
     $mutation = Enter-RepositoryMutation -RepoPath $RepoPath -Operation $Operation -IssueNumber $IssueNumber -Purpose 'claude-postflight'
     if (-not $mutation.acquired) { return $mutation }
-    $wr = [pscustomobject]@{ Success = $true; ExitCode = 0; QuotaExhausted = $false; Output = 'claude-postflight'; WorkerReportedVerification='current Claude session completed implementation' }
-    $route=[pscustomobject]@{worker='claude';model=$null;effort=$null}
     try {
+    $expectedHead=Get-GitHead -Path $RepoPath
+    $expectedBranch=if([string]$workflow.mode -eq 'pull-request'){[string]$workflow.workBranch}else{[string]$pend.snapshot.branch}
+    $completion=Read-ClaudeCompletionReport -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath `
+        -ExpectedHead $expectedHead -ExpectedWorkBranch $expectedBranch -ReportPath $WorkerReportPath
+    $provenance=if($completion.valid){'valid_claude_completion_report'}else{[string]$completion.reason}
+    $wr = [pscustomobject]@{
+        Success=$true;ExitCode=0;QuotaExhausted=$false;Output='claude-postflight'
+        WorkerReportedVerification=if($completion.valid){$completion.verification}else{$null}
+        WorkerRemainingProblems=@($completion.remainingProblems)
+        LocalVerificationComplete=([bool]$completion.valid -and [bool]$completion.localVerificationComplete)
+    }
+    $route=[pscustomobject]@{worker='claude';model=$null;effort=$null}
     $pf = Resolve-WorkflowPostflight -RepoPath $RepoPath -StartSnapshot $pend.snapshot -WorkerResult $wr -Workflow $workflow `
         -Operation $Operation -IssueNumber $IssueNumber -Route $route -CiProbe $CiProbe -PrProbe $PrProbe `
         -CheckLister $CheckLister -IssueTitleFetcher $IssueTitleFetcher -RemoteHeadProbe $RemoteHeadProbe
@@ -363,17 +410,24 @@ function Invoke-PostflightCommand {
         Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow|Out-Null
         Save-RunReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath -Snapshot $pend.snapshot -Postflight $pf `
             -Route $route -WorkerResult $wr -StatusOverride $pf.status -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
-            -ResultEnvelopePresent $true -Interrupted $false -LocalVerificationComplete $true -RecoveredByPostflight $false `
-            -VerificationProvenance 'valid_worker_result_envelope' -Workflow $workflow `
+            -ResultEnvelopePresent ([bool]$completion.valid) -Interrupted $false `
+            -LocalVerificationComplete ([bool]$wr.LocalVerificationComplete) -RecoveredByPostflight $false `
+            -VerificationProvenance $provenance -Workflow $workflow `
             -ArtifactSanitizationStatus 'not-applicable' -ArtifactRetentionStatus 'not-applicable'|Out-Null
     }
-    Remove-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
-    $orderPath = Get-PendingOrderPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
-    if (Test-Path -LiteralPath $orderPath) { Remove-Item -LiteralPath $orderPath -Force }
+    if($completion.valid){
+        Remove-PendingSnapshot -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+        $orderPath = Get-PendingOrderPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+        if (Test-Path -LiteralPath $orderPath) { Remove-Item -LiteralPath $orderPath -Force }
+        $reportPath=Get-ClaudeCompletionReportPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+        if(Test-Path -LiteralPath $reportPath){Remove-Item -LiteralPath $reportPath -Force}
+    }
     return New-FinalOutput -Operation $Operation -RouteLabel 'claude-postflight' -Status $pf.status `
         -Worker 'claude' -Model $null -Effort $null -Snapshot $pend.snapshot -Postflight $pf `
         -IssueNumber $IssueNumber -LogPath $null -RemainingProblems (Get-RemainingProblems -Status $pf.status -Postflight $pf) `
-        -Extra @{workflow=$pf.workflow;workflowMode=$workflow.mode;baseBranch=$workflow.baseBranch;workBranch=$workflow.workBranch}
+        -Extra @{workflow=$pf.workflow;workflowMode=$workflow.mode;baseBranch=$workflow.baseBranch;workBranch=$workflow.workBranch
+            localVerificationComplete=[bool]$wr.LocalVerificationComplete;resultEnvelopePresent=[bool]$completion.valid
+            verificationProvenance=$provenance;completionReportReason=$completion.reason}
     } finally { Exit-RepositoryMutation -RepoPath $RepoPath -Operation $Operation -IssueNumber $IssueNumber -Token $mutation.token | Out-Null }
 }
 
@@ -941,6 +995,23 @@ function Invoke-QuotaFallback {
 # 영수증이 없거나 현재 HEAD가 영수증 finalHead와 다르면 검수를 중단한다.
 # GPT 호출 실패 처리: quota → claude_review_fallback, 일반/인증/네트워크 실패 → review_worker_failed,
 # 종료코드 0 + 잘못된 JSON → review_parse_failed (fail-closed). 실행 실패를 코드 결함 finding으로 위장하지 않는다.
+function Save-IncompleteReviewCoverage {
+    param(
+        [Parameter(Mandatory)][int]$Operation,
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)][string]$PostReviewHead,
+        [Parameter(Mandatory)][string]$OriginalWorker,
+        [AllowNull()]$Workflow,
+        [Parameter(Mandatory)][string]$ReviewStatus,
+        $Findings=@(),$ChangedFiles=@(),$ReviewedFiles=@(),$TruncatedFiles=@()
+    )
+    return (Save-ReviewReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath `
+        -Verdict 'INCOMPLETE' -Findings @($Findings) -PostReviewHead $PostReviewHead -OriginalWorker $OriginalWorker `
+        -Workflow $Workflow -ChangedFiles $ChangedFiles -ReviewedFiles $ReviewedFiles -TruncatedFiles $TruncatedFiles `
+        -ReviewStatus $ReviewStatus -CoverageCompleteOverride $false)
+}
+
 function Invoke-OperationReview {
     param(
         [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber,
@@ -1009,19 +1080,54 @@ function Invoke-OperationReview {
         $IssueFetcher = { param($num, $path) $out = & gh issue view $num --json body -q .body 2>&1; if ($LASTEXITCODE -ne 0) { throw "gh issue view failed: $out" }; return ($out | Out-String) }
     }
     $issueBody = & $IssueFetcher $IssueNumber $RepoPath
-    $changed = Get-GitChangedFiles -Path $RepoPath -SinceHead $startHead
-    $diff = Get-GitDiff -Path $RepoPath -SinceHead $startHead
+    $coverage=Get-GitReviewDiffChunks -Path $RepoPath -SinceHead $startHead
+    $changed=@($coverage.changedFiles)
+    $reviewedFiles=@()
+    $truncatedFiles=@($coverage.truncatedFiles)
+    Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $coverageReceiptBase=@{
+        Operation=$OperationNumber;IssueNumber=$IssueNumber;RepoPath=[string]$RepoPath
+        PostReviewHead=[string]$finalHead;OriginalWorker=[string]$receipt.worker;Workflow=$workflow
+    }
+    if($changed.Count -eq 0 -or $coverage.chunks.Count -eq 0 -or $truncatedFiles.Count -gt 0){
+        $coverageReceiptPath=Save-IncompleteReviewCoverage @coverageReceiptBase -ReviewStatus 'review_coverage_incomplete' `
+            -Findings @() -ChangedFiles $changed -ReviewedFiles $reviewedFiles -TruncatedFiles $truncatedFiles
+        return [pscustomobject]@{
+            status='review_coverage_incomplete';verdict=$null;findings=@()
+            changedFiles=$changed;reviewedFiles=$reviewedFiles;truncatedFiles=$truncatedFiles
+            startHead=$startHead;finalHead=$finalHead;coverageReceiptPath=$coverageReceiptPath
+            note='fail-closed: 모든 변경 파일의 diff를 완전하게 준비하지 못해 PASS를 금지했다.'
+        }
+    }
 
-    # 3) 실제 완료 자료를 검수 프롬프트에 포함 (README가 주장하는 postflight 전체)
+    # 실제 완료 자료를 각 파일/청크 검수 프롬프트에 포함한다.
     $pfr = $receipt.postflight
     $workerSummary = ''
     if ($receipt.PSObject.Properties.Name -contains 'workerSummary' -and $null -ne $receipt.workerSummary) { $workerSummary = [string]$receipt.workerSummary }
     $remaining = @()
     if ($receipt.PSObject.Properties.Name -contains 'remainingProblems' -and $null -ne $receipt.remainingProblems) { $remaining = @($receipt.remainingProblems) }
-
-    $reviewPrompt = @"
+    if ($null -eq $GptReviewRunner) {
+        $GptReviewRunner = { param($repo, $prompt, $r) Invoke-GptWorker -Cwd $repo -Model $r.model -Effort $r.effort -PromptFilePath $prompt -Sandbox 'read-only' -ApprovalPolicy 'never' }
+    }
+    $allFindings=@()
+    $reviewWorkerExitCode=$null
+    foreach($file in $changed){
+        $fileChunks=@($coverage.chunks|Where-Object{[string]$_.file -ceq [string]$file}|Sort-Object chunkIndex)
+        if($fileChunks.Count -eq 0){
+            $truncatedFiles+=@([string]$file)
+            $coverageReceiptPath=Save-IncompleteReviewCoverage @coverageReceiptBase -ReviewStatus 'review_coverage_incomplete' `
+                -Findings $allFindings -ChangedFiles $changed -ReviewedFiles $reviewedFiles -TruncatedFiles $truncatedFiles
+            return [pscustomobject]@{
+                status='review_coverage_incomplete';verdict=$null;findings=@($allFindings)
+                changedFiles=$changed;reviewedFiles=$reviewedFiles;truncatedFiles=$truncatedFiles
+                startHead=$startHead;finalHead=$finalHead;coverageReceiptPath=$coverageReceiptPath
+            }
+        }
+        foreach($chunk in $fileChunks){
+            $reviewPrompt = @"
 [독립 검수 요청 — 반드시 아래 JSON 스키마로만 응답한다]
 이 검수는 read-only다. 파일, branch, PR, 이슈를 생성·수정·댓글·종료·병합하지 않는다.
+이 입력은 전체 diff 중 한 청크다. 이 청크만 검토해 결함 여부를 판정한다. 라우터는 모든 파일과 청크가 성공한 뒤에만 전체 PASS를 합성한다.
 {
   "verdict": "PASS|REPAIR_REQUIRED",
   "findings": [
@@ -1030,8 +1136,9 @@ function Invoke-OperationReview {
 }
 설명 문장 없이 JSON 객체 하나만 출력한다. 결함이 없으면 findings는 빈 배열이고 verdict는 PASS.
 결함이 있으면 verdict는 REPAIR_REQUIRED이고 findings는 비어 있지 않아야 한다.
-모든 finding은 severity(blocker|high|medium), file, 비어 있지 않은 issue, 비어 있지 않은 requiredFix를 가져야 한다.
 
+[coverage file] $($chunk.file)
+[coverage chunk] $($chunk.chunkIndex)/$($chunk.chunkCount)
 [시작 HEAD] $startHead
 [최종 HEAD] $finalHead
 [workflow mode] $($workflow.mode)
@@ -1057,87 +1164,101 @@ runStatus=$($receipt.status)
 [remainingProblems]
 $($remaining -join "`n")
 
-[변경 파일]
+[전체 변경 파일]
 $($changed -join "`n")
 
-[작업자 완료 보고 요약 — workerSummary. 작업자가 스스로 보고한 내용이며, 라우터가 재실행한 테스트 결과가 아니다]
+[workerSummary — 작업자가 스스로 보고한 요약이며 라우터가 재실행한 테스트 결과가 아니다]
 $workerSummary
 
 [GitHub 이슈 원문]
 $issueBody
 
-[변경 diff]
-$diff
+[변경 diff — 현재 파일 청크]
+$($chunk.text)
 "@
-
-    $promptPath = New-TempOrderFile -Content $reviewPrompt
-    try {
-        if ($null -eq $GptReviewRunner) {
-            $GptReviewRunner = { param($repo, $prompt, $r) Invoke-GptWorker -Cwd $repo -Model $r.model -Effort $r.effort -PromptFilePath $prompt -Sandbox 'read-only' -ApprovalPolicy 'never' }
-        }
-        # v2.4.3: 실제 GPT 검수 호출 직전에 기존 review 영수증을 무효화한다. 새 검수가 경계 위반·실패로
-        # 끝나면 이전 세대의 REPAIR_REQUIRED 영수증이 남아 repair가 그것을 재사용하는 것을 막는다.
-        # 유효한 REPAIR_REQUIRED + 경계 위반 없음일 때만 아래 6)에서 새 영수증을 저장한다.
-        Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
-        $invokeReviewWorker = { & $GptReviewRunner $RepoPath $promptPath $route }
-        $execution = Invoke-WorkerWithErrorPolicy -Provider 'gpt' -InvokeWorker $invokeReviewWorker -State $state -Config $config
-        $res = $execution.Result
-
-        # 4) JSON 파싱 전에 실행 결과부터 확인 (ExitCode/Success/QuotaExhausted/Output 존재)
-        $resProps = @()
-        if ($null -ne $res) { $resProps = $res.PSObject.Properties.Name }
-        $exitCode = $null
-        if ($resProps -contains 'ExitCode' -and $null -ne $res.ExitCode) { $exitCode = [int]$res.ExitCode }
-        $outText = ''
-        if ($resProps -contains 'Output' -and $null -ne $res.Output) { $outText = [string]$res.Output }
-        if (-not $execution.Success -and $execution.ErrorClass -eq 'weekly_exhausted') {
-            # GPT 검수 weekly 소진 -> 상태 저장 후 현재 세션 직접 검토로 전환한다.
-            return [pscustomobject]@{ status = 'claude_review_fallback'; verdict = $null; findings = @()
-                reason = 'gpt_review_weekly_exhausted'; reviewWorker = $route.model; exitCode = $exitCode
-                startHead = $startHead; finalHead = $finalHead; errorClass = $execution.ErrorClass
-                usageStateChanged = $true; attempts = $execution.Attempts }
-        }
-        if (-not $execution.Success) {
-            $reviewStatus = switch ($execution.ErrorClass) {
-                'transient_rate_limit' { 'review_transient_rate_limited'; break }
-                'provider_failure'     { 'review_provider_failure'; break }
-                'quota_unknown'        { 'review_quota_unknown'; break }
-                default                { 'review_worker_failed' }
+            $promptPath=New-TempOrderFile -Content $reviewPrompt
+            try {
+                $invokeReviewWorker = { & $GptReviewRunner $RepoPath $promptPath $route }
+                $execution = Invoke-WorkerWithErrorPolicy -Provider 'gpt' -InvokeWorker $invokeReviewWorker -State $state -Config $config
+                $res = $execution.Result
+                $resProps = if($null -ne $res){@($res.PSObject.Properties.Name)}else{@()}
+                $reviewWorkerExitCode = if($resProps -contains 'ExitCode' -and $null -ne $res.ExitCode){[int]$res.ExitCode}else{$null}
+                $outText = if($resProps -contains 'Output' -and $null -ne $res.Output){[string]$res.Output}else{''}
+                if (-not $execution.Success -and $execution.ErrorClass -eq 'weekly_exhausted') {
+                    $coverageReceiptPath=Save-IncompleteReviewCoverage @coverageReceiptBase -ReviewStatus 'claude_review_fallback' `
+                        -Findings $allFindings -ChangedFiles $changed -ReviewedFiles $reviewedFiles -TruncatedFiles $truncatedFiles
+                    return [pscustomobject]@{
+                        status='claude_review_fallback';verdict=$null;findings=@($allFindings)
+                        reason='gpt_review_weekly_exhausted';reviewWorker=$route.model;exitCode=$reviewWorkerExitCode
+                        startHead=$startHead;finalHead=$finalHead;errorClass=$execution.ErrorClass
+                        usageStateChanged=$true;attempts=$execution.Attempts
+                        changedFiles=$changed;reviewedFiles=$reviewedFiles;truncatedFiles=$truncatedFiles
+                        coverageReceiptPath=$coverageReceiptPath
+                    }
+                }
+                if (-not $execution.Success) {
+                    $reviewStatus = switch ($execution.ErrorClass) {
+                        'transient_rate_limit' { 'review_transient_rate_limited'; break }
+                        'provider_failure'     { 'review_provider_failure'; break }
+                        'quota_unknown'        { 'review_quota_unknown'; break }
+                        default                { 'review_worker_failed' }
+                    }
+                    $coverageReceiptPath=Save-IncompleteReviewCoverage @coverageReceiptBase -ReviewStatus $reviewStatus `
+                        -Findings $allFindings -ChangedFiles $changed -ReviewedFiles $reviewedFiles -TruncatedFiles $truncatedFiles
+                    return [pscustomobject]@{
+                        status=$reviewStatus;verdict=$null;findings=@($allFindings)
+                        reviewWorker=$route.model;exitCode=$reviewWorkerExitCode
+                        startHead=$startHead;finalHead=$finalHead;errorClass=$execution.ErrorClass
+                        usageStateChanged=$false;attempts=$execution.Attempts
+                        changedFiles=$changed;reviewedFiles=$reviewedFiles;truncatedFiles=$truncatedFiles
+                        coverageReceiptPath=$coverageReceiptPath
+                        note='검수 청크 하나라도 실패하면 전체 PASS를 금지한다.'
+                    }
+                }
+                $parsed=ConvertFrom-StrictReviewJson -Text $outText
+                if(-not $parsed.valid){
+                    $coverageReceiptPath=Save-IncompleteReviewCoverage @coverageReceiptBase -ReviewStatus 'review_parse_failed' `
+                        -Findings $allFindings -ChangedFiles $changed -ReviewedFiles $reviewedFiles -TruncatedFiles $truncatedFiles
+                    return [pscustomobject]@{
+                        status='review_parse_failed';verdict=$null;findings=@($allFindings)
+                        parseError=$parsed.parseError;reviewWorker=$route.model;workerAlias=$route.workerAlias
+                        exitCode=$reviewWorkerExitCode;startHead=$startHead;finalHead=$finalHead
+                        changedFiles=$changed;reviewedFiles=$reviewedFiles;truncatedFiles=$truncatedFiles
+                        coverageReceiptPath=$coverageReceiptPath
+                        note='fail-closed: 검수 청크 JSON이 스키마를 위반해 PASS를 금지했다.'
+                    }
+                }
+                if($parsed.verdict -eq 'REPAIR_REQUIRED'){$allFindings+=@($parsed.findings)}
+            } finally {
+                Remove-TempOrderFile -Path $promptPath
             }
-            return [pscustomobject]@{ status = $reviewStatus; verdict = $null; findings = @()
-                reviewWorker = $route.model; exitCode = $exitCode
-                note = '검수 워커 오류를 별도 상태로 보고했다. 실행 실패를 코드 결함으로 위장하지 않는다.'
-                startHead = $startHead; finalHead = $finalHead; errorClass = $execution.ErrorClass
-                usageStateChanged = $false; attempts = $execution.Attempts }
         }
+        $reviewedFiles+=@([string]$file)
+    }
 
-        # 5) 엄격 JSON 검증. 위반은 전부 review_parse_failed (fail-closed, PASS 아님)
-        $parsed = ConvertFrom-StrictReviewJson -Text $outText
-        if (-not $parsed.valid) {
-            return [pscustomobject]@{ status = 'review_parse_failed'; verdict = $null; findings = @()
-                parseError = $parsed.parseError; reviewWorker = $route.model; workerAlias = $route.workerAlias
-                exitCode = $exitCode; startHead = $startHead; finalHead = $finalHead
-                note = 'fail-closed: 검수 JSON이 스키마를 위반했다. PASS로 처리하지 않는다.' }
-        }
-
-        # 6) REPAIR_REQUIRED면 findings를 런타임 review 영수증에 저장 (repair가 자동 복원)
-        # v2.4.2: 검수 실행 중 감시 파일이 변경됐다면 REPAIR_REQUIRED 영수증을 저장하지 않는다.
-        # 저장 후 finalizer가 출력만 repo_boundary_violation으로 바꾸면 경계 위반 review 영수증이 남아
-        # repair가 그것으로 실행될 수 있다. 영수증 자체를 만들지 않아 repair 자격을 원천 차단한다.
-        $reviewReceiptPath = $null
-        $reviewBoundaryViol = @(Test-RepoBoundaryViolation -BeforeSnapshot $__reviewBoundary)
-        if (($parsed.verdict -eq 'REPAIR_REQUIRED' -or [string]$workflow.mode -eq 'pull-request') -and $reviewBoundaryViol.Count -eq 0) {
-            $reviewReceiptPath = Save-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath `
-                -Verdict $parsed.verdict -Findings $parsed.findings -PostReviewHead $finalHead -OriginalWorker $receipt.worker -Workflow $workflow
-        }
+    if($truncatedFiles.Count -gt 0 -or @($changed|Where-Object{$reviewedFiles -notcontains $_}).Count -gt 0){
+        $coverageReceiptPath=Save-IncompleteReviewCoverage @coverageReceiptBase -ReviewStatus 'review_coverage_incomplete' `
+            -Findings $allFindings -ChangedFiles $changed -ReviewedFiles $reviewedFiles -TruncatedFiles $truncatedFiles
         return [pscustomobject]@{
-            status = 'reviewed'; verdict = $parsed.verdict; findings = @($parsed.findings)
-            parseError = $null; reviewWorker = $route.model; workerAlias = $route.workerAlias
-            startHead = $startHead; finalHead = $finalHead; exitCode = $exitCode
-            reviewReceiptPath = $reviewReceiptPath
+            status='review_coverage_incomplete';verdict=$null;findings=@($allFindings)
+            changedFiles=$changed;reviewedFiles=$reviewedFiles;truncatedFiles=$truncatedFiles
+            startHead=$startHead;finalHead=$finalHead;coverageReceiptPath=$coverageReceiptPath
         }
-    } finally {
-        Remove-TempOrderFile -Path $promptPath
+    }
+    $verdict=if($allFindings.Count -gt 0){'REPAIR_REQUIRED'}else{'PASS'}
+    $reviewReceiptPath = $null
+    $reviewBoundaryViol = @(Test-RepoBoundaryViolation -BeforeSnapshot $__reviewBoundary)
+    if ($reviewBoundaryViol.Count -eq 0) {
+        $reviewReceiptPath = Save-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath `
+            -Verdict $verdict -Findings $allFindings -PostReviewHead $finalHead -OriginalWorker $receipt.worker -Workflow $workflow `
+            -ChangedFiles $changed -ReviewedFiles $reviewedFiles -TruncatedFiles $truncatedFiles
+    }
+    return [pscustomobject]@{
+        status='reviewed';verdict=$verdict;findings=@($allFindings)
+        parseError=$null;reviewWorker=$route.model;workerAlias=$route.workerAlias
+        startHead=$startHead;finalHead=$finalHead;exitCode=$reviewWorkerExitCode
+        reviewReceiptPath=$reviewReceiptPath;changedFiles=$changed;reviewedFiles=$reviewedFiles
+        truncatedFiles=$truncatedFiles;coverageComplete=$true
     }
     }
     return (Complete-BoundaryFinalizer -Result $__reviewResult -BoundarySnapshot $__reviewBoundary)
@@ -1620,6 +1741,15 @@ function Invoke-FinalizeCommand {
               [int]$runReviewWorkflow.pr.number -ne [int]$reviewWorkflow.pr.number))){
             return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='review_receipt_mismatch';mergeReady=$false}
         }
+        foreach($coverageField in @('changedFiles','reviewedFiles','truncatedFiles','coverageComplete')){
+            if($review.PSObject.Properties.Name -notcontains $coverageField){
+                return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='review_coverage_incomplete';mergeReady=$false}
+            }
+        }
+        if(-not [bool]$review.coverageComplete -or @($review.truncatedFiles).Count -gt 0 -or
+            @($review.changedFiles|Where-Object{@($review.reviewedFiles) -notcontains $_}).Count -gt 0){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='review_coverage_incomplete';mergeReady=$false}
+        }
         if($null -eq $repairReceipt -and [string]$review.verdict -ne 'PASS'){
             return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='repair_required';mergeReady=$false}
         }
@@ -1646,20 +1776,6 @@ function Invoke-FinalizeCommand {
                 workflowMode='pull-request';mergeReady=$false;ciStatus=if($readiness.PSObject.Properties.Name -contains 'ciStatus'){$readiness.ciStatus}else{'not-checked'}}
         }
         $workflow=Copy-WorkflowContext -Workflow $readiness.workflow
-        if(-not (Set-PullRequestReady -RepoPath $RepoPath -Workflow $workflow -PrProbe $PrProbe)){
-            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='pr_ready_failed';mergeReady=$false}
-        }
-        $lookup=Get-PullRequestForBranch -RepoPath $RepoPath -OwnerRepo (Get-GitOriginOwnerRepo -Path $RepoPath) -WorkBranch ([string]$workflow.workBranch) -PrProbe $PrProbe
-        if(-not $lookup.ok -or $lookup.items.Count -ne 1){
-            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='pr_context_mismatch';mergeReady=$false}
-        }
-        $checked=Test-PullRequestContext -PullRequest $lookup.items[0] -BaseBranch ([string]$workflow.baseBranch) `
-            -WorkBranch ([string]$workflow.workBranch) -HeadSha ([string]$receipt.finalHead) `
-            -OwnerRepo (Get-GitOriginOwnerRepo -Path $RepoPath)
-        if(-not $checked.ok -or [bool]$checked.pr.draft){
-            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='pr_ready_failed';mergeReady=$false}
-        }
-        $workflow.pr=$checked.pr
         Add-Member -InputObject $receipt -NotePropertyName workflow -NotePropertyValue $workflow -Force
         Add-Member -InputObject $receipt -NotePropertyName reviewVerdict -NotePropertyValue 'PASS' -Force
         Write-JsonFile -Path $receiptPath -Object $receipt
@@ -1669,6 +1785,7 @@ function Invoke-FinalizeCommand {
             baseBranch=$workflow.baseBranch;workBranch=$workflow.workBranch;prNumber=[int]$workflow.pr.number
             prUrl=$workflow.pr.url;prDraft=[bool]$workflow.pr.draft;ciStatus=$readiness.ciStatus
             reviewVerdict='PASS';pushComplete=$true;mergeReady=$true;merged=$false
+            note='Draft PR은 자동 해제하지 않는다. 사용자가 GitHub에서 Ready 전환과 병합을 별도로 수행해야 한다.'
         }
     } finally {Exit-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Token $mutation.token|Out-Null}
 }
@@ -1763,7 +1880,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             if (-not $Operation -or -not $IssueNumber) { throw 'postflight requires -Operation and -IssueNumber' }
             Assert-ValidOperationNumber -Value ([string]$Operation) | Out-Null
             Assert-ValidIssueNumber -Value ([string]$IssueNumber) | Out-Null
-            Invoke-PostflightCommand -Operation $Operation -IssueNumber $IssueNumber | ConvertTo-Json -Depth 12
+            Invoke-PostflightCommand -Operation $Operation -IssueNumber $IssueNumber -WorkerReportPath $WorkerReportPath | ConvertTo-Json -Depth 12
         }
         'recover' {
             if (-not $Operation -or -not $IssueNumber) { throw 'recover requires -Operation and -IssueNumber' }

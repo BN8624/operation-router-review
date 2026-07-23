@@ -2,14 +2,23 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
+## v3.0.0 PR #2 외부 검토 수리 (2026-07-23)
+
+- Claude postflight: Claude-only/direct 완료를 고정 문자열로 신뢰하던 경로를 제거했다. 별도 JSON 보고서를 operation, issue, current HEAD, expected work branch에 묶어 검증하며 누락·invalid·`localVerificationComplete=false`·남은 문제·다른 HEAD는 `merge_ready`를 차단한다.
+- workflow/CI: preflight에서 base commit workflow 목록과 digest를 receipt에 고정하고 head snapshot과 합쳐 CI 기대 여부를 판단한다. base workflow 전체 삭제는 `required_workflow_removed`이며 mutable worktree만 보고 `not-requested`로 낮추지 않는다.
+- PR check provenance: commit SHA의 모든 check/status를 인정하지 않고 실제 PR 번호와 head SHA에 연결된 `pull_request` check suite와 Actions run만 사용한다. push-only 결과는 제외하고 context별 최신 rerun을 집계하며 PR event 연관성을 증명할 수 없는 legacy status는 fail-closed 한다.
+- finalize: `merge_ready` 판정에서 Draft를 자동 해제하지 않는다. 원격 상태 변경 뒤 receipt 저장 실패가 생기던 복구 불가능 창을 없애고 Ready 전환과 병합을 사용자 동작으로 남겼다.
+- review: 40,000자 단일 truncation 대신 파일별 30,000자 청크를 모두 검토한다. 성공 또는 `INCOMPLETE` receipt에 changed/reviewed/truncated files와 coverage를 기록하며 누락·청크 실패는 PASS가 아니다.
+- CI: 저장소 자체에 Windows `pull_request`/main push Actions를 추가해 source-tree, installed fixture, PowerShell 구문, config JSON, manifest를 검증한다. `pull_request_target`과 secret은 사용하지 않는다.
+
 ## v3.0.0 (2026-07-23)
 
 - workflow: 새 번들의 기본을 `pull-request`로 바꾸고 이슈별 `operation-router/issue-<issueNumber>` branch, Draft PR, PR head SHA 기반 CI, 동일 branch/PR review·repair, 최종 `merge_ready` gate를 추가했다. 설정에 `gitWorkflow`가 없으면 v2 `direct-main` legacy로 해석한다.
 - preflight/postflight: PR mode는 fetch 뒤 base 동기화, 허용 시작 branch, receipt 기반 branch 소유권을 검사하며 worker branch/upstream/push, local base ref, base 직접 push 여부를 구분한다. 자동 pull·merge·rebase·reset·stash·clean은 없다.
 - concurrency: clone 전체 repository mutation lock을 추가해 이슈나 Operation이 달라도 같은 checkout에서 commit 가능 실행이 겹치지 않게 했다. watch·status·doctor·terminal 조회는 계속 읽을 수 있다.
-- PR/CI: push 확인 뒤에만 Draft PR을 생성하거나 정확히 일치하는 OPEN Draft를 재사용한다. 현재 PR head SHA의 모든 check run/status context를 집계하며 secret이 마스킹된 임시 body 파일을 정리한다.
+- PR/CI: push 확인 뒤에만 Draft PR을 생성하거나 정확히 일치하는 OPEN Draft를 재사용한다. 실제 PR에 연결된 최신 `pull_request` check와 base/head workflow 스냅샷을 검증하며 secret이 마스킹된 임시 body 파일을 정리한다.
 - receipt/reentry: workflow mode와 base/work/PR context를 pending, execution, run, review, repair receipt에 고정했다. v1 또는 workflow 누락 receipt는 direct-main으로만 읽고 recover는 새 worker 없이 기록된 mode를 검증한다. 실제 worker의 엄격한 `[ORH_WORKER_REPORT]`만 로컬 검증과 남은 문제 증거로 읽는다.
-- review/repair/finalize: PR context를 review·repair 자격에 추가하고 repair는 같은 Draft PR만 재사용한다. Operation 1 Opus 또는 Operation 2 Sonnet 최종 PASS 뒤 `finalize`가 CI success와 전체 gate를 확인해야 Draft가 해제되고 `merge_ready`가 된다.
+- review/repair/finalize: PR context를 review·repair 자격에 추가하고 repair는 같은 Draft PR만 재사용한다. Operation 1 Opus 또는 Operation 2 Sonnet 최종 PASS 뒤 `finalize`가 CI success와 전체 gate를 확인해야 Draft 유지 상태의 `merge_ready`가 된다.
 - safety: `merge_ready`는 병합 완료가 아니며 자동 merge, merge queue, branch 삭제, local main fast-forward, 자동 conflict 해결은 구현하지 않았다.
 - execution: 현재 흐름은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` → final review → `finalize` 순서다. recover는 watch가 없는 새 세션 재진입 전용이다.
 - tests: fake Git repository와 bare remote, 주입 PR probe와 mock gh를 사용해 설정, branch, worker 계약, clone lock, Draft PR, 전체 check 집계, receipt, recover, review·repair, `merge_ready`, direct-main 회귀를 검증한다. 유료 provider 호출과 실제 사용자 홈 수정은 없다.

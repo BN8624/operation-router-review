@@ -1,28 +1,26 @@
-operation-router v3.0.0 final verification
+operation-router v3.0.0 PR #2 repair verification
 Date: 2026-07-23 (KST)
 Runner: Windows PowerShell 5.1, Pester 3.4 (-Strict)
 
-Focused v3 groups:
-  issue branch / worker contract / mutation lock: 26 passed, 0 failed
-  Draft PR / PR CI: 18 passed, 0 failed
-  receipt / review / repair / recover / merge_ready: 15 passed, 0 failed
-  direct-main and safety regressions: 11 passed, 0 failed
-  focused total: 70 passed, 0 failed
+Focused PR #2 external-review regressions:
+  Claude report / base-head workflow / PR-associated CI / Draft / review coverage / Actions: 20 passed, 0 failed
+  incomplete review coverage persistence: 1 passed, 0 failed
+  focused total: 21 passed, 0 failed
 
 Final source-tree command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 Final result:
   exit code: 0
-  duration: 912.15 seconds
-  318 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  duration: 1046.24 seconds
+  339 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   installedIntegrationTests: not-requested
 
 Installed fixture command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixture.ps1
 Final result:
   exit code: 0
-  duration: 907.03 seconds
-  source tree: 318 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  duration: 1048.47 seconds
+  source tree: 339 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   installedIntegrationTests: executed
   installedIntegrationFailures: 0
   installed Skill byte-equivalence: 6/6
@@ -33,15 +31,13 @@ Final focused integrity checks:
   v2.4.7 cross-document workflow group: 1 passed, 0 failed
   PowerShell parser: 15 files passed
   config JSON parse: passed
-  manifest SHA-256: 34 entries passed
+  manifest SHA-256: 35 entries passed
   git diff --check: passed
 
 Isolation:
   fake Git repositories and bare remotes, injected workers, mock PR probe,
   ordinary OS process fixture, synthetic model cache, and unique temporary
   USERPROFILE only for the accepted installed integration run.
-  The preliminary installed-fixture run was discarded and stopped after its
-  legacy read-only models_cache copy was detected. The runner was corrected
-  before the accepted final run. Real user-home writes: 0.
+  Real user-home reads and writes: 0.
   Real GitHub PR/check mutations during tests: 0.
   Paid Grok/GPT/Claude live calls: 0.

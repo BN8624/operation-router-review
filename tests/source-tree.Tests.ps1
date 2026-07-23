@@ -211,6 +211,23 @@ function New-TestPullRequestProbe {
     return [pscustomobject]@{State=$state;Probe=$probe}
 }
 
+function New-PrCiCheck {
+    param(
+        [Parameter(Mandatory)][int]$PrNumber,
+        [Parameter(Mandatory)][string]$HeadSha,
+        [string]$Status='completed',
+        [AllowNull()][string]$Conclusion='success',
+        [string]$Context='windows/source-tree',
+        [string]$Event='pull_request',
+        [int64]$Id=1,
+        [string]$UpdatedAt='2026-07-23T00:00:00Z'
+    )
+    return [pscustomobject]@{
+        event=$Event;prNumber=$PrNumber;headSha=$HeadSha;context=$Context
+        status=$Status;conclusion=$Conclusion;id=$Id;updatedAt=$UpdatedAt
+    }
+}
+
 function New-PrWorker {
     param([ValidateSet('success','dirty','switch-main','main-push','no-commit','failed')][string]$Mode='success')
     $workerMode=$Mode
@@ -239,6 +256,71 @@ function New-PrWorker {
                 Output='fixture tests passed';WorkerReportedVerification='fixture: 1 passed';LocalVerificationComplete=$true}
         } finally {Pop-Location}
     }.GetNewClosure()
+}
+
+function New-ClaudeImplPush {
+    param([Parameter(Mandatory)][int]$Operation,[Parameter(Mandatory)][int]$IssueNumber)
+    $op=$Operation;$issueNo=$IssueNumber
+    return {
+        param($repo,$order,$target)
+        Push-Location $repo
+        try {
+            'y'|Out-File b.txt -Encoding utf8
+            git add .
+            git commit -q -m b
+            git push -q origin main
+            $head=(git rev-parse HEAD).Trim()
+            $branch=(git branch --show-current).Trim()
+        } finally {Pop-Location}
+        [pscustomobject]@{
+            Success=$true;ExitCode=0
+            CompletionReport=[pscustomobject]@{
+                schemaVersion=1;operation=$op;issueNumber=$issueNo;head=$head;workBranch=$branch
+                localVerificationComplete=$true;verification='fixture tests passed: 1';remainingProblems=@()
+            }
+        }
+    }.GetNewClosure()
+}
+
+function Write-TestClaudeCompletionReport {
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][int]$Operation,
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [string]$Head,
+        [string]$WorkBranch,
+        [bool]$LocalVerificationComplete=$true,
+        $RemainingProblems=@(),
+        [string]$Verification='fixture tests passed: 1'
+    )
+    if([string]::IsNullOrWhiteSpace($Head)){$Head=Get-GitHead -Path $Repo}
+    if([string]::IsNullOrWhiteSpace($WorkBranch)){$WorkBranch=Get-GitCurrentBranch -Path $Repo}
+    $report=[ordered]@{
+        schemaVersion=1;operation=$Operation;issueNumber=$IssueNumber;head=$Head;workBranch=$WorkBranch
+        localVerificationComplete=$LocalVerificationComplete;verification=$Verification
+        remainingProblems=@($RemainingProblems)
+    }
+    $path=Get-ClaudeCompletionReportPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $Repo
+    [System.IO.File]::WriteAllText($path,($report|ConvertTo-Json -Depth 10),(New-Object System.Text.UTF8Encoding($false)))
+    return $path
+}
+
+function New-ClaudePrPostflightFixture {
+    param([Parameter(Mandatory)][int]$IssueNumber)
+    Set-TestGitWorkflow -Mode pull-request
+    $fixture=New-PrFakeRepo
+    $probe=New-TestPullRequestProbe
+    $pre=Initialize-GitWorkflowRun -RepoPath $fixture.Repo -IssueNumber $IssueNumber -Config (Get-Config) -PrProbe $probe.Probe
+    if(-not $pre.ok){throw "Claude PR fixture preflight failed: $($pre.reason)"}
+    Save-PendingSnapshot -Operation 2 -IssueNumber $IssueNumber -Snapshot $pre.snapshot -Kind logic -RepoPath $fixture.Repo -Workflow $pre.workflow|Out-Null
+    Push-Location $fixture.Repo
+    try {
+        "claude-$IssueNumber"|Set-Content -LiteralPath "claude-$IssueNumber.txt" -Encoding UTF8
+        git add .
+        git commit -q -m "claude $IssueNumber"
+        git push -q -u origin HEAD
+    } finally {Pop-Location}
+    return [pscustomobject]@{Fixture=$fixture;Probe=$probe;Preflight=$pre}
 }
 
 function New-PrMergeFixture {
@@ -943,8 +1025,6 @@ function New-RepoBehind {
     Pop-Location
     return $p
 }
-$implPush = { param($repo,$order,$target) Push-Location $repo; "y" | Out-File b.txt -Encoding utf8; git add .; git commit -q -m b; git push -q origin main; Pop-Location; [pscustomobject]@{ Success=$true; ExitCode=0 } }
-
 Describe 'v2.1-1. --claude-only 무한 루프 방지' {
     It '--claude-only 는 claude_only_required가 아니라 claude_execute를 반환하고 resumeCommand 재귀가 없다' {
         Invoke-ResetCommand | Out-Null
@@ -969,7 +1049,7 @@ Describe 'v2.1-2. claude-only 수행 후 postflight' {
         Invoke-ResetCommand | Out-Null
         $repo = New-FakeRepo -WithRemote
         try {
-            $res = Invoke-RunOperation -OperationNumber 2 -IssueNumber 31 -RepoPath $repo -IssueFetcher $issue -ClaudeOnly -ClaudeImplementer $implPush -CiProbe $ciNone
+            $res = Invoke-RunOperation -OperationNumber 2 -IssueNumber 31 -RepoPath $repo -IssueFetcher $issue -ClaudeOnly -ClaudeImplementer (New-ClaudeImplPush -Operation 2 -IssueNumber 31) -CiProbe $ciNone
             $res.status | Should Be 'completed'
             $res.route | Should Be 'claude-only-executed'
         } finally { Remove-Item -Recurse -Force $repo }
@@ -982,7 +1062,8 @@ Describe 'v2.1-2. claude-only 수행 후 postflight' {
             $d.status | Should Be 'claude_execute'
             # 세션이 직접 구현했다고 가정
             Push-Location $repo; "y" | Out-File b.txt -Encoding utf8; git add .; git commit -q -m b; git push -q origin main; Pop-Location
-            $pf = Invoke-PostflightCommand -Operation 2 -IssueNumber 32 -RepoPath $repo -CiProbe $ciNone
+            $report=Write-TestClaudeCompletionReport -Repo $repo -Operation 2 -IssueNumber 32
+            $pf = Invoke-PostflightCommand -Operation 2 -IssueNumber 32 -RepoPath $repo -CiProbe $ciNone -WorkerReportPath $report
             $pf.status | Should Be 'completed'
         } finally { Remove-Item -Recurse -Force $repo }
     }
@@ -995,7 +1076,7 @@ Describe 'v2.1-3. operation-3 claude_direct 실제 흐름' {
         Invoke-SetCommand -Target gpt -Value '80' | Out-Null
         $repo = New-FakeRepo -WithRemote
         try {
-            $res = Invoke-RunOperation -OperationNumber 3 -Kind mechanical -IssueNumber 33 -RepoPath $repo -IssueFetcher $issue -ClaudeImplementer $implPush -CiProbe $ciNone
+            $res = Invoke-RunOperation -OperationNumber 3 -Kind mechanical -IssueNumber 33 -RepoPath $repo -IssueFetcher $issue -ClaudeImplementer (New-ClaudeImplPush -Operation 3 -IssueNumber 33) -CiProbe $ciNone
             $res.status | Should Be 'completed'
             $res.route | Should Be 'claude-direct-executed'
             $res.model | Should Be 'claude-haiku-4-5-20251001'
@@ -3572,7 +3653,10 @@ Describe 'v3.0.0. Draft PR와 PR CI workflow' {
         $f=New-PrFakeRepo
         try {
             $ci=Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
-                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'},[pscustomobject]@{status='success';conclusion='success'})}}
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@(
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context 'build' -Id 1),
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context 'test' -Id 2)
+                )}}
             $ci|Should Be 'success'
         } finally {Remove-PrFakeRepo $f}
     }
@@ -3581,7 +3665,10 @@ Describe 'v3.0.0. Draft PR와 PR CI workflow' {
         $f=New-PrFakeRepo
         try {
             (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
-                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'},[pscustomobject]@{status='completed';conclusion='failure'})}})|Should Be 'failure'
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@(
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context 'build' -Id 1),
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context 'test' -Conclusion failure -Id 2)
+                )}})|Should Be 'failure'
         } finally {Remove-PrFakeRepo $f}
     }
 
@@ -3589,7 +3676,10 @@ Describe 'v3.0.0. Draft PR와 PR CI workflow' {
         $f=New-PrFakeRepo
         try {
             (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
-                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'},[pscustomobject]@{status='in_progress';conclusion=$null})}})|Should Be 'pending'
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@(
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context 'build' -Id 1),
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context 'test' -Status in_progress -Conclusion $null -Id 2)
+                )}})|Should Be 'pending'
         } finally {Remove-PrFakeRepo $f}
     }
 
@@ -3598,7 +3688,9 @@ Describe 'v3.0.0. Draft PR와 PR CI workflow' {
         try {
             foreach($value in @('neutral','skipped','mystery')){
                 $wanted=$value
-                $lister={param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion=$wanted})}}.GetNewClosure()
+                $lister={param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@(
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Conclusion $wanted)
+                )}}.GetNewClosure()
                 (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 -CheckLister $lister)|Should Be 'unavailable'
             }
         } finally {Remove-PrFakeRepo $f}
@@ -3633,9 +3725,10 @@ Describe 'v3.0.0. Draft PR와 PR CI workflow' {
     It '42. 첫 check만 성공이어도 뒤 check 실패를 포함해 전체를 집계한다' {
         $f=New-PrFakeRepo
         try {
-            $checks=@([pscustomobject]@{status='completed';conclusion='success'},[pscustomobject]@{status='completed';conclusion='cancelled'})
-            $all=$checks
-            $lister={param($p,$n,$h)[pscustomobject]@{ok=$true;checks=$all}}.GetNewClosure()
+            $lister={param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@(
+                (New-PrCiCheck -PrNumber $n -HeadSha $h -Context 'build' -Id 1),
+                (New-PrCiCheck -PrNumber $n -HeadSha $h -Context 'test' -Conclusion cancelled -Id 2)
+            )}}
             (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 1 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 -CheckLister $lister)|Should Be 'failure'
         } finally {Remove-PrFakeRepo $f}
     }
@@ -3759,15 +3852,15 @@ Describe 'v3.0.0. workflow receipt와 merge_ready' {
         } finally {Remove-PrFakeRepo $f}
     }
 
-    It '51. final PASS와 CI success가 모두 확인되면 merge_ready이고 Draft를 해제한다' {
+    It '51. final PASS와 PR 연결 CI success가 모두 확인되면 Draft 유지 merge_ready다' {
         $m=New-PrMergeFixture -IssueNumber 51
         try {
             $res=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 51 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe `
-                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'})}}
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h))}}
             $res.status|Should Be 'merge_ready'
-            $res.prDraft|Should Be $false
+            $res.prDraft|Should Be $true
             $res.merged|Should Be $false
-            $m.Probe.State.ReadyCalls|Should Be 1
+            $m.Probe.State.ReadyCalls|Should Be 0
         } finally {Remove-PrFakeRepo $m.Fixture}
     }
 
@@ -3775,7 +3868,7 @@ Describe 'v3.0.0. workflow receipt와 merge_ready' {
         $m=New-PrMergeFixture -IssueNumber 52
         try {
             $res=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 52 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe `
-                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='in_progress';conclusion=$null})}}
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h -Status in_progress -Conclusion $null))}}
             $res.status|Should Be 'pr_ci_pending';$res.mergeReady|Should Be $false;$m.Probe.State.ReadyCalls|Should Be 0
         } finally {Remove-PrFakeRepo $m.Fixture}
     }
@@ -3784,7 +3877,7 @@ Describe 'v3.0.0. workflow receipt와 merge_ready' {
         $m=New-PrMergeFixture -IssueNumber 53
         try {
             $res=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 53 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe `
-                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='failure'})}}
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h -Conclusion failure))}}
             $res.status|Should Be 'pr_ci_failed';$res.mergeReady|Should Be $false;$m.Probe.State.ReadyCalls|Should Be 0
         } finally {Remove-PrFakeRepo $m.Fixture}
     }
@@ -3823,15 +3916,448 @@ Describe 'v3.0.0. workflow receipt와 merge_ready' {
         } finally {Remove-PrFakeRepo $m.Fixture}
     }
 
-    It '57. finalize는 ready-for-review만 호출하고 자동 merge를 호출하지 않는다' {
+    It '57. finalize는 Draft 해제와 자동 merge를 모두 호출하지 않는다' {
         $m=New-PrMergeFixture -IssueNumber 57
         try {
             $res=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 57 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe `
-                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@([pscustomobject]@{status='completed';conclusion='success'})}}
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h))}}
             $res.status|Should Be 'merge_ready'
+            $m.Probe.State.ReadyCalls|Should Be 0
+            @($m.Probe.State.Actions|Where-Object{$_ -eq 'ready'}).Count|Should Be 0
             @($m.Probe.State.Actions|Where-Object{$_ -eq 'merge'}).Count|Should Be 0
             (Get-Content -LiteralPath (Join-Path $ScriptsDir 'git-workflow.ps1') -Raw -Encoding UTF8)|Should Not Match 'gh\s+pr\s+merge'
         } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+}
+
+Describe 'v3.0.0 외부 비판적 검토 결함 회귀' {
+    BeforeEach {
+        $script:v3ReviewSavedBoundary=$env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=Join-Path $TestWorkRoot 'v3-review-safe-boundary.txt'
+        if(-not (Test-Path -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)){
+            'safe'|Set-Content -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -Encoding UTF8
+        }
+        Set-TestGitWorkflow -Mode pull-request
+        $reviewConfig=Get-Content -LiteralPath $Script:ConfigPath -Raw -Encoding UTF8|ConvertFrom-Json
+        $script:v3ReviewPollingInterval=[int]$reviewConfig.ciPolling.intervalSeconds
+        $script:v3ReviewPollingAttempts=[int]$reviewConfig.ciPolling.maxAttempts
+        $reviewConfig.ciPolling.intervalSeconds=0
+        $reviewConfig.ciPolling.maxAttempts=1
+        [System.IO.File]::WriteAllText($Script:ConfigPath,($reviewConfig|ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        $reviewConfig=Get-Content -LiteralPath $Script:ConfigPath -Raw -Encoding UTF8|ConvertFrom-Json
+        $reviewConfig.ciPolling.intervalSeconds=$script:v3ReviewPollingInterval
+        $reviewConfig.ciPolling.maxAttempts=$script:v3ReviewPollingAttempts
+        [System.IO.File]::WriteAllText($Script:ConfigPath,($reviewConfig|ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+        Set-TestGitWorkflow -Mode direct-main
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=$script:v3ReviewSavedBoundary
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It 'Claude 완료 보고가 없으면 valid provenance와 merge_ready를 차단한다' {
+        $c=New-ClaudePrPostflightFixture -IssueNumber 601
+        try {
+            $pf=Invoke-PostflightCommand -Operation 2 -IssueNumber 601 -RepoPath $c.Fixture.Repo -PrProbe $c.Probe.Probe `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $pf.localVerificationComplete|Should Be $false
+            $pf.verificationProvenance|Should Be 'claude_completion_report_missing'
+            $receipt=Get-RunReceipt -Operation 2 -IssueNumber 601 -RepoPath $c.Fixture.Repo
+            $receipt.resultEnvelopePresent|Should Be $false
+            $receipt.verificationProvenance|Should Not Match '^valid_'
+            (Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 601 -ReviewVerdict PASS -RepoPath $c.Fixture.Repo -PrProbe $c.Probe.Probe `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h))}}).status|Should Be 'worker_result_unverified'
+        } finally {Remove-PrFakeRepo $c.Fixture}
+    }
+
+    It 'Claude 완료 보고 JSON이 잘못되면 merge_ready를 차단한다' {
+        $c=New-ClaudePrPostflightFixture -IssueNumber 602
+        try {
+            $path=Get-ClaudeCompletionReportPath -Operation 2 -IssueNumber 602 -RepoPath $c.Fixture.Repo
+            [System.IO.File]::WriteAllText($path,'{not-json',(New-Object System.Text.UTF8Encoding($false)))
+            $pf=Invoke-PostflightCommand -Operation 2 -IssueNumber 602 -RepoPath $c.Fixture.Repo -PrProbe $c.Probe.Probe -WorkerReportPath $path `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $pf.completionReportReason|Should Be 'claude_completion_report_invalid_json'
+            (Get-RunReceipt -Operation 2 -IssueNumber 602 -RepoPath $c.Fixture.Repo).localVerificationComplete|Should Be $false
+            $fixed=[ordered]@{
+                schemaVersion=1;operation=2;issueNumber=602;head=(Get-GitHead -Path $c.Fixture.Repo)
+                workBranch='operation-router/issue-602';localVerificationComplete=$true
+                verification='  CURRENT CLAUDE SESSION COMPLETED IMPLEMENTATION  ';remainingProblems=@()
+            }|ConvertTo-Json -Compress
+            (ConvertFrom-ClaudeCompletionReport -Json $fixed -ExpectedOperation 2 -ExpectedIssueNumber 602 `
+                -ExpectedHead (Get-GitHead -Path $c.Fixture.Repo) -ExpectedWorkBranch 'operation-router/issue-602').valid|Should Be $false
+        } finally {Remove-PrFakeRepo $c.Fixture}
+    }
+
+    It 'Claude 보고의 localVerificationComplete false는 merge_ready를 차단한다' {
+        $c=New-ClaudePrPostflightFixture -IssueNumber 603
+        try {
+            $path=Write-TestClaudeCompletionReport -Repo $c.Fixture.Repo -Operation 2 -IssueNumber 603 -LocalVerificationComplete:$false
+            Invoke-PostflightCommand -Operation 2 -IssueNumber 603 -RepoPath $c.Fixture.Repo -PrProbe $c.Probe.Probe -WorkerReportPath $path `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}|Out-Null
+            $receipt=Get-RunReceipt -Operation 2 -IssueNumber 603 -RepoPath $c.Fixture.Repo
+            $receipt.verificationProvenance|Should Be 'valid_claude_completion_report'
+            $receipt.localVerificationComplete|Should Be $false
+            (Get-WorkflowMergeReadiness -RepoPath $c.Fixture.Repo -Receipt $receipt -ReviewVerdict PASS -PrProbe $c.Probe.Probe).status|Should Be 'worker_result_unverified'
+        } finally {Remove-PrFakeRepo $c.Fixture}
+    }
+
+    It 'Claude 보고에 remainingProblems가 있으면 merge_ready를 차단한다' {
+        $c=New-ClaudePrPostflightFixture -IssueNumber 604
+        try {
+            $path=Write-TestClaudeCompletionReport -Repo $c.Fixture.Repo -Operation 2 -IssueNumber 604 -RemainingProblems @('manual check remains')
+            Invoke-PostflightCommand -Operation 2 -IssueNumber 604 -RepoPath $c.Fixture.Repo -PrProbe $c.Probe.Probe -WorkerReportPath $path `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}|Out-Null
+            $receipt=Get-RunReceipt -Operation 2 -IssueNumber 604 -RepoPath $c.Fixture.Repo
+            (Get-WorkflowMergeReadiness -RepoPath $c.Fixture.Repo -Receipt $receipt -ReviewVerdict PASS -PrProbe $c.Probe.Probe).status|Should Be 'worker_reported_remaining_problems'
+        } finally {Remove-PrFakeRepo $c.Fixture}
+    }
+
+    It '유효한 Claude 보고가 정확한 HEAD와 branch에 연결되면 Draft 유지 merge_ready가 가능하다' {
+        $c=New-ClaudePrPostflightFixture -IssueNumber 605
+        try {
+            $path=Write-TestClaudeCompletionReport -Repo $c.Fixture.Repo -Operation 2 -IssueNumber 605
+            $pf=Invoke-PostflightCommand -Operation 2 -IssueNumber 605 -RepoPath $c.Fixture.Repo -PrProbe $c.Probe.Probe -WorkerReportPath $path `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $pf.localVerificationComplete|Should Be $true
+            $pf.verificationProvenance|Should Be 'valid_claude_completion_report'
+            $final=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 605 -ReviewVerdict PASS -RepoPath $c.Fixture.Repo -PrProbe $c.Probe.Probe `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h))}}
+            $final.status|Should Be 'merge_ready'
+            $final.prDraft|Should Be $true
+            $c.Probe.State.ReadyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $c.Fixture}
+    }
+
+    It '다른 HEAD에 연결된 Claude 보고는 검증 증거가 아니다' {
+        $c=New-ClaudePrPostflightFixture -IssueNumber 606
+        try {
+            $path=Write-TestClaudeCompletionReport -Repo $c.Fixture.Repo -Operation 2 -IssueNumber 606 -Head ('f'*40)
+            $pf=Invoke-PostflightCommand -Operation 2 -IssueNumber 606 -RepoPath $c.Fixture.Repo -PrProbe $c.Probe.Probe -WorkerReportPath $path `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $pf.completionReportReason|Should Be 'claude_completion_report_head_mismatch'
+            (Get-RunReceipt -Operation 2 -IssueNumber 606 -RepoPath $c.Fixture.Repo).verificationProvenance|Should Not Match '^valid_'
+        } finally {Remove-PrFakeRepo $c.Fixture}
+    }
+
+    It 'base workflow를 receipt에 고정하고 head에서 전부 삭제하면 required_workflow_removed다' {
+        $f=New-PrFakeRepo -WithWorkflow;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 610 -Config (Get-Config)
+            $pre.workflow.baseWorkflow.exists|Should Be $true
+            @($pre.workflow.baseWorkflow.files).Count|Should Be 1
+            $pre.workflow.baseWorkflow.digest|Should Match '^[0-9a-f]{64}$'
+            Push-Location $f.Repo
+            try {
+                Remove-Item -LiteralPath '.github\workflows\ci.yml' -Force
+                git add -A
+                git commit -q -m 'remove workflow'
+                git push -q -u origin HEAD
+            } finally {Pop-Location}
+            $wr=[pscustomobject]@{Success=$true;ExitCode=0;WorkerReportedVerification='tests passed';WorkerRemainingProblems=@()}
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='medium'}
+            $pf=Resolve-PullRequestPostflight -RepoPath $f.Repo -StartSnapshot $pre.snapshot -WorkerResult $wr -Workflow $pre.workflow `
+                -Operation 2 -IssueNumber 610 -Route $route -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $pf.status|Should Be 'required_workflow_removed'
+            $pf.workflow.headWorkflow.exists|Should Be $false
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It 'base에 workflow가 없고 head에서 추가했는데 check가 없으면 unavailable이다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 611 -Config (Get-Config)
+            Push-Location $f.Repo
+            try {
+                New-Item -ItemType Directory -Path '.github\workflows' -Force|Out-Null
+                "name: added`non: [pull_request]`njobs: {}"|Set-Content -LiteralPath '.github\workflows\added.yml' -Encoding UTF8
+                git add .
+                git commit -q -m 'add workflow'
+                git push -q -u origin HEAD
+            } finally {Pop-Location}
+            $pf=Resolve-PullRequestPostflight -RepoPath $f.Repo -StartSnapshot $pre.snapshot `
+                -WorkerResult ([pscustomobject]@{Success=$true;ExitCode=0;WorkerReportedVerification='tests passed'}) -Workflow $pre.workflow `
+                -Operation 2 -IssueNumber 611 -Route ([pscustomobject]@{worker='grok';model='grok-4.5';effort='medium'}) `
+                -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $pf.status|Should Be 'pr_ci_unavailable'
+            $pf.workflow.baseWorkflow.exists|Should Be $false
+            $pf.workflow.headWorkflow.exists|Should Be $true
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It 'base와 head 모두 workflow가 없을 때만 check 0개를 not-requested로 허용한다' {
+        $f=New-PrFakeRepo
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 612 -Config (Get-Config)
+            $headSnapshot=Get-GitWorkflowSnapshot -RepoPath $f.Repo -Ref (Get-GitHead -Path $f.Repo)
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 612 -HeadSha (Get-GitHead -Path $f.Repo) `
+                -BaseWorkflow $pre.workflow.baseWorkflow -HeadWorkflow $headSnapshot -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}})|Should Be 'not-requested'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It 'base workflow를 유지하고 연결된 PR check가 success면 success다' {
+        $f=New-PrFakeRepo -WithWorkflow;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 613 -Config (Get-Config)
+            Push-Location $f.Repo
+            try {'change'|Set-Content change.txt;git add .;git commit -q -m change;git push -q -u origin HEAD}finally{Pop-Location}
+            $pf=Resolve-PullRequestPostflight -RepoPath $f.Repo -StartSnapshot $pre.snapshot `
+                -WorkerResult ([pscustomobject]@{Success=$true;ExitCode=0;WorkerReportedVerification='tests passed'}) -Workflow $pre.workflow `
+                -Operation 2 -IssueNumber 613 -Route ([pscustomobject]@{worker='grok';model='grok-4.5';effort='medium'}) -PrProbe $pr.Probe `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h))}}
+            $pf.status|Should Be 'pr_opened'
+            $pf.ciStatus|Should Be 'success'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It 'push 성공 check만 있으면 PR CI success로 인정하지 않는다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 620 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@(
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Event push)
+                )}})|Should Be 'unavailable'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '정확한 pull_request check만 PR CI success로 인정한다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 621 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h))}})|Should Be 'success'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '기본 gh probe도 Actions push suite를 버리고 실제 pull_request run suite만 인정한다' {
+        $f=New-PrFakeRepo
+        $global:FakeGhMode='push'
+        $global:FakeGhHead='a'*40
+        $global:FakeGhPr=625
+        function global:gh {
+            $request=($args -join ' ')
+            $global:LASTEXITCODE=0
+            if($request -match '/actions/runs\?'){
+                $runs=@()
+                if($global:FakeGhMode -eq 'pull_request'){
+                    $runs=@([pscustomobject]@{
+                        event='pull_request';head_sha=$global:FakeGhHead;check_suite_id=7;run_attempt=2
+                        updated_at='2026-07-23T00:00:00Z';pull_requests=@([pscustomobject]@{number=$global:FakeGhPr})
+                        repository=[pscustomobject]@{full_name='owner/repo'}
+                    })
+                }
+                ConvertTo-Json -InputObject @([pscustomobject]@{workflow_runs=$runs}) -Depth 12 -Compress
+                return
+            }
+            if($request -match '/commits/.+/check-suites'){
+                $linked=[pscustomobject]@{number=$global:FakeGhPr;head=[pscustomobject]@{sha=$global:FakeGhHead}}
+                $suite=[pscustomobject]@{
+                    id=7;head_sha=$global:FakeGhHead;pull_requests=@($linked)
+                    app=[pscustomobject]@{slug='github-actions'}
+                }
+                ConvertTo-Json -InputObject @([pscustomobject]@{check_suites=@($suite)}) -Depth 12 -Compress
+                return
+            }
+            if($request -match '/check-suites/7/check-runs'){
+                $check=[pscustomobject]@{
+                    id=8;head_sha=$global:FakeGhHead;name='verify';status='completed';conclusion='success'
+                    completed_at='2026-07-23T00:00:00Z';app=[pscustomobject]@{slug='github-actions'}
+                }
+                ConvertTo-Json -InputObject @([pscustomobject]@{check_runs=@($check)}) -Depth 12 -Compress
+                return
+            }
+            if($request -match '/commits/.+/status\?'){
+                ConvertTo-Json -InputObject @([pscustomobject]@{statuses=@()}) -Depth 12 -Compress
+                return
+            }
+            $global:LASTEXITCODE=1
+        }
+        try {
+            $push=Get-DefaultPullRequestChecks -RepoPath $f.Repo -OwnerRepo 'owner/repo' -PrNumber $global:FakeGhPr -HeadSha $global:FakeGhHead
+            $push.ok|Should Be $true
+            @($push.checks).Count|Should Be 0
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber $global:FakeGhPr -HeadSha $global:FakeGhHead `
+                -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 -CheckLister {param($p,$n,$h)$push})|Should Be 'unavailable'
+
+            $global:FakeGhMode='pull_request'
+            $pr=Get-DefaultPullRequestChecks -RepoPath $f.Repo -OwnerRepo 'owner/repo' -PrNumber $global:FakeGhPr -HeadSha $global:FakeGhHead
+            $pr.ok|Should Be $true
+            @($pr.checks).Count|Should Be 1
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber $global:FakeGhPr -HeadSha $global:FakeGhHead `
+                -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 -CheckLister {param($p,$n,$h)$pr})|Should Be 'success'
+        } finally {
+            Remove-Item Function:\global:gh -ErrorAction SilentlyContinue
+            Remove-Variable FakeGhMode,FakeGhHead,FakeGhPr -Scope Global -ErrorAction SilentlyContinue
+            Remove-PrFakeRepo $f
+        }
+    }
+
+    It '같은 context의 과거 failure보다 최신 rerun success를 사용한다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 622 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@(
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context test -Conclusion failure -Id 1 -UpdatedAt '2026-07-22T00:00:00Z'),
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context test -Conclusion success -Id 2 -UpdatedAt '2026-07-23T00:00:00Z')
+                )}})|Should Be 'success'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '현재 유효 context 하나라도 failure면 failure다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 623 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@(
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context build -Conclusion success -Id 1),
+                    (New-PrCiCheck -PrNumber $n -HeadSha $h -Context test -Conclusion failure -Id 2)
+                )}})|Should Be 'failure'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It 'PR 번호나 head SHA가 다른 check만 있으면 unavailable이다' {
+        $f=New-PrFakeRepo
+        try {
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 624 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber 999 -HeadSha $h))}})|Should Be 'unavailable'
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 624 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha ('b'*40)))}})|Should Be 'unavailable'
+            $unverified=New-PrCiCheck -PrNumber 624 -HeadSha ('a'*40)
+            Add-Member -InputObject $unverified -NotePropertyName associationVerified -NotePropertyValue $false
+            $unverifiedLister={param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@($unverified)}}.GetNewClosure()
+            (Get-PullRequestCiStatus -RepoPath $f.Repo -PrNumber 624 -HeadSha ('a'*40) -WorkflowPresent $true -MaxAttempts 1 -PollIntervalSeconds 0 `
+                -CheckLister $unverifiedLister)|Should Be 'unavailable'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It 'finalize 재실행은 원격 Draft 상태를 바꾸지 않고 같은 merge_ready를 반환한다' {
+        $m=New-PrMergeFixture -IssueNumber 630
+        try {
+            $checks={param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h))}}
+            $first=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 630 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe -CheckLister $checks
+            $second=Invoke-FinalizeCommand -OperationNumber 2 -IssueNumber 630 -ReviewVerdict PASS -RepoPath $m.Fixture.Repo -PrProbe $m.Probe.Probe -CheckLister $checks
+            $first.status|Should Be 'merge_ready';$second.status|Should Be 'merge_ready'
+            $first.prDraft|Should Be $true;$second.prDraft|Should Be $true
+            $m.Probe.State.ReadyCalls|Should Be 0
+            (Get-Content -LiteralPath (Join-Path $ScriptsDir 'git-workflow.ps1') -Raw -Encoding UTF8)|Should Not Match 'gh\s+pr\s+ready'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '40,000자 뒤 결함도 파일별 diff chunk 검토에서 발견한다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $large=('A'*65000)+"`nCRITICAL_TAIL_DEFECT"
+            [System.IO.File]::WriteAllText((Join-Path $repo 'large.txt'),$large,(New-Object System.Text.UTF8Encoding($false)))
+            Push-Location $repo;try{git add large.txt;git commit -q -m large}finally{Pop-Location}
+            Save-TestRunReceipt -Repo $repo -IssueNum 640
+            $script:coverageCalls=0
+            $runner={
+                param($r,$prompt,$route)
+                $script:coverageCalls++
+                $text=Get-Content -LiteralPath $prompt -Raw -Encoding UTF8
+                if($text -match 'CRITICAL_TAIL_DEFECT'){
+                    return [pscustomobject]@{ExitCode=0;Success=$true;Output='{"verdict":"REPAIR_REQUIRED","findings":[{"severity":"high","file":"large.txt","issue":"tail defect","requiredFix":"repair tail"}]}'}
+                }
+                return [pscustomobject]@{ExitCode=0;Success=$true;Output='{"verdict":"PASS","findings":[]}'}
+            }
+            $review=Invoke-OperationReview -OperationNumber 1 -IssueNumber 640 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $runner
+            $review.verdict|Should Be 'REPAIR_REQUIRED'
+            $script:coverageCalls|Should BeGreaterThan 1
+            $review.coverageComplete|Should Be $true
+            $receipt=Get-ReviewReceipt -Operation 1 -IssueNumber 640 -RepoPath $repo
+            (@($receipt.changedFiles) -contains 'large.txt')|Should Be $true
+            (@($receipt.reviewedFiles) -contains 'large.txt')|Should Be $true
+            @($receipt.truncatedFiles).Count|Should Be 0
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It 'coverage receipt는 모든 changedFiles와 reviewedFiles 및 빈 truncatedFiles를 기록한다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        try {
+            'one'|Set-Content -LiteralPath (Join-Path $repo 'one.txt') -Encoding UTF8
+            'two'|Set-Content -LiteralPath (Join-Path $repo 'two.txt') -Encoding UTF8
+            Push-Location $repo;try{git add .;git commit -q -m two-files}finally{Pop-Location}
+            Save-TestRunReceipt -Repo $repo -IssueNum 642
+            $runner={param($r,$prompt,$route)[pscustomobject]@{ExitCode=0;Success=$true;Output='{"verdict":"PASS","findings":[]}'}}
+            $review=Invoke-OperationReview -OperationNumber 1 -IssueNumber 642 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $runner
+            $review.verdict|Should Be 'PASS'
+            $receipt=Get-ReviewReceipt -Operation 1 -IssueNumber 642 -RepoPath $repo
+            $receipt.coverageComplete|Should Be $true
+            @($receipt.changedFiles).Count|Should Be 2
+            @($receipt.reviewedFiles).Count|Should Be 2
+            @($receipt.truncatedFiles).Count|Should Be 0
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
+    }
+
+    It '원격 CI는 pull_request와 main push에서 Windows 정식 검증을 secret 없이 실행한다' {
+        $workflowPath=Join-Path $RouterRoot '.github\workflows\operation-router-tests.yml'
+        (Test-Path -LiteralPath $workflowPath)|Should Be $true
+        $raw=Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
+        $raw|Should Match '(?m)^\s{2}pull_request:'
+        $raw|Should Match '(?m)^\s{2}push:'
+        $raw|Should Match 'runs-on:\s*windows-latest'
+        $raw|Should Match 'tests\\run-tests\.ps1'
+        $raw|Should Match 'tests\\run-installed-fixture\.ps1'
+        $raw|Should Match 'Language\.Parser'
+        $raw|Should Match 'config\\config\.json'
+        $raw|Should Match 'manifest-sha256\.txt'
+        $raw|Should Not Match 'pull_request_target'
+        $raw|Should Not Match '\$\{\{\s*secrets\.'
+    }
+}
+
+Describe 'v3.0.0 review coverage fail-closed 회귀' {
+    BeforeEach {
+        $script:v3CoverageSavedBoundary=$env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=Join-Path $TestWorkRoot 'v3-coverage-safe-boundary.txt'
+        if(-not (Test-Path -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)){
+            'safe'|Set-Content -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -Encoding UTF8
+        }
+        Set-TestGitWorkflow -Mode direct-main
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=$script:v3CoverageSavedBoundary
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It 'diff chunk 검토 worker가 하나라도 실패하면 PASS를 금지하고 incomplete coverage receipt를 남긴다' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $repo 'large-fail.txt'),('B'*65000),(New-Object System.Text.UTF8Encoding($false)))
+            Push-Location $repo;try{git add large-fail.txt;git commit -q -m large}finally{Pop-Location}
+            Save-TestRunReceipt -Repo $repo -IssueNum 641
+            $script:coverageFailureCalls=0
+            $runner={
+                param($r,$prompt,$route)
+                $script:coverageFailureCalls++
+                if($script:coverageFailureCalls -gt 1){return [pscustomobject]@{ExitCode=1;Success=$false;Output='review failed'}}
+                return [pscustomobject]@{ExitCode=0;Success=$true;Output='{"verdict":"PASS","findings":[]}'}
+            }
+            $review=Invoke-OperationReview -OperationNumber 1 -IssueNumber 641 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $runner
+            $review.status|Should Be 'review_worker_failed'
+            $review.verdict|Should Be $null
+            @($review.reviewedFiles).Count|Should Be 0
+            $review.coverageReceiptPath|Should Not BeNullOrEmpty
+            (Test-Path -LiteralPath $review.coverageReceiptPath -PathType Leaf)|Should Be $true
+            $rawCoverage=Get-Content -LiteralPath $review.coverageReceiptPath -Raw -Encoding UTF8|ConvertFrom-Json
+            $rawCoverage.verdict|Should Be 'INCOMPLETE'
+            $currentCoveragePath=Get-ReviewReceiptPath -Operation 1 -IssueNumber 641 -RepoPath $repo
+            $currentCoveragePath|Should Be $review.coverageReceiptPath
+            (Test-Path -LiteralPath $currentCoveragePath -PathType Leaf)|Should Be $true
+            $coverageReceipt=Get-ReviewReceipt -Operation 1 -IssueNumber 641 -RepoPath $repo
+            $coverageReceipt|Should Not BeNullOrEmpty
+            @($coverageReceipt).Count|Should Be 1
+            (@($coverageReceipt.PSObject.Properties.Name) -contains 'verdict')|Should Be $true
+            $coverageReceipt.verdict|Should Be 'INCOMPLETE'
+            $coverageReceipt.reviewStatus|Should Be 'review_worker_failed'
+            $coverageReceipt.coverageComplete|Should Be $false
+            @($coverageReceipt.changedFiles).Count|Should Be 1
+            @($coverageReceipt.reviewedFiles).Count|Should Be 0
+            @($coverageReceipt.truncatedFiles).Count|Should Be 0
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force}
     }
 }
 

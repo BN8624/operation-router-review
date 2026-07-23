@@ -66,7 +66,7 @@ Claude 세션이 이미 종료됐거나 사용자가 나중에 새 세션으로 
 ```
 
 ### `/operation finalize <작전번호> <이슈번호>`
-Operation 1 Opus 또는 Operation 2 Sonnet의 최종 종료 검토가 PASS일 때만 호출한다. 라우터는 receipt·현재 branch/HEAD·Draft PR base/head/head SHA·push·CI·sanitization·retention·boundary 상태를 다시 검증한다. 조건을 모두 만족하면 Draft를 ready-for-review로 바꾸고 `merge_ready`를 반환하지만 자동 병합하지 않는다.
+Operation 1 Opus 또는 Operation 2 Sonnet의 최종 종료 검토가 PASS일 때만 호출한다. 라우터는 receipt·현재 branch/HEAD·Draft PR base/head/head SHA·push·CI·sanitization·retention·boundary 상태를 다시 검증한다. 조건을 모두 만족하면 Draft 상태를 유지한 채 `merge_ready`를 반환한다. Ready 전환과 병합은 사용자가 GitHub에서 별도로 수행한다.
 ```
 & "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command finalize -Operation <작전번호> -IssueNumber <이슈번호> -ReviewVerdict PASS
 # Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command finalize -Operation <작전번호> -IssueNumber <이슈번호> -ReviewVerdict PASS
