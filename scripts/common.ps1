@@ -335,7 +335,12 @@ function ConvertFrom-WorkerCompletionReport {
         }
     }
     $candidate=if($structured.Count -gt 0){[string]$structured[$structured.Count-1]}else{$Text}
-    $matches=[regex]::Matches($candidate,'(?m)^\s*\[ORH_WORKER_REPORT\]\s*(\{[^\r\n]+\})\s*$')
+    # F2: 마커와 JSON 사이의 CLI 장식을 허용한다. grok은 계약대로 보고하면서도 마커 뒤에
+    # ': #display-json' 같은 렌더링 주석을 덧붙인다(2026-07-24 op1-issue19 실측). 이전 정규식은
+    # 마커와 '{' 사이에 공백만 허용해, 계약을 지킨 성공 실행의 보고를 worker_report_missing으로
+    # 버리고 localVerificationComplete=false로 만들어 finalize의 merge_ready 도달을 막았다.
+    # '{'가 아닌 문자만 건너뛰므로 JSON 본문 자체는 그대로 첫 '{'부터 캡처된다.
+    $matches=[regex]::Matches($candidate,'(?m)^\s*\[ORH_WORKER_REPORT\][^\{\r\n]*(\{[^\r\n]+\})\s*$')
     if($matches.Count -eq 0){return (& $invalid 'worker_report_missing')}
     try{$report=$matches[$matches.Count-1].Groups[1].Value|ConvertFrom-Json -ErrorAction Stop}catch{return (& $invalid 'worker_report_invalid_json')}
     if($null -eq $report){return (& $invalid 'worker_report_null')}

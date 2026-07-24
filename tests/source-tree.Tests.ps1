@@ -3460,6 +3460,28 @@ Describe 'v3.0.0. issue branch와 Draft PR workflow' {
         (ConvertFrom-WorkerCompletionReport -Text '[ORH_WORKER_REPORT] {"localVerificationComplete":true,"verification":"x","remainingProblems":"none"}').valid|Should Be $false
     }
 
+    It 'F2. 마커와 JSON 사이의 CLI 장식이 있어도 완료 보고를 읽는다' {
+        # 회귀: grok은 계약대로 보고하면서 마커 뒤에 ': #display-json' 렌더링 주석을 붙인다
+        # (2026-07-24 op1-issue19 실측). 이전 정규식은 공백만 허용해 성공 실행의 보고를 버렸고,
+        # localVerificationComplete=false가 되어 finalize가 merge_ready에 도달하지 못했다.
+        $body='{"localVerificationComplete":true,"verification":"lint/typecheck/test(407) PASS","remainingProblems":[]}'
+        $decorated="[ORH_WORKER_REPORT]: #display-json $body"
+        $r=ConvertFrom-WorkerCompletionReport -Text $decorated
+        $r.valid|Should Be $true
+        $r.localVerificationComplete|Should Be $true
+        $r.verification|Should Be 'lint/typecheck/test(407) PASS'
+
+        # grok JSON 봉투 안에 장식된 마커가 들어 있어도 동일하게 복원한다
+        $grokEnvelope=([pscustomobject]@{text="작업 완료`n$decorated";stopReason='EndTurn'}|ConvertTo-Json -Compress)
+        (ConvertFrom-WorkerCompletionReport -Text $grokEnvelope).valid|Should Be $true
+
+        # 장식이 없는 기존 형식도 계속 동작한다
+        (ConvertFrom-WorkerCompletionReport -Text "[ORH_WORKER_REPORT] $body").valid|Should Be $true
+
+        # 스키마 위반은 장식이 있어도 여전히 거부한다 (fail-closed 유지)
+        (ConvertFrom-WorkerCompletionReport -Text '[ORH_WORKER_REPORT]: #display-json {"localVerificationComplete":"true","verification":"x","remainingProblems":[]}').valid|Should Be $false
+    }
+
     It '15. PR mode 주문서는 main checkout과 main push를 명시적으로 금지한다' {
         $w=[pscustomobject]@{mode='pull-request';baseBranch='main';baseHead=('1'*40);workBranch='operation-router/issue-15'
             remoteWorkBranch='origin/operation-router/issue-15';issueNumber=15}
