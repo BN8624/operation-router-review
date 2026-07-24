@@ -3,13 +3,13 @@ name: operation-1
 description: 작전 1 — 고위험 전체 지휘·검수. 현재 Opus 세션이 시작 위험 검토 → 작업자 구현 → GPT Sol 독립 검수 → 수리 1회 → 종료 판정을 수행한다. GitHub 이슈 번호를 인수로 받는다.
 argument-hint: <이슈번호> [--use-gpt-review-reserve] [--finish-current] [--claude-only]
 disable-model-invocation: false
-model: claude-opus-4-8
+model: claude-opus-5
 effort: high
 ---
 
 # 작전 1 (고위험)
 
-이 Skill은 Claude Opus 4.8 / high 세션에서만 실행된다 (frontmatter로 고정). 동적 모델 전환은 하지 않는다.
+이 Skill은 Claude Opus 5 / high 세션에서만 실행된다 (frontmatter로 고정). 동적 모델 전환은 하지 않는다.
 이슈번호는 slash-command 첫 위치 인수 `$0`에서 읽는다. 실행기는 `operation-router.cmd`만 사용한다.
 PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 사용한다.
 

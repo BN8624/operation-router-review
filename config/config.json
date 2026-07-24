@@ -1,5 +1,5 @@
 {
-  "_comment": "operation-router v3.0.0 config. New bundles default to issue branches and Draft PRs. A legacy installed config with no gitWorkflow object remains direct-main. Routing and model assignments are unchanged from v2.4.7.",
+  "_comment": "operation-router v3.0.1 config. New bundles default to issue branches and Draft PRs. A legacy installed config with no gitWorkflow object remains direct-main. Routing is unchanged; the Operation 1 Claude session is pinned to Claude Opus 5.",
   "gitWorkflow": {
     "mode": "pull-request",
     "baseBranch": "main",
@@ -76,7 +76,7 @@
     }
   },
   "claudeSession": {
-    "1": { "model": "claude-opus-4-8", "effort": "high" },
+    "1": { "model": "claude-opus-5", "effort": "high" },
     "2": { "model": "claude-sonnet-5", "effort": "medium" },
     "3": { "model": "claude-haiku-4-5-20251001", "effort": "low" },
     "dispatcher": { "model": "claude-haiku-4-5-20251001", "effort": "low" }

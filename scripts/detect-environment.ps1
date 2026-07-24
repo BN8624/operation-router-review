@@ -151,9 +151,9 @@ function Invoke-EnvironmentDetection {
 
     # Skill frontmatter 지원 (claude.exe 문자열 실측으로 확인된 사실. executionVerified=false).
     $report.skillFrontmatter.supportedKeysConfirmed = @('name','description','model','allowed-tools','argument-hint','disable-model-invocation','user-invocable','effort','when_to_use')
-    $report.skillFrontmatter.modelIdsRecognized = @('claude-opus-4-8','claude-sonnet-5','claude-haiku-4-5-20251001')
+    $report.skillFrontmatter.modelIdsRecognized = @('claude-opus-5','claude-sonnet-5','claude-haiku-4-5-20251001')
     $report.skillFrontmatter.dynamicModelSwitchConfirmed = $false
-    $report.skillFrontmatter.note = 'Confirmed by inspecting claude.exe frontmatter key allowlist; not runtime-executed.'
+    $report.skillFrontmatter.note = 'Configured model IDs are pinned by the bundle. Frontmatter key support was inspected in claude.exe; no paid model session was run.'
 
     return $report
 }

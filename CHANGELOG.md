@@ -2,6 +2,12 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
+## v3.0.1 (2026-07-25)
+
+- models: Operation 1 Claude 세션의 고정 모델 ID를 `claude-opus-4-8`에서 `claude-opus-5`로 갱신했다. 기존 `effort: high`, 라우팅, fallback, PR workflow 상태 머신은 변경하지 않았다.
+- consistency: config, Skill frontmatter, doctor 보고, README 모델표와 source-tree 회귀 기대값을 같은 모델 ID로 맞췄다.
+- verification: 모델 가용성을 증명하기 위한 유료 Claude 세션은 실행하지 않으며, 공식 고정 모델 ID와 Claude Code의 전체 모델명 입력 지원을 근거로 삼고 source-tree·installed fixture에서 계약 정합성을 검증한다.
+
 ## v3.0.0 PR #2 외부 검토 수리 (2026-07-23)
 
 - Claude postflight: Claude-only/direct 완료를 고정 문자열로 신뢰하던 경로를 제거했다. 별도 JSON 보고서를 operation, issue, current HEAD, expected work branch에 묶어 검증하며 누락·invalid·`localVerificationComplete=false`·남은 문제·다른 HEAD는 `merge_ready`를 차단한다.
