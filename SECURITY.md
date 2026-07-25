@@ -1,12 +1,12 @@
-# SECURITY — operation-router v3.0.2
+# SECURITY — operation-router v3.0.3
 
 ## 모델 계약
 
 - 새 번들의 모델 배치는 `config/config.json`이 단일 원본이며 `modelPolicy.selection=pinned`를 사용한다.
 - `latest`와 family alias는 공급자가 가리키는 실제 모델이 예고 없이 달라질 수 있으므로 허용하지 않는다. 모든 provider ID는 숫자가 포함된 안전한 고정 문자열이어야 한다.
-- 동기화 도구는 config를 기준으로 Skill 6종의 정적 `model`·`effort`와 README 생성 표를 검사한다. Operation 2의 session/Claude-only와 Operation 3의 session/mechanical처럼 한 Skill을 공유하는 경로가 다른 모델을 요구하면 fail-closed한다.
+- 동기화 도구는 config를 기준으로 Skill 6종의 정적 `model`·`effort`, README의 Claude·Grok·GPT 생성 표, CI용 합성 Codex model cache를 검사한다. Operation 2의 session/Claude-only와 Operation 3의 session/mechanical처럼 한 Skill을 공유하는 경로가 다른 모델을 요구하면 fail-closed한다.
 - CI는 `scripts/sync-model-contract.ps1 -Check`를 실행한다. 이 검사는 drift와 위험 alias를 막지만 공급자 계정에서 모델이 실제 사용 가능한지는 증명하지 않는다.
-- 공급자 출시·폐기 발견은 `notify-only`다. 자동 변경은 새 모델의 권한·가격·행동 차이를 검토 없이 실행에 투입할 수 있어 구현하지 않는다.
+- 공급자 출시·폐기 발견은 `notify-only`다. `doctor`는 config의 Grok/GPT ID를 로컬 CLI 목록·cache와 비교하지만 Claude 계정 가용성이나 실제 실행 성공은 증명하지 않는다. 자동 변경은 새 모델의 권한·가격·행동 차이를 검토 없이 실행에 투입할 수 있어 구현하지 않는다.
 - 이미 시작한 실행은 receipt에 고정한 model을 사용한다. 이후 config 변경으로 active 실행의 모델을 재해석하지 않는다.
 
 ## Git workflow 방어

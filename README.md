@@ -1,4 +1,4 @@
-# operation-router (v3.0.2)
+# operation-router (v3.0.3)
 
 ## v3.0.0 기본 Git workflow
 
@@ -216,19 +216,21 @@ Claude Code 2.1.212의 SKILL.md frontmatter는 `model`·`effort`를 **정적(로
 | operation | claude-haiku-4-5-20251001 | low | status/doctor/watch/recover/finalize/set/reset 디스패처 |
 <!-- model-contract:end -->
 
-`config/config.json`이 모델 지정의 유일한 수동 편집 지점이다. 새 고정 모델 ID를 확인한 뒤 config만 바꾸고 `scripts/sync-model-contract.ps1 -Write`를 실행하면 6개 Skill의 정적 frontmatter와 위 표가 함께 갱신된다. `-Check`는 config·Skill·README drift, Operation 2 공유 Skill 불일치, Operation 3 mechanical 공유 Skill 불일치, `latest`/family alias를 fail-closed로 거부하며 CI에서도 실행한다. 자동 업그레이드는 하지 않고 공급자 출시·폐기 발견은 `notify-only` 정책으로 남긴다. 이미 시작한 실행은 receipt의 기존 model을 계속 사용한다.
+`config/config.json`이 모델 지정의 유일한 수동 편집 지점이다. 새 고정 모델 ID를 확인한 뒤 config만 바꾸고 `scripts/sync-model-contract.ps1 -Write`를 실행하면 6개 Skill의 정적 frontmatter, Claude 표, Grok/GPT 표, CI용 합성 Codex model cache가 함께 갱신된다. `-Check`는 config·생성물 drift, Operation 2 공유 Skill 불일치, Operation 3 mechanical 공유 Skill 불일치, `latest`/family alias를 fail-closed로 거부하며 CI에서도 실행한다. 자동 업그레이드는 하지 않고 `doctor`가 config에 지정된 Grok/GPT ID를 로컬 CLI 목록·cache와 비교해 알린다. 이미 시작한 실행은 receipt의 기존 model을 계속 사용한다.
 
 ## 작업자(Grok/GPT) 경로
 
+<!-- worker-model-contract:start -->
 | 작전 | Grok 가능 | Grok 소진 + GPT 작업 허용 | GPT 차단(80%+/reserved/exhausted) |
 |---|---|---|---|
-| 1 구현 | grok-4.5 high | sol 역할 high† | claude_only_required (`claudeOnly.1`) |
-| 1 검수 | — | sol 역할 high† | claude_review_fallback (Opus 직접) / 예비분은 `--use-gpt-review-reserve`만 |
-
-† sol 역할은 `gpt-5.6-sol`에 매핑된다. 2026-07-22 `codex-cli 0.144.5` models_cache에서 Sol 노출을 확인해, 테스트 환경의 임시 `gpt-5.6-terra` 매핑을 제거했다. 과거 Terra로 수행한 V11~V13·V15는 실제 Sol 재검증 전까지 `PASS_PENDING_SOL_RETEST`를 유지한다.
+| 1 구현 | grok-4.5 high | gpt-5.6-sol high | claude_only_required (`claudeOnly.1`) |
+| 1 검수 | — | gpt-5.6-sol high | claude_review_fallback (Opus 직접) / 예비분은 `--use-gpt-review-reserve`만 |
 | 2 구현 | grok-4.5 medium | gpt-5.6-terra medium | claude_only_required (`claudeOnly.2`) |
 | 3 logic | grok-4.5 low | gpt-5.6-terra medium | claude_only_required (`claudeOnly.3.logic`) |
 | 3 mechanical | grok-4.5 low | gpt-5.6-luna low | claude_direct (`claudeOnly.3.mechanical`, 기계적 작업만) |
+<!-- worker-model-contract:end -->
+
+`sol`·`terra`·`luna`는 라우팅 역할 이름이며 실제 모델 ID는 위 표처럼 config에서 생성된다. 과거 Terra로 수행한 V11~V13·V15는 실제 Sol 재검증 전까지 `PASS_PENDING_SOL_RETEST`를 유지한다.
 
 ## 사용량 수동 관리
 
@@ -387,5 +389,5 @@ Windows PowerShell 5.1 (`powershell.exe`)만 있고 `pwsh`는 없다. 스크립�
 - **중첩 claude 실행 미확인**: 자동 재귀 실행 안 함. claude-only는 수동 재개.
 - **GPT/Grok 사용량 자동 조회 불가**: 전부 수동(`/operation set`).
 - **작전 1 Sol 재검증 대기**: 임시 Terra 매핑은 제거했고 작전 1은 `gpt-5.6-sol`을 사용한다. 다만 Terra로 수행한 기존 V11~V13·V15는 Sol로 재실행해 통과하기 전까지 `PASS_PENDING_SOL_RETEST`를 유지한다. 상세는 [VERIFICATION_MATRIX.md](VERIFICATION_MATRIX.md).
-- **공급자 모델 발견은 notify-only**: 새 모델 출시·기존 모델 폐기는 자동 반영하지 않는다. 공식 고정 ID를 확인해 config를 갱신하고 model contract 동기화·검증을 수행해야 한다.
+- **공급자 모델 발견은 notify-only**: 새 모델 출시·기존 모델 폐기는 자동 반영하지 않는다. 공식 고정 ID를 확인해 config를 갱신하고 model contract 동기화·검증을 수행해야 한다. `doctor`는 config의 Grok/GPT ID를 로컬 CLI 목록·cache와 비교하지만 Claude 계정 가용성이나 실제 유료 실행 성공을 증명하지 않는다.
 - **한글 별칭 `/작전` 미제공**: 별칭 필드 지원 미확인.

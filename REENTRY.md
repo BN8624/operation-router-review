@@ -47,7 +47,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-model-contr
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-model-contract.ps1 -Check
 ```
 
-`-Write`는 6개 Skill의 `model`·`effort`와 README 생성 표만 갱신한다. `-Check`는 model policy, 고정 ID, 공유 Skill 제약, config·Skill·README drift를 검사한다. 실행 중인 receipt의 model은 config 변경으로 바뀌지 않는다.
+`-Write`는 6개 Skill의 `model`·`effort`, README의 Claude·Grok·GPT 생성 표, CI용 합성 Codex model cache를 갱신한다. `-Check`는 model policy, 고정 ID, 공유 Skill 제약, 모든 생성물 drift를 검사한다. `doctor`는 config에 지정된 Grok/GPT ID를 로컬 CLI 목록·cache와 비교한다. 실행 중인 receipt의 model은 config 변경으로 바뀌지 않는다.
 
 ## 재검증
 
@@ -67,6 +67,6 @@ git rev-list --left-right --count origin/main...HEAD
 - worker deny 계약은 우회될 수 있고 postflight는 일부 위반을 사후 탐지한다.
 - GitHub 계정과 token 권한은 별도 신뢰 경계다.
 - repository mutation lock은 한 clone 안에서만 동시 실행을 막는다.
-- 공급자 모델 출시·폐기 발견은 `notify-only` 운영 절차다. doctor의 configured ID 보고는 현재 config를 보여줄 뿐 공급자 가용성을 증명하거나 자동 교체하지 않는다.
+- 공급자 모델 출시·폐기 발견은 `notify-only` 운영 절차다. doctor는 config의 Grok/GPT ID가 로컬 CLI 목록·cache에 있는지 비교하지만 Claude 계정 가용성이나 실제 유료 실행 성공을 증명하거나 모델을 자동 교체하지 않는다.
 - 대상 저장소 CI가 `pull_request` event를 지원해야 한다. operation-router가 대상 Actions 설정을 자동 변경하지 않는다.
 - active 실행 중 prompt/raw artifact가 일시적으로 존재하며 terminal sanitization 뒤 제거된다.

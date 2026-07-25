@@ -2,6 +2,13 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
+## v3.0.3 (2026-07-25)
+
+- doctor: Codex `sol`·`terra`·`luna`와 Grok 가용성 판정을 고정 문자열 대신 현재 config의 고정 모델 ID로 수행한다. configured ID가 로컬 CLI 목록·cache에 없으면 역할별 `unresolved`와 missing 목록을 보고한다.
+- synchronization: model contract `-Write`가 Claude Skill 표뿐 아니라 Grok/GPT 작업자 표와 CI용 합성 Codex model cache도 생성하고, `-Check`가 세 생성면의 drift를 모두 fail-closed한다.
+- fixture: installed fixture가 현재 config에서 합성 model cache를 만들며 실제 사용자 홈 cache와 현재 모델 세대 하드코딩을 읽지 않는다. CI doctor용 Grok fixture도 repository config의 모델 ID를 직접 읽는다.
+- tests/docs: 가상의 Grok 9, GPT 9, Claude 6 고정 ID를 config에만 넣어 Skill·README·doctor·CI cache로 전파하는 회귀를 추가했다. 자동 업그레이드와 유료 모델 호출은 계속 금지한다.
+
 ## v3.0.2 (2026-07-25)
 
 - model contract: `config/config.json`을 모델 배치의 단일 원본으로 정하고 `pinned`, latest alias 금지, `notify-only` 발견 정책을 명시했다.

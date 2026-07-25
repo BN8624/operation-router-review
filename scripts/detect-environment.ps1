@@ -17,19 +17,60 @@ function Invoke-Safe {
     catch { return @{ ok = $false; output = $_.Exception.Message } }
 }
 function Get-CodexModelIds {
-    $result = @{ sol = 'unresolved'; terra = 'unresolved'; luna = 'unresolved'; source = 'not_found' }
-    $cachePath = Join-Path $HOME '.codex\models_cache.json'
-    if (-not (Test-Path -LiteralPath $cachePath)) { return $result }
+    param(
+        [Parameter(Mandatory)]$Config,
+        [string]$CachePath
+    )
+    $configured = [ordered]@{
+        sol = [string]$Config.gpt.workers.sol
+        terra = [string]$Config.gpt.workers.terra
+        luna = [string]$Config.gpt.workers.luna
+    }
+    $result = [ordered]@{
+        sol = 'unresolved'
+        terra = 'unresolved'
+        luna = 'unresolved'
+        configured = $configured
+        missing = @($configured.Values | Select-Object -Unique)
+        allConfiguredAvailable = $false
+        source = 'not_found'
+    }
+    if ([string]::IsNullOrWhiteSpace($CachePath)) { $CachePath = Join-Path $HOME '.codex\models_cache.json' }
+    if (-not (Test-Path -LiteralPath $CachePath)) { return $result }
     try {
-        $cache = Get-Content -LiteralPath $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $result.source = $cachePath
-        foreach ($m in $cache.models) {
-            if ($m.slug -eq 'gpt-5.6-sol')   { $result.sol   = $m.slug }
-            if ($m.slug -eq 'gpt-5.6-terra') { $result.terra = $m.slug }
-            if ($m.slug -eq 'gpt-5.6-luna')  { $result.luna  = $m.slug }
+        $cache = Get-Content -LiteralPath $CachePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $result.source = $CachePath
+        $availableIds = @($cache.models | ForEach-Object { [string]$_.slug } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+        $missing = @()
+        foreach ($role in @('sol','terra','luna')) {
+            $configuredId = [string]$configured[$role]
+            if ($availableIds -ccontains $configuredId) {
+                $result[$role] = $configuredId
+            } else {
+                $missing += $configuredId
+            }
         }
+        $result.missing = @($missing | Select-Object -Unique)
+        $result.allConfiguredAvailable = ($missing.Count -eq 0)
     } catch { $result.source = "read_error: $($_.Exception.Message)" }
     return $result
+}
+
+function Get-GrokModelStatus {
+    param(
+        [Parameter(Mandatory)][string]$ConfiguredModel,
+        [AllowEmptyString()][string]$ModelsOutput
+    )
+    $available = $false
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredModel) -and -not [string]::IsNullOrWhiteSpace($ModelsOutput)) {
+        $pattern = "(?<![a-z0-9.-])$([regex]::Escape($ConfiguredModel))(?![a-z0-9.-])"
+        $available = [regex]::IsMatch($ModelsOutput, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+    return [pscustomobject][ordered]@{
+        configuredModel = $ConfiguredModel
+        defaultModel = if ($available) { $ConfiguredModel } else { 'unresolved' }
+        configuredModelAvailable = $available
+    }
 }
 
 # v2.3.2 grok 헤드리스 권한 doctor 판정 (순수 함수, 테스트 가능).
@@ -55,6 +96,7 @@ function Get-GrokHeadlessDoctor {
 }
 
 function Invoke-EnvironmentDetection {
+    $cfg = Get-Config
     $report = [ordered]@{
         generatedAt = (Get-Date).ToUniversalTime().ToString('o')
         modelDiscovered = $true
@@ -70,11 +112,16 @@ function Invoke-EnvironmentDetection {
 
     $grokPath = Test-CommandAvailable -Name 'grok'
     $report.grok.found = [bool]$grokPath; $report.grok.path = $grokPath
+    $report.grok.configuredModel = [string]$cfg.grok.model
+    $report.grok.defaultModel = 'unresolved'
+    $report.grok.configuredModelAvailable = $false
     if ($grokPath) {
         $report.grok.version = (Invoke-Safe { & grok --version }).output.Trim()
         $m = Invoke-Safe { & grok models }
         $report.grok.modelsOutput = $m.output.Trim()
-        if ($m.output -match 'grok-4\.5') { $report.grok.defaultModel = 'grok-4.5' } else { $report.grok.defaultModel = 'unresolved' }
+        $grokModel = Get-GrokModelStatus -ConfiguredModel ([string]$cfg.grok.model) -ModelsOutput ([string]$m.output)
+        $report.grok.defaultModel = $grokModel.defaultModel
+        $report.grok.configuredModelAvailable = $grokModel.configuredModelAvailable
     }
 
     # v2.3.2: grok 헤드리스 권한 실측 (grok --help 문자열 확인, 유료 호출 없음).
@@ -88,7 +135,6 @@ function Invoke-EnvironmentDetection {
     # config의 헤드리스 권한 정책
     $configuredMode = $null; $allowRules = @(); $denyRules = @()
     try {
-        $cfg = Get-Config
         if ($cfg.grok.PSObject.Properties.Name -contains 'headlessPermissions') {
             $hp = $cfg.grok.headlessPermissions
             if ($hp.PSObject.Properties.Name -contains 'mode') { $configuredMode = [string]$hp.mode }
@@ -125,7 +171,7 @@ function Invoke-EnvironmentDetection {
     if ($codexPath) {
         $report.codex.version = (Invoke-Safe { & codex --version }).output.Trim()
         $report.codex.loginStatus = (Invoke-Safe { & codex login status }).output.Trim()
-        $report.codex.models = Get-CodexModelIds
+        $report.codex.models = Get-CodexModelIds -Config $cfg
     }
 
     $ghPath = Test-CommandAvailable -Name 'gh'

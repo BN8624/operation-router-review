@@ -53,6 +53,15 @@ function Get-ConfiguredModelIds {
     return @($ordered | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
 }
 
+function Get-ConfiguredGptModelIds {
+    param([Parameter(Mandatory)]$Config)
+    return @(
+        [string]$Config.gpt.workers.sol
+        [string]$Config.gpt.workers.terra
+        [string]$Config.gpt.workers.luna
+    ) | Select-Object -Unique
+}
+
 function Get-ReadmeModelBlock {
     param([Parameter(Mandatory)]$Contracts)
     $lines = @(
@@ -65,6 +74,34 @@ function Get-ReadmeModelBlock {
     }
     $lines += '<!-- model-contract:end -->'
     return ($lines -join "`n")
+}
+
+function Get-ReadmeWorkerBlock {
+    param([Parameter(Mandatory)]$Config)
+    $op1Implement = $Config.gpt.desired.'1'.implement
+    $op1Review = $Config.gpt.desired.'1'.review
+    $op2Implement = $Config.gpt.desired.'2'.implement
+    $op3Logic = $Config.gpt.desired.'3'.logic
+    $op3Mechanical = $Config.gpt.desired.'3'.mechanical
+    return (@(
+        '<!-- worker-model-contract:start -->'
+        '| 작전 | Grok 가능 | Grok 소진 + GPT 작업 허용 | GPT 차단(80%+/reserved/exhausted) |'
+        '|---|---|---|---|'
+        "| 1 구현 | $($Config.grok.model) $($Config.grok.operations.'1'.effort) | $($Config.gpt.workers.([string]$op1Implement.worker)) $($op1Implement.effort) | claude_only_required (``claudeOnly.1``) |"
+        "| 1 검수 | — | $($Config.gpt.workers.([string]$op1Review.worker)) $($op1Review.effort) | claude_review_fallback (Opus 직접) / 예비분은 ``--use-gpt-review-reserve``만 |"
+        "| 2 구현 | $($Config.grok.model) $($Config.grok.operations.'2'.effort) | $($Config.gpt.workers.([string]$op2Implement.worker)) $($op2Implement.effort) | claude_only_required (``claudeOnly.2``) |"
+        "| 3 logic | $($Config.grok.model) $($Config.grok.operations.'3'.effort) | $($Config.gpt.workers.([string]$op3Logic.worker)) $($op3Logic.effort) | claude_only_required (``claudeOnly.3.logic``) |"
+        "| 3 mechanical | $($Config.grok.model) $($Config.grok.operations.'3'.effort) | $($Config.gpt.workers.([string]$op3Mechanical.worker)) $($op3Mechanical.effort) | claude_direct (``claudeOnly.3.mechanical``, 기계적 작업만) |"
+        '<!-- worker-model-contract:end -->'
+    ) -join "`n")
+}
+
+function Get-CodexModelCacheJson {
+    param([Parameter(Mandatory)]$Config)
+    $models = @(Get-ConfiguredGptModelIds -Config $Config | ForEach-Object {
+        [ordered]@{ slug = [string]$_ }
+    })
+    return ([ordered]@{ models = $models } | ConvertTo-Json -Depth 4)
 }
 
 function Get-FrontmatterValue {
@@ -168,6 +205,30 @@ function Get-ContractErrors {
         } elseif ($match.Value -cne $expected) {
             $errors += 'README model contract table drift.'
         }
+        $workerStart = '<!-- worker-model-contract:start -->'
+        $workerEnd = '<!-- worker-model-contract:end -->'
+        $workerMatch = [regex]::Match($readme, "(?s)$([regex]::Escape($workerStart)).*?$([regex]::Escape($workerEnd))")
+        if (-not $workerMatch.Success) {
+            $errors += 'README worker model contract markers are missing.'
+        } elseif ($workerMatch.Value -cne (Get-ReadmeWorkerBlock -Config $Config)) {
+            $errors += 'README worker model contract table drift.'
+        }
+    }
+
+    $cachePath = Join-Path $ResolvedRoot 'tests\fixtures\models-cache.ci.json'
+    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
+        $errors += 'Missing generated Codex model cache fixture.'
+    } else {
+        try {
+            $cache = Get-Content -LiteralPath $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $actualIds = @($cache.models | ForEach-Object { [string]$_.slug })
+            $expectedIds = @(Get-ConfiguredGptModelIds -Config $Config)
+            if (($actualIds -join "`n") -cne ($expectedIds -join "`n")) {
+                $errors += 'Codex model cache fixture drift.'
+            }
+        } catch {
+            $errors += "Invalid generated Codex model cache fixture: $($_.Exception.Message)"
+        }
     }
     return @($errors)
 }
@@ -202,7 +263,16 @@ if ($Write) {
     $pattern = [regex]::new("(?s)$([regex]::Escape($start)).*?$([regex]::Escape($end))")
     if ($pattern.Matches($normalized).Count -ne 1) { throw 'README model contract markers must occur exactly once.' }
     $normalized = $pattern.Replace($normalized, (Get-ReadmeModelBlock -Contracts $contracts), 1)
+    $workerStart = '<!-- worker-model-contract:start -->'
+    $workerEnd = '<!-- worker-model-contract:end -->'
+    $workerPattern = [regex]::new("(?s)$([regex]::Escape($workerStart)).*?$([regex]::Escape($workerEnd))")
+    if ($workerPattern.Matches($normalized).Count -ne 1) { throw 'README worker model contract markers must occur exactly once.' }
+    $normalized = $workerPattern.Replace($normalized, (Get-ReadmeWorkerBlock -Config $config), 1)
     Write-Utf8NoBom -Path $readmePath -Text ($normalized -replace "`n", $lineEnding)
+
+    $cachePath = Join-Path $resolvedRoot 'tests\fixtures\models-cache.ci.json'
+    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) { throw "Missing generated fixture: $cachePath" }
+    Write-Utf8NoBom -Path $cachePath -Text ((Get-CodexModelCacheJson -Config $config) + "`n")
 }
 
 $contractErrors = @(Get-ContractErrors -ResolvedRoot $resolvedRoot -Config $config -Contracts $contracts)
@@ -216,5 +286,6 @@ if ($contractErrors.Count -gt 0) {
     selection = [string]$config.modelPolicy.selection
     discovery = [string]$config.modelPolicy.discovery
     skillCount = @($contracts).Count
+    workerRoleCount = 4
     configuredModelIds = @(Get-ConfiguredModelIds -Config $config)
 } | ConvertTo-Json -Depth 5
