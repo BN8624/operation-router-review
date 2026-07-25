@@ -119,15 +119,40 @@ function Get-SkillFrontmatter {
 
 function New-ModelContractFixture {
     $root = Join-Path $TestWorkRoot ('model-contract-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path (Join-Path $root 'config'),(Join-Path $root 'skills') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $root 'config'),(Join-Path $root 'skills'),(Join-Path $root 'tests\fixtures') -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $RouterRoot 'config\config.json') -Destination (Join-Path $root 'config\config.json')
     Copy-Item -LiteralPath (Join-Path $RouterRoot 'README.md') -Destination (Join-Path $root 'README.md')
+    Copy-Item -LiteralPath (Join-Path $RouterRoot 'tests\fixtures\models-cache.ci.json') -Destination (Join-Path $root 'tests\fixtures\models-cache.ci.json')
     foreach ($name in @('operation','operation-1','operation-1-claude','operation-2','operation-3','operation-3-claude')) {
         $target = Join-Path $root "skills\$name"
         New-Item -ItemType Directory -Path $target -Force | Out-Null
         Copy-Item -LiteralPath (Join-Path $RouterRoot "skills\$name\SKILL.md") -Destination (Join-Path $target 'SKILL.md')
     }
+    $rootPrefix = [System.IO.Path]::GetFullPath($root).TrimEnd('\','/') + [System.IO.Path]::DirectorySeparatorChar
+    $manifestLines = @(Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object {
+        $relative = $_.FullName.Substring($rootPrefix.Length).Replace('\','/')
+        [pscustomobject]@{ relative = $relative; hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+    } | Sort-Object relative | ForEach-Object { "$($_.hash)  $($_.relative)" })
+    [System.IO.File]::WriteAllText((Join-Path $root 'manifest-sha256.txt'),(($manifestLines -join "`n") + "`n"),(New-Object System.Text.UTF8Encoding($false)))
     return $root
+}
+
+function Get-ModelContractSurfaceSnapshot {
+    param([Parameter(Mandatory)][string]$FixtureRoot)
+    $paths = @(
+        'README.md'
+        'manifest-sha256.txt'
+        'tests/fixtures/models-cache.ci.json'
+        'skills/operation/SKILL.md'
+        'skills/operation-1/SKILL.md'
+        'skills/operation-1-claude/SKILL.md'
+        'skills/operation-2/SKILL.md'
+        'skills/operation-3/SKILL.md'
+        'skills/operation-3-claude/SKILL.md'
+    )
+    return (@($paths | ForEach-Object {
+        [pscustomobject][ordered]@{ path = $_; hash = (Get-FileHash -LiteralPath (Join-Path $FixtureRoot $_) -Algorithm SHA256).Hash }
+    }) | ConvertTo-Json -Depth 3 -Compress)
 }
 
 function Invoke-ModelContractTool {
@@ -526,6 +551,76 @@ Describe '3b. config 단일 원본 모델 계약' {
         (Get-SkillFrontmatter -Path $skillPath).model | Should Be $fixtureConfig.claudeSession.'1'.model
     }
 
+    It '가상 미래 모델 ID는 config 한 곳에서 Skill·README·CI cache로 전파된다' {
+        $fixture = New-ModelContractFixture
+        $configPath = Join-Path $fixture 'config\config.json'
+        $future = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $future.grok.model = 'grok-9-vision'
+        $future.gpt.workers.sol = 'gpt-9-sol'
+        $future.gpt.workers.terra = 'gpt-9-terra'
+        $future.gpt.workers.luna = 'gpt-9-luna'
+        $future.claudeSession.'1'.model = 'claude-opus-6'
+        $future.claudeSession.'2'.model = 'claude-sonnet-6'
+        $future.claudeSession.'3'.model = 'claude-haiku-6'
+        $future.claudeSession.dispatcher.model = 'claude-haiku-6'
+        $future.claudeOnly.'1'.model = 'claude-sonnet-6'
+        $future.claudeOnly.'2'.model = 'claude-sonnet-6'
+        $future.claudeOnly.'3'.logic.model = 'claude-sonnet-6'
+        $future.claudeOnly.'3'.mechanical.model = 'claude-haiku-6'
+        [System.IO.File]::WriteAllText($configPath,($future | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+
+        (Invoke-ModelContractTool -FixtureRoot $fixture -Write).ExitCode | Should Be 0
+        (Invoke-ModelContractTool -FixtureRoot $fixture).ExitCode | Should Be 0
+        (Get-SkillFrontmatter -Path (Join-Path $fixture 'skills\operation-1\SKILL.md')).model | Should Be 'claude-opus-6'
+        $readme = Get-Content -LiteralPath (Join-Path $fixture 'README.md') -Raw -Encoding UTF8
+        $readme | Should Match 'grok-9-vision'
+        $readme | Should Match 'gpt-9-sol'
+        $readme | Should Match 'claude-opus-6'
+        $cache = Get-Content -LiteralPath (Join-Path $fixture 'tests\fixtures\models-cache.ci.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        (@($cache.models | ForEach-Object { $_.slug }) -join ',') | Should Be 'gpt-9-sol,gpt-9-terra,gpt-9-luna'
+        foreach ($line in (Get-Content -LiteralPath (Join-Path $fixture 'manifest-sha256.txt') -Encoding UTF8)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            ($line -match '^([a-f0-9]{64})  (.+)$') | Should Be $true
+            $manifestExpected = $Matches[1]
+            $manifestRelative = $Matches[2]
+            (Get-FileHash -LiteralPath (Join-Path $fixture $manifestRelative) -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be $manifestExpected
+        }
+    }
+
+    It '-Write는 잘못된 입력을 쓰기 전에 차단하고 중간 I/O 실패도 원복한다' {
+        $invalidEffortFixture = New-ModelContractFixture
+        $invalidEffortConfigPath = Join-Path $invalidEffortFixture 'config\config.json'
+        $invalidEffortConfig = Get-Content -LiteralPath $invalidEffortConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $invalidEffortConfig.claudeSession.'1'.effort = 'ultra'
+        [System.IO.File]::WriteAllText($invalidEffortConfigPath,($invalidEffortConfig | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+        $beforeInvalidEffort = Get-ModelContractSurfaceSnapshot -FixtureRoot $invalidEffortFixture
+        (Invoke-ModelContractTool -FixtureRoot $invalidEffortFixture -Write).ExitCode | Should Not Be 0
+        (Get-ModelContractSurfaceSnapshot -FixtureRoot $invalidEffortFixture) | Should Be $beforeInvalidEffort
+
+        $missingMarkerFixture = New-ModelContractFixture
+        $missingMarkerReadmePath = Join-Path $missingMarkerFixture 'README.md'
+        $missingMarkerReadme = (Get-Content -LiteralPath $missingMarkerReadmePath -Raw -Encoding UTF8).Replace('<!-- worker-model-contract:end -->','<!-- worker-model-contract:broken -->')
+        [System.IO.File]::WriteAllText($missingMarkerReadmePath,$missingMarkerReadme,(New-Object System.Text.UTF8Encoding($false)))
+        $beforeMissingMarker = Get-ModelContractSurfaceSnapshot -FixtureRoot $missingMarkerFixture
+        (Invoke-ModelContractTool -FixtureRoot $missingMarkerFixture -Write).ExitCode | Should Not Be 0
+        (Get-ModelContractSurfaceSnapshot -FixtureRoot $missingMarkerFixture) | Should Be $beforeMissingMarker
+
+        $rollbackFixture = New-ModelContractFixture
+        $rollbackConfigPath = Join-Path $rollbackFixture 'config\config.json'
+        $rollbackConfig = Get-Content -LiteralPath $rollbackConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $rollbackConfig.claudeSession.'1'.model = 'claude-opus-6'
+        [System.IO.File]::WriteAllText($rollbackConfigPath,($rollbackConfig | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+        $rollbackReadme = Get-Item -LiteralPath (Join-Path $rollbackFixture 'README.md')
+        $rollbackReadme.IsReadOnly = $true
+        try {
+            $beforeRollback = Get-ModelContractSurfaceSnapshot -FixtureRoot $rollbackFixture
+            (Invoke-ModelContractTool -FixtureRoot $rollbackFixture -Write).ExitCode | Should Not Be 0
+            (Get-ModelContractSurfaceSnapshot -FixtureRoot $rollbackFixture) | Should Be $beforeRollback
+        } finally {
+            $rollbackReadme.IsReadOnly = $false
+        }
+    }
+
     It 'latest/family alias는 쓰기 전에 fail-closed한다' {
         $fixture = New-ModelContractFixture
         $configPath = Join-Path $fixture 'config\config.json'
@@ -569,8 +664,9 @@ Describe '3b. config 단일 원본 모델 계약' {
 }
 
 Describe '4. 작전 1 단계 상태 전이' {
-    It 'sol 역할은 임시 Terra가 아닌 gpt-5.6-sol에 매핑' {
-        $cfg.gpt.workers.sol | Should Be 'gpt-5.6-sol'
+    It 'sol 역할은 config의 고정 모델 ID에 매핑된다' {
+        $route = Resolve-OperationRoute -OperationNumber 1 -Purpose implement -GrokState (GS 'exhausted' 100) -GptState (GS 'available' 10) -Config $cfg
+        $route.model | Should Be $cfg.gpt.workers.sol
     }
     It 'grok 가능 → 구현은 grok high' {
         $r = Resolve-OperationRoute -OperationNumber 1 -Purpose implement -GrokState (GS 'available' 0) -GptState (GS 'available' 0) -Config $cfg
@@ -1077,13 +1173,28 @@ Describe '추가: 검증/주입/워커/doctor (기존 유지분)' {
         } finally { Remove-TempOrderFile -Path $tmp }
     }
     It 'doctor 보고서 항목' {
-        $r = Invoke-DoctorCommand
+        $savedDoctorPath = $env:PATH
+        $doctorCachePath = Join-Path $RouterRoot 'tests\fixtures\models-cache.ci.json'
+        try {
+            $env:PATH = (Join-Path $RouterRoot 'tests\fixtures\ci-bin') + [System.IO.Path]::PathSeparator + $savedDoctorPath
+            $r = Invoke-DoctorCommand -CodexModelsCachePath $doctorCachePath
+        } finally {
+            $env:PATH = $savedDoctorPath
+        }
         $r.report.claude | Should Not Be $null
-        # 2026-07-21 실측: codex models_cache.json에서 gpt-5.6-sol이 제거됨. doctor는 환경을 정직하게
-        # 보고해야 하므로 sol은 정확 slug 또는 unresolved만 허용한다(unresolved는 invoke-gpt fail-closed로 차단).
-        $r.report.codex.models.luna | Should Be 'gpt-5.6-luna'
-        $r.report.codex.models.terra | Should Be 'gpt-5.6-terra'
-        $r.report.codex.models.sol | Should Match '^(gpt-5\.6-sol|unresolved)$'
+        $r.report.codex.models.luna | Should Be $cfg.gpt.workers.luna
+        $r.report.codex.models.terra | Should Be $cfg.gpt.workers.terra
+        $r.report.codex.models.sol | Should Be $cfg.gpt.workers.sol
+        $r.report.codex.models.allConfiguredAvailable | Should Be $true
+        $r.report.codex.models.source | Should Be $doctorCachePath
+        $r.report.grok.configuredModel | Should Be $cfg.grok.model
+        $r.report.grok.modelsQuerySucceeded | Should Be $true
+        ($r.report.grok.configuredModelAvailable -is [bool]) | Should Be $true
+        if ($r.report.grok.configuredModelAvailable) {
+            $r.report.grok.defaultModel | Should Be $cfg.grok.model
+        } else {
+            $r.report.grok.defaultModel | Should Be 'unresolved'
+        }
         $configured = @(
             $cfg.claudeSession.'1'.model
             $cfg.claudeSession.'2'.model
@@ -1097,6 +1208,41 @@ Describe '추가: 검증/주입/워커/doctor (기존 유지분)' {
         (@($r.report.skillFrontmatter.configuredModelIds) -join ',') | Should Be (@($configured) -join ',')
         (@($r.report.skillFrontmatter.modelIdsRecognized) -join ',') | Should Be (@($configured) -join ',')
         $r.report.skillFrontmatter.dynamicModelSwitchConfirmed | Should Be $false
+    }
+    It 'doctor 모델 탐지는 가상 미래 config ID와 누락을 역할별로 판정한다' {
+        $future = Get-Content -LiteralPath (Join-Path $Script:ConfigDir 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $future.gpt.workers.sol = 'gpt-9-sol'
+        $future.gpt.workers.terra = 'gpt-9-terra'
+        $future.gpt.workers.luna = 'gpt-9-luna'
+        $cachePath = Join-Path $TestWorkRoot 'future-model-cache.json'
+        $cacheObject = [ordered]@{ models = @(
+            [ordered]@{ slug = 'gpt-9-sol' }
+            [ordered]@{ slug = 'gpt-9-luna' }
+        )}
+        [System.IO.File]::WriteAllText($cachePath,($cacheObject | ConvertTo-Json -Depth 4),(New-Object System.Text.UTF8Encoding($false)))
+        $codexModels = Get-CodexModelIds -Config $future -CachePath $cachePath
+        $codexModels.sol | Should Be 'gpt-9-sol'
+        $codexModels.terra | Should Be 'unresolved'
+        $codexModels.luna | Should Be 'gpt-9-luna'
+        (@($codexModels.missing) -join ',') | Should Be 'gpt-9-terra'
+        $codexModels.allConfiguredAvailable | Should Be $false
+
+        $grok = Get-GrokModelStatus -ConfiguredModel 'grok-9-vision' -ModelsOutput "grok-4.5`ngrok-9-vision"
+        $grok.defaultModel | Should Be 'grok-9-vision'
+        $grok.configuredModelAvailable | Should Be $true
+        (Get-GrokModelStatus -ConfiguredModel 'grok-10' -ModelsOutput 'grok-100').configuredModelAvailable | Should Be $false
+        (Get-GrokModelStatus -ConfiguredModel 'grok-9-vision' -ModelsOutput 'Error: grok-9-vision is unavailable').configuredModelAvailable | Should Be $false
+        (Get-GrokModelStatus -ConfiguredModel 'grok-9-vision' -ModelsOutput 'GROK-9-VISION').configuredModelAvailable | Should Be $false
+
+        $failedNative = Invoke-SafeNative { & cmd.exe /d /c 'echo grok-9-vision is unavailable & exit /b 1' }
+        $failedNative.ok | Should Be $false
+        (Get-GrokModelStatus -ConfiguredModel 'grok-9-vision' -ModelsOutput $failedNative.output -QuerySucceeded $failedNative.ok).configuredModelAvailable | Should Be $false
+
+        $malformedCachePath = Join-Path $TestWorkRoot 'malformed-model-cache.json'
+        [System.IO.File]::WriteAllText($malformedCachePath,'{invalid',(New-Object System.Text.UTF8Encoding($false)))
+        $malformed = Get-CodexModelIds -Config $future -CachePath $malformedCachePath
+        $malformed.allConfiguredAvailable | Should Be $false
+        $malformed.source | Should Match '^read_error:'
     }
     It 'dirty worktree 시작 전제 차단' {
         $repo = New-FakeRepo
@@ -3260,9 +3406,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v3.0.2를 현재 버전으로 기록한다' {
+    It '12. README는 v3.0.3을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v3\.0\.2\)'
+        $readme | Should Match '^# operation-router \(v3\.0\.3\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {
@@ -4463,19 +4609,24 @@ Describe 'v3.0.0 외부 비판적 검토 결함 회귀' {
         $raw|Should Match 'config\\config\.json'
         $raw|Should Match 'scripts\\sync-model-contract\.ps1'
         $raw|Should Match 'manifest-sha256\.txt'
-        $raw|Should Match 'Create isolated doctor fixtures'
+        $raw|Should Match 'Expose isolated provider CLI fixtures'
         $raw|Should Match 'tests\\fixtures\\ci-bin'
-        $raw|Should Match 'tests\\fixtures\\models-cache\.ci\.json'
+        $raw|Should Not Match 'Copy-Item[^\r\n]+models-cache\.ci\.json'
+        $raw|Should Not Match '\$HOME[^\r\n]*models_cache'
         $raw|Should Not Match 'pull_request_target'
         $raw|Should Not Match '\$\{\{\s*secrets\.'
         (Test-Path -LiteralPath (Join-Path $RouterRoot 'tests\fixtures\ci-bin\codex.ps1'))|Should Be $true
-        (Test-Path -LiteralPath (Join-Path $RouterRoot 'tests\fixtures\ci-bin\grok.ps1'))|Should Be $true
+        $grokFixturePath=Join-Path $RouterRoot 'tests\fixtures\ci-bin\grok.ps1'
+        (Test-Path -LiteralPath $grokFixturePath)|Should Be $true
+        $grokFixtureRaw=Get-Content -LiteralPath $grokFixturePath -Raw -Encoding UTF8
+        $grokFixtureRaw|Should Match 'config\\config\.json'
+        $grokFixtureRaw|Should Not Match "'grok-[0-9]"
+        (& $grokFixturePath models)|Should Be $cfg.grok.model
         $models=Get-Content -LiteralPath (Join-Path $RouterRoot 'tests\fixtures\models-cache.ci.json') -Raw -Encoding UTF8|ConvertFrom-Json
         $slugs=@($models.models|ForEach-Object{$_.slug})
-        $slugs.Count|Should Be 3
-        $slugs[0]|Should Be 'gpt-5.6-sol'
-        $slugs[1]|Should Be 'gpt-5.6-terra'
-        $slugs[2]|Should Be 'gpt-5.6-luna'
+        $expected=@($cfg.gpt.workers.sol,$cfg.gpt.workers.terra,$cfg.gpt.workers.luna)
+        $slugs.Count|Should Be $expected.Count
+        ($slugs -join ',')|Should Be ($expected -join ',')
     }
 }
 
@@ -4617,10 +4768,12 @@ Describe 'v3.0.0. direct-main과 기존 안전 회귀 보존' {
     It '68b. installed fixture는 실제 사용자 홈 모델 cache를 읽지 않고 합성한다' {
         $fixture=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'run-installed-fixture.ps1') -Raw -Encoding UTF8
         $fixture|Should Match '\$fixtureModels\s*='
-        $fixture|Should Match "'gpt-5\.6-sol'"
-        $fixture|Should Not Match '\$sourceModels'
+        $fixture|Should Match '\$routerConfig\.gpt\.workers'
+        $fixture|Should Not Match "'gpt-[0-9]"
         $fixture|Should Not Match 'Copy-Item[^\r\n]+models_cache'
         $fixture|Should Not Match 'Join-Path\s+\$originalProfile\s+''\.codex'
+        $fixture|Should Match 'tests\\fixtures\\ci-bin'
+        $fixture|Should Match '\$env:PATH\s*=\s*\$originalPath'
     }
 }
 
