@@ -47,7 +47,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-model-contr
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-model-contract.ps1 -Check
 ```
 
-`-Write`는 6개 Skill의 `model`·`effort`, README의 Claude·Grok·GPT 생성 표, CI용 합성 Codex model cache를 갱신한다. `-Check`는 model policy, 고정 ID, 공유 Skill 제약, 모든 생성물 drift를 검사한다. `doctor`는 config에 지정된 Grok/GPT ID를 로컬 CLI 목록·cache와 비교한다. 실행 중인 receipt의 model은 config 변경으로 바뀌지 않는다.
+`-Write`는 쓰기 전에 model policy, effort, Skill frontmatter와 README marker 구조를 모두 검사한다. 유효하면 6개 Skill의 `model`·`effort`, README의 Claude·Grok·GPT 생성 표, CI용 합성 Codex model cache, `manifest-sha256.txt`를 함께 갱신하며 중간 실패 시 이미 쓴 파일을 원복한다. `-Check`는 고정 ID, 공유 Skill 제약, 모든 생성물과 manifest drift를 검사한다. `doctor`는 config에 지정된 Grok/GPT ID를 로컬 CLI 목록·cache와 비교하는 진단이며 실행 게이트가 아니다. 실행 중인 receipt의 model은 config 변경으로 바뀌지 않는다.
 
 ## 재검증
 

@@ -16,6 +16,16 @@ function Invoke-Safe {
     try { $out = & $Block 2>&1; return @{ ok = $true; output = ($out -join "`n") } }
     catch { return @{ ok = $false; output = $_.Exception.Message } }
 }
+function Invoke-SafeNative {
+    param([Parameter(Mandatory)][scriptblock]$Block)
+    try {
+        $global:LASTEXITCODE = 0
+        $out = & $Block 2>&1
+        $exitCode = [int]$global:LASTEXITCODE
+        return @{ ok = ($exitCode -eq 0); output = ($out -join "`n"); exitCode = $exitCode }
+    }
+    catch { return @{ ok = $false; output = $_.Exception.Message; exitCode = $null } }
+}
 function Get-CodexModelIds {
     param(
         [Parameter(Mandatory)]$Config,
@@ -59,12 +69,17 @@ function Get-CodexModelIds {
 function Get-GrokModelStatus {
     param(
         [Parameter(Mandatory)][string]$ConfiguredModel,
-        [AllowEmptyString()][string]$ModelsOutput
+        [AllowEmptyString()][string]$ModelsOutput,
+        [bool]$QuerySucceeded = $true
     )
     $available = $false
-    if (-not [string]::IsNullOrWhiteSpace($ConfiguredModel) -and -not [string]::IsNullOrWhiteSpace($ModelsOutput)) {
-        $pattern = "(?<![a-z0-9.-])$([regex]::Escape($ConfiguredModel))(?![a-z0-9.-])"
-        $available = [regex]::IsMatch($ModelsOutput, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($QuerySucceeded -and -not [string]::IsNullOrWhiteSpace($ConfiguredModel) -and -not [string]::IsNullOrWhiteSpace($ModelsOutput)) {
+        $availableIds = @()
+        foreach ($line in ($ModelsOutput -split "`r?`n")) {
+            $match = [regex]::Match($line, '^\s*(?:\*\s+)?([a-z0-9][a-z0-9.-]*)(?:\s+\([^)]*\))?\s*$')
+            if ($match.Success) { $availableIds += $match.Groups[1].Value }
+        }
+        $available = (@($availableIds | Select-Object -Unique) -ccontains $ConfiguredModel)
     }
     return [pscustomobject][ordered]@{
         configuredModel = $ConfiguredModel
@@ -96,6 +111,7 @@ function Get-GrokHeadlessDoctor {
 }
 
 function Invoke-EnvironmentDetection {
+    param([string]$CodexModelsCachePath)
     $cfg = Get-Config
     $report = [ordered]@{
         generatedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -117,9 +133,11 @@ function Invoke-EnvironmentDetection {
     $report.grok.configuredModelAvailable = $false
     if ($grokPath) {
         $report.grok.version = (Invoke-Safe { & grok --version }).output.Trim()
-        $m = Invoke-Safe { & grok models }
+        $m = Invoke-SafeNative { & grok models }
         $report.grok.modelsOutput = $m.output.Trim()
-        $grokModel = Get-GrokModelStatus -ConfiguredModel ([string]$cfg.grok.model) -ModelsOutput ([string]$m.output)
+        $report.grok.modelsQuerySucceeded = [bool]$m.ok
+        $report.grok.modelsQueryExitCode = $m.exitCode
+        $grokModel = Get-GrokModelStatus -ConfiguredModel ([string]$cfg.grok.model) -ModelsOutput ([string]$m.output) -QuerySucceeded ([bool]$m.ok)
         $report.grok.defaultModel = $grokModel.defaultModel
         $report.grok.configuredModelAvailable = $grokModel.configuredModelAvailable
     }
@@ -171,7 +189,7 @@ function Invoke-EnvironmentDetection {
     if ($codexPath) {
         $report.codex.version = (Invoke-Safe { & codex --version }).output.Trim()
         $report.codex.loginStatus = (Invoke-Safe { & codex login status }).output.Trim()
-        $report.codex.models = Get-CodexModelIds -Config $cfg
+        $report.codex.models = Get-CodexModelIds -Config $cfg -CachePath $CodexModelsCachePath
     }
 
     $ghPath = Test-CommandAvailable -Name 'gh'

@@ -1,5 +1,5 @@
 operation-router v3.0.3 model lifecycle verification
-Date: 2026-07-25 (KST)
+Date: 2026-07-26 (KST)
 Runner: Windows PowerShell 5.1, Pester 3.4 (-Strict)
 
 Scope:
@@ -22,16 +22,16 @@ Final source-tree command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 Final result:
   exit code: 0
-  duration: 1097.18 seconds
-  353 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  duration: 1117.52 seconds
+  354 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   installedIntegrationTests: not-requested
 
 Installed fixture command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixture.ps1
 Final result:
   exit code: 0
-  duration: 1113.75 seconds
-  source tree: 353 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  duration: 1118.37 seconds
+  source tree: 354 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   installedIntegrationTests: executed
   installedIntegrationFailures: 0
   installed Skill byte-equivalence: 6/6

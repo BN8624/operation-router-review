@@ -101,7 +101,7 @@ function Get-CodexModelCacheJson {
     $models = @(Get-ConfiguredGptModelIds -Config $Config | ForEach-Object {
         [ordered]@{ slug = [string]$_ }
     })
-    return ([ordered]@{ models = $models } | ConvertTo-Json -Depth 4)
+    return ([ordered]@{ models = $models } | ConvertTo-Json -Depth 4 -Compress)
 }
 
 function Get-FrontmatterValue {
@@ -128,6 +128,56 @@ function Set-FrontmatterValue {
 function Write-Utf8NoBom {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text)
     [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Get-Utf8TextSha256 {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($Text)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return (($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '') }
+    finally { $sha.Dispose() }
+}
+
+function Get-ManifestEntries {
+    param([Parameter(Mandatory)][string]$ResolvedRoot)
+    $manifestPath = Join-Path $ResolvedRoot 'manifest-sha256.txt'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'Missing manifest-sha256.txt.' }
+    $rootPrefix = $ResolvedRoot.TrimEnd('\','/') + [System.IO.Path]::DirectorySeparatorChar
+    $seen = @{}
+    $entries = @()
+    foreach ($line in (Get-Content -LiteralPath $manifestPath -Encoding UTF8 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        if ($line -notmatch '^([A-Fa-f0-9]{64})  (.+)$') { throw "Invalid manifest line: $line" }
+        $relative = [string]$Matches[2]
+        if ($relative -eq 'manifest-sha256.txt' -or [System.IO.Path]::IsPathRooted($relative)) {
+            throw "Unsafe manifest path: $relative"
+        }
+        $fullPath = [System.IO.Path]::GetFullPath((Join-Path $ResolvedRoot $relative))
+        if (-not $fullPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Manifest path escapes root: $relative"
+        }
+        if ($seen.ContainsKey($relative)) { throw "Duplicate manifest path: $relative" }
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Missing manifest target: $relative" }
+        $seen[$relative] = $true
+        $entries += [pscustomobject][ordered]@{
+            expected = ([string]$Matches[1]).ToLowerInvariant()
+            relative = $relative
+            fullPath = $fullPath
+        }
+    }
+    if ($entries.Count -eq 0) { throw 'Manifest has no entries.' }
+    return @($entries)
+}
+
+function Get-ManifestErrors {
+    param([Parameter(Mandatory)][string]$ResolvedRoot)
+    $errors = @()
+    try { $entries = @(Get-ManifestEntries -ResolvedRoot $ResolvedRoot) }
+    catch { return @($_.Exception.Message) }
+    foreach ($entry in $entries) {
+        $actual = (Get-FileHash -LiteralPath $entry.fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -cne $entry.expected) { $errors += "Manifest hash drift: $($entry.relative)" }
+    }
+    return @($errors)
 }
 
 function Get-ConfigurationErrors {
@@ -230,6 +280,7 @@ function Get-ContractErrors {
             $errors += "Invalid generated Codex model cache fixture: $($_.Exception.Message)"
         }
     }
+    $errors += @(Get-ManifestErrors -ResolvedRoot $ResolvedRoot)
     return @($errors)
 }
 
@@ -240,39 +291,101 @@ $config = Read-ModelConfig -Path $configPath
 $contracts = Get-ModelContracts -Config $config
 
 if ($Write) {
-    $configurationErrors = @(Get-ConfigurationErrors -Config $config)
-    if ($configurationErrors.Count -gt 0) {
-        foreach ($configurationError in $configurationErrors) { Write-Error $configurationError }
+    try {
+        $preparationErrors = @(Get-ConfigurationErrors -Config $config)
+        $allowedEfforts = @('low','medium','high','xhigh','max')
+        foreach ($contract in $contracts) {
+            if ([string]::IsNullOrWhiteSpace([string]$contract.model)) { $preparationErrors += "Missing model for $($contract.skill)." }
+            if ([string]$contract.effort -cnotin $allowedEfforts) { $preparationErrors += "Invalid effort for $($contract.skill): $($contract.effort)" }
+        }
+        if ($preparationErrors.Count -gt 0) { throw ($preparationErrors -join '; ') }
+
+        $preparedWrites = @()
+        foreach ($contract in $contracts) {
+            $skillPath = Join-Path $resolvedRoot "skills\$($contract.skill)\SKILL.md"
+            if (-not (Test-Path -LiteralPath $skillPath -PathType Leaf)) { throw "Missing Skill file: $skillPath" }
+            $raw = Get-Content -LiteralPath $skillPath -Raw -Encoding UTF8
+            $updated = Set-FrontmatterValue -Text $raw -Key 'model' -Value ([string]$contract.model)
+            $updated = Set-FrontmatterValue -Text $updated -Key 'effort' -Value ([string]$contract.effort)
+            $preparedWrites += [pscustomobject][ordered]@{ path = $skillPath; text = $updated }
+        }
+
+        $readmePath = Join-Path $resolvedRoot 'README.md'
+        if (-not (Test-Path -LiteralPath $readmePath -PathType Leaf)) { throw "Missing README: $readmePath" }
+        $readmeRaw = Get-Content -LiteralPath $readmePath -Raw -Encoding UTF8
+        $lineEnding = if ($readmeRaw.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $normalized = $readmeRaw -replace "`r`n", "`n"
+        $start = '<!-- model-contract:start -->'
+        $end = '<!-- model-contract:end -->'
+        $pattern = [regex]::new("(?s)$([regex]::Escape($start)).*?$([regex]::Escape($end))")
+        if ($pattern.Matches($normalized).Count -ne 1) { throw 'README model contract markers must occur exactly once.' }
+        $normalized = $pattern.Replace($normalized, (Get-ReadmeModelBlock -Contracts $contracts), 1)
+        $workerStart = '<!-- worker-model-contract:start -->'
+        $workerEnd = '<!-- worker-model-contract:end -->'
+        $workerPattern = [regex]::new("(?s)$([regex]::Escape($workerStart)).*?$([regex]::Escape($workerEnd))")
+        if ($workerPattern.Matches($normalized).Count -ne 1) { throw 'README worker model contract markers must occur exactly once.' }
+        $normalized = $workerPattern.Replace($normalized, (Get-ReadmeWorkerBlock -Config $config), 1)
+        $preparedWrites += [pscustomobject][ordered]@{ path = $readmePath; text = ($normalized -replace "`n", $lineEnding) }
+
+        $cachePath = Join-Path $resolvedRoot 'tests\fixtures\models-cache.ci.json'
+        if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) { throw "Missing generated fixture: $cachePath" }
+        $preparedWrites += [pscustomobject][ordered]@{ path = $cachePath; text = ((Get-CodexModelCacheJson -Config $config) + "`n") }
+
+        $manifestEntries = @(Get-ManifestEntries -ResolvedRoot $resolvedRoot)
+        $writeTextByPath = @{}
+        foreach ($preparedWrite in $preparedWrites) {
+            $writeTextByPath[[System.IO.Path]::GetFullPath([string]$preparedWrite.path)] = [string]$preparedWrite.text
+        }
+        $manifestPath = Join-Path $resolvedRoot 'manifest-sha256.txt'
+        $manifestRaw = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
+        $manifestLineEnding = if ($manifestRaw.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $manifestHasTrailingLineEnding = $manifestRaw.EndsWith("`n")
+        $manifestLines = @()
+        foreach ($entry in $manifestEntries) {
+            if ($writeTextByPath.ContainsKey($entry.fullPath)) {
+                $hash = Get-Utf8TextSha256 -Text ([string]$writeTextByPath[$entry.fullPath])
+            } else {
+                $hash = (Get-FileHash -LiteralPath $entry.fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            $manifestLines += "$hash  $($entry.relative)"
+        }
+        $manifestText = $manifestLines -join $manifestLineEnding
+        if ($manifestHasTrailingLineEnding) { $manifestText += $manifestLineEnding }
+        $preparedWrites += [pscustomobject][ordered]@{ path = $manifestPath; text = $manifestText }
+
+        $backups = @{}
+        foreach ($preparedWrite in $preparedWrites) {
+            $fullWritePath = [System.IO.Path]::GetFullPath([string]$preparedWrite.path)
+            $backups[$fullWritePath] = [System.IO.File]::ReadAllBytes($fullWritePath)
+        }
+        $writtenPaths = @()
+        try {
+            foreach ($preparedWrite in $preparedWrites) {
+                $fullWritePath = [System.IO.Path]::GetFullPath([string]$preparedWrite.path)
+                Write-Utf8NoBom -Path $fullWritePath -Text ([string]$preparedWrite.text)
+                $writtenPaths += $fullWritePath
+            }
+            $postWriteErrors = @(Get-ContractErrors -ResolvedRoot $resolvedRoot -Config $config -Contracts $contracts)
+            if ($postWriteErrors.Count -gt 0) { throw ($postWriteErrors -join '; ') }
+        }
+        catch {
+            $writeException = $_
+            $restoreErrors = @()
+            for ($index = $writtenPaths.Count - 1; $index -ge 0; $index--) {
+                $writtenPath = $writtenPaths[$index]
+                try { [System.IO.File]::WriteAllBytes($writtenPath, [byte[]]$backups[$writtenPath]) }
+                catch { $restoreErrors += "$writtenPath`: $($_.Exception.Message)" }
+            }
+            if ($restoreErrors.Count -gt 0) {
+                throw "$($writeException.Exception.Message); rollback failed: $($restoreErrors -join '; ')"
+            }
+            throw $writeException
+        }
+    }
+    catch {
+        Write-Error $_.Exception.Message
         exit 1
     }
-    foreach ($contract in $contracts) {
-        $skillPath = Join-Path $resolvedRoot "skills\$($contract.skill)\SKILL.md"
-        if (-not (Test-Path -LiteralPath $skillPath -PathType Leaf)) { throw "Missing Skill file: $skillPath" }
-        $raw = Get-Content -LiteralPath $skillPath -Raw -Encoding UTF8
-        $updated = Set-FrontmatterValue -Text $raw -Key 'model' -Value ([string]$contract.model)
-        $updated = Set-FrontmatterValue -Text $updated -Key 'effort' -Value ([string]$contract.effort)
-        Write-Utf8NoBom -Path $skillPath -Text $updated
-    }
-
-    $readmePath = Join-Path $resolvedRoot 'README.md'
-    $readmeRaw = Get-Content -LiteralPath $readmePath -Raw -Encoding UTF8
-    $lineEnding = if ($readmeRaw.Contains("`r`n")) { "`r`n" } else { "`n" }
-    $normalized = $readmeRaw -replace "`r`n", "`n"
-    $start = '<!-- model-contract:start -->'
-    $end = '<!-- model-contract:end -->'
-    $pattern = [regex]::new("(?s)$([regex]::Escape($start)).*?$([regex]::Escape($end))")
-    if ($pattern.Matches($normalized).Count -ne 1) { throw 'README model contract markers must occur exactly once.' }
-    $normalized = $pattern.Replace($normalized, (Get-ReadmeModelBlock -Contracts $contracts), 1)
-    $workerStart = '<!-- worker-model-contract:start -->'
-    $workerEnd = '<!-- worker-model-contract:end -->'
-    $workerPattern = [regex]::new("(?s)$([regex]::Escape($workerStart)).*?$([regex]::Escape($workerEnd))")
-    if ($workerPattern.Matches($normalized).Count -ne 1) { throw 'README worker model contract markers must occur exactly once.' }
-    $normalized = $workerPattern.Replace($normalized, (Get-ReadmeWorkerBlock -Config $config), 1)
-    Write-Utf8NoBom -Path $readmePath -Text ($normalized -replace "`n", $lineEnding)
-
-    $cachePath = Join-Path $resolvedRoot 'tests\fixtures\models-cache.ci.json'
-    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) { throw "Missing generated fixture: $cachePath" }
-    Write-Utf8NoBom -Path $cachePath -Text ((Get-CodexModelCacheJson -Config $config) + "`n")
 }
 
 $contractErrors = @(Get-ContractErrors -ResolvedRoot $resolvedRoot -Config $config -Contracts $contracts)
@@ -287,5 +400,6 @@ if ($contractErrors.Count -gt 0) {
     discovery = [string]$config.modelPolicy.discovery
     skillCount = @($contracts).Count
     workerRoleCount = 4
+    manifestUpdated = [bool]$Write
     configuredModelIds = @(Get-ConfiguredModelIds -Config $config)
 } | ConvertTo-Json -Depth 5

@@ -41,7 +41,8 @@ function Invoke-StatusCommand {
     [pscustomobject]@{ command = 'status'; grok = $s.grok; gpt = $s.gpt; updatedAt = $s.updatedAt }
 }
 function Invoke-DoctorCommand {
-    $report = Invoke-EnvironmentDetection
+    param([string]$CodexModelsCachePath)
+    $report = Invoke-EnvironmentDetection -CodexModelsCachePath $CodexModelsCachePath
     Write-JsonFile -Path $Script:DoctorReportPath -Object $report
     [pscustomobject]@{ command = 'doctor'; report = $report; reportPath = $Script:DoctorReportPath }
 }

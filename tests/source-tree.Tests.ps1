@@ -128,7 +128,31 @@ function New-ModelContractFixture {
         New-Item -ItemType Directory -Path $target -Force | Out-Null
         Copy-Item -LiteralPath (Join-Path $RouterRoot "skills\$name\SKILL.md") -Destination (Join-Path $target 'SKILL.md')
     }
+    $rootPrefix = [System.IO.Path]::GetFullPath($root).TrimEnd('\','/') + [System.IO.Path]::DirectorySeparatorChar
+    $manifestLines = @(Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object {
+        $relative = $_.FullName.Substring($rootPrefix.Length).Replace('\','/')
+        [pscustomobject]@{ relative = $relative; hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+    } | Sort-Object relative | ForEach-Object { "$($_.hash)  $($_.relative)" })
+    [System.IO.File]::WriteAllText((Join-Path $root 'manifest-sha256.txt'),(($manifestLines -join "`n") + "`n"),(New-Object System.Text.UTF8Encoding($false)))
     return $root
+}
+
+function Get-ModelContractSurfaceSnapshot {
+    param([Parameter(Mandatory)][string]$FixtureRoot)
+    $paths = @(
+        'README.md'
+        'manifest-sha256.txt'
+        'tests/fixtures/models-cache.ci.json'
+        'skills/operation/SKILL.md'
+        'skills/operation-1/SKILL.md'
+        'skills/operation-1-claude/SKILL.md'
+        'skills/operation-2/SKILL.md'
+        'skills/operation-3/SKILL.md'
+        'skills/operation-3-claude/SKILL.md'
+    )
+    return (@($paths | ForEach-Object {
+        [pscustomobject][ordered]@{ path = $_; hash = (Get-FileHash -LiteralPath (Join-Path $FixtureRoot $_) -Algorithm SHA256).Hash }
+    }) | ConvertTo-Json -Depth 3 -Compress)
 }
 
 function Invoke-ModelContractTool {
@@ -554,6 +578,47 @@ Describe '3b. config 단일 원본 모델 계약' {
         $readme | Should Match 'claude-opus-6'
         $cache = Get-Content -LiteralPath (Join-Path $fixture 'tests\fixtures\models-cache.ci.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         (@($cache.models | ForEach-Object { $_.slug }) -join ',') | Should Be 'gpt-9-sol,gpt-9-terra,gpt-9-luna'
+        foreach ($line in (Get-Content -LiteralPath (Join-Path $fixture 'manifest-sha256.txt') -Encoding UTF8)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            ($line -match '^([a-f0-9]{64})  (.+)$') | Should Be $true
+            $manifestExpected = $Matches[1]
+            $manifestRelative = $Matches[2]
+            (Get-FileHash -LiteralPath (Join-Path $fixture $manifestRelative) -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be $manifestExpected
+        }
+    }
+
+    It '-Write는 잘못된 입력을 쓰기 전에 차단하고 중간 I/O 실패도 원복한다' {
+        $invalidEffortFixture = New-ModelContractFixture
+        $invalidEffortConfigPath = Join-Path $invalidEffortFixture 'config\config.json'
+        $invalidEffortConfig = Get-Content -LiteralPath $invalidEffortConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $invalidEffortConfig.claudeSession.'1'.effort = 'ultra'
+        [System.IO.File]::WriteAllText($invalidEffortConfigPath,($invalidEffortConfig | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+        $beforeInvalidEffort = Get-ModelContractSurfaceSnapshot -FixtureRoot $invalidEffortFixture
+        (Invoke-ModelContractTool -FixtureRoot $invalidEffortFixture -Write).ExitCode | Should Not Be 0
+        (Get-ModelContractSurfaceSnapshot -FixtureRoot $invalidEffortFixture) | Should Be $beforeInvalidEffort
+
+        $missingMarkerFixture = New-ModelContractFixture
+        $missingMarkerReadmePath = Join-Path $missingMarkerFixture 'README.md'
+        $missingMarkerReadme = (Get-Content -LiteralPath $missingMarkerReadmePath -Raw -Encoding UTF8).Replace('<!-- worker-model-contract:end -->','<!-- worker-model-contract:broken -->')
+        [System.IO.File]::WriteAllText($missingMarkerReadmePath,$missingMarkerReadme,(New-Object System.Text.UTF8Encoding($false)))
+        $beforeMissingMarker = Get-ModelContractSurfaceSnapshot -FixtureRoot $missingMarkerFixture
+        (Invoke-ModelContractTool -FixtureRoot $missingMarkerFixture -Write).ExitCode | Should Not Be 0
+        (Get-ModelContractSurfaceSnapshot -FixtureRoot $missingMarkerFixture) | Should Be $beforeMissingMarker
+
+        $rollbackFixture = New-ModelContractFixture
+        $rollbackConfigPath = Join-Path $rollbackFixture 'config\config.json'
+        $rollbackConfig = Get-Content -LiteralPath $rollbackConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $rollbackConfig.claudeSession.'1'.model = 'claude-opus-6'
+        [System.IO.File]::WriteAllText($rollbackConfigPath,($rollbackConfig | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+        $rollbackReadme = Get-Item -LiteralPath (Join-Path $rollbackFixture 'README.md')
+        $rollbackReadme.IsReadOnly = $true
+        try {
+            $beforeRollback = Get-ModelContractSurfaceSnapshot -FixtureRoot $rollbackFixture
+            (Invoke-ModelContractTool -FixtureRoot $rollbackFixture -Write).ExitCode | Should Not Be 0
+            (Get-ModelContractSurfaceSnapshot -FixtureRoot $rollbackFixture) | Should Be $beforeRollback
+        } finally {
+            $rollbackReadme.IsReadOnly = $false
+        }
     }
 
     It 'latest/family alias는 쓰기 전에 fail-closed한다' {
@@ -1108,13 +1173,22 @@ Describe '추가: 검증/주입/워커/doctor (기존 유지분)' {
         } finally { Remove-TempOrderFile -Path $tmp }
     }
     It 'doctor 보고서 항목' {
-        $r = Invoke-DoctorCommand
+        $savedDoctorPath = $env:PATH
+        $doctorCachePath = Join-Path $RouterRoot 'tests\fixtures\models-cache.ci.json'
+        try {
+            $env:PATH = (Join-Path $RouterRoot 'tests\fixtures\ci-bin') + [System.IO.Path]::PathSeparator + $savedDoctorPath
+            $r = Invoke-DoctorCommand -CodexModelsCachePath $doctorCachePath
+        } finally {
+            $env:PATH = $savedDoctorPath
+        }
         $r.report.claude | Should Not Be $null
         $r.report.codex.models.luna | Should Be $cfg.gpt.workers.luna
         $r.report.codex.models.terra | Should Be $cfg.gpt.workers.terra
         $r.report.codex.models.sol | Should Be $cfg.gpt.workers.sol
         $r.report.codex.models.allConfiguredAvailable | Should Be $true
+        $r.report.codex.models.source | Should Be $doctorCachePath
         $r.report.grok.configuredModel | Should Be $cfg.grok.model
+        $r.report.grok.modelsQuerySucceeded | Should Be $true
         ($r.report.grok.configuredModelAvailable -is [bool]) | Should Be $true
         if ($r.report.grok.configuredModelAvailable) {
             $r.report.grok.defaultModel | Should Be $cfg.grok.model
@@ -1157,6 +1231,18 @@ Describe '추가: 검증/주입/워커/doctor (기존 유지분)' {
         $grok.defaultModel | Should Be 'grok-9-vision'
         $grok.configuredModelAvailable | Should Be $true
         (Get-GrokModelStatus -ConfiguredModel 'grok-10' -ModelsOutput 'grok-100').configuredModelAvailable | Should Be $false
+        (Get-GrokModelStatus -ConfiguredModel 'grok-9-vision' -ModelsOutput 'Error: grok-9-vision is unavailable').configuredModelAvailable | Should Be $false
+        (Get-GrokModelStatus -ConfiguredModel 'grok-9-vision' -ModelsOutput 'GROK-9-VISION').configuredModelAvailable | Should Be $false
+
+        $failedNative = Invoke-SafeNative { & cmd.exe /d /c 'echo grok-9-vision is unavailable & exit /b 1' }
+        $failedNative.ok | Should Be $false
+        (Get-GrokModelStatus -ConfiguredModel 'grok-9-vision' -ModelsOutput $failedNative.output -QuerySucceeded $failedNative.ok).configuredModelAvailable | Should Be $false
+
+        $malformedCachePath = Join-Path $TestWorkRoot 'malformed-model-cache.json'
+        [System.IO.File]::WriteAllText($malformedCachePath,'{invalid',(New-Object System.Text.UTF8Encoding($false)))
+        $malformed = Get-CodexModelIds -Config $future -CachePath $malformedCachePath
+        $malformed.allConfiguredAvailable | Should Be $false
+        $malformed.source | Should Match '^read_error:'
     }
     It 'dirty worktree 시작 전제 차단' {
         $repo = New-FakeRepo
@@ -4523,9 +4609,10 @@ Describe 'v3.0.0 외부 비판적 검토 결함 회귀' {
         $raw|Should Match 'config\\config\.json'
         $raw|Should Match 'scripts\\sync-model-contract\.ps1'
         $raw|Should Match 'manifest-sha256\.txt'
-        $raw|Should Match 'Create isolated doctor fixtures'
+        $raw|Should Match 'Expose isolated provider CLI fixtures'
         $raw|Should Match 'tests\\fixtures\\ci-bin'
-        $raw|Should Match 'tests\\fixtures\\models-cache\.ci\.json'
+        $raw|Should Not Match 'Copy-Item[^\r\n]+models-cache\.ci\.json'
+        $raw|Should Not Match '\$HOME[^\r\n]*models_cache'
         $raw|Should Not Match 'pull_request_target'
         $raw|Should Not Match '\$\{\{\s*secrets\.'
         (Test-Path -LiteralPath (Join-Path $RouterRoot 'tests\fixtures\ci-bin\codex.ps1'))|Should Be $true

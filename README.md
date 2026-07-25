@@ -216,7 +216,7 @@ Claude Code 2.1.212의 SKILL.md frontmatter는 `model`·`effort`를 **정적(로
 | operation | claude-haiku-4-5-20251001 | low | status/doctor/watch/recover/finalize/set/reset 디스패처 |
 <!-- model-contract:end -->
 
-`config/config.json`이 모델 지정의 유일한 수동 편집 지점이다. 새 고정 모델 ID를 확인한 뒤 config만 바꾸고 `scripts/sync-model-contract.ps1 -Write`를 실행하면 6개 Skill의 정적 frontmatter, Claude 표, Grok/GPT 표, CI용 합성 Codex model cache가 함께 갱신된다. `-Check`는 config·생성물 drift, Operation 2 공유 Skill 불일치, Operation 3 mechanical 공유 Skill 불일치, `latest`/family alias를 fail-closed로 거부하며 CI에서도 실행한다. 자동 업그레이드는 하지 않고 `doctor`가 config에 지정된 Grok/GPT ID를 로컬 CLI 목록·cache와 비교해 알린다. 이미 시작한 실행은 receipt의 기존 model을 계속 사용한다.
+`config/config.json`이 모델 지정의 유일한 수동 편집 지점이다. 새 고정 모델 ID를 확인한 뒤 config만 바꾸고 `scripts/sync-model-contract.ps1 -Write`를 실행하면 6개 Skill의 정적 frontmatter, Claude 표, Grok/GPT 표, CI용 합성 Codex model cache, manifest SHA-256이 함께 갱신된다. 쓰기 전 모든 대상 구조와 값을 검증하고, 쓰기 중 오류가 나면 이미 바꾼 파일을 원복한다. `-Check`는 config·생성물·manifest drift, Operation 2 공유 Skill 불일치, Operation 3 mechanical 공유 Skill 불일치, `latest`/family alias를 fail-closed로 거부하며 CI에서도 실행한다. 자동 업그레이드는 하지 않고 `doctor`가 config에 지정된 Grok/GPT ID를 로컬 CLI 목록·cache와 비교해 알린다. 이미 시작한 실행은 receipt의 기존 model을 계속 사용한다.
 
 ## 작업자(Grok/GPT) 경로
 
@@ -375,7 +375,7 @@ Windows PowerShell 5.1 (`powershell.exe`)만 있고 `pwsh`는 없다. 스크립�
 
 - Skill frontmatter의 `model`,`effort`,`disable-model-invocation`,`argument-hint`,`user-invocable`,`when_to_use` 지원은 claude.exe에서 확인했다. 현재 번들 값은 위의 config 생성 표가 기준이며 effort 허용값은 low/medium/high/xhigh/max다. Claude Code 2.1.212의 `--model`은 최신 alias 또는 전체 모델명을 받지만 이 번들은 고정 ID만 허용한다. 2026-07-25 Operation 1 교체에 사용한 `claude-opus-5`는 [Anthropic 공식 마이그레이션 문서](https://platform.claude.com/docs/en/about-claude/models/migration-guide)에서 확인했다. 모델 가용성을 증명하는 유료 세션은 실행하지 않았다.
 - Grok 0.2.102: 모델 grok-4.5(유일). `--cwd --model --reasoning-effort --max-turns --prompt-file --output-format json --always-approve --allow <RULE> --deny <RULE> --no-plan --no-subagents`. stdin은 임시 `.cmd` 래퍼의 `< NUL`로 고정한다. `--deny`가 자동 승인보다 우선하며 `--no-auto-update`는 존재하지 않는다.
-- Codex 0.144.5: `codex exec --cd -m -c model_reasoning_effort=<e> -s workspace-write -c approval_policy=never -c sandbox_workspace_write.network_access=true --json -` (프롬프트 stdin). `-a`는 `codex exec`에 없는 옵션이므로 쓰지 않는다. 2026-07-22 `~/.codex/models_cache.json`에서 `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna`를 확인했다. doctor에서 `unresolved`로 판정된 모델 호출은 계속 fail-closed로 차단된다.
+- Codex 0.144.5: `codex exec --cd -m -c model_reasoning_effort=<e> -s workspace-write -c approval_policy=never -c sandbox_workspace_write.network_access=true --json -` (프롬프트 stdin). `-a`는 `codex exec`에 없는 옵션이므로 쓰지 않는다. 2026-07-22 `~/.codex/models_cache.json`에서 `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna`를 확인했다. doctor의 `unresolved`는 로컬 cache 진단이며 실행 게이트가 아니다. 라우터는 config의 고정 ID를 전달하고 provider CLI가 실제 가용성을 최종 판정한다.
 
 ## 삭제·복구
 
