@@ -9,7 +9,7 @@ effort: high
 
 # 작전 1 Claude-only (Sonnet 직접 수행)
 
-이 Skill은 Claude Sonnet 5 / high 세션에서만 실행된다 (frontmatter 고정). 라우터의 작전 1 Claude-only 요구 모델(config `claudeOnly.1` = claude-sonnet-5 / high)과 구조적으로 일치한다. 작전 1은 고위험이므로 v2.4.0에서 effort를 medium→high로 올렸다(작전 1의 다른 슬롯과 동일).
+이 Skill은 frontmatter에 고정된 model / effort 세션에서만 실행된다. frontmatter는 번들 `config/config.json`의 `claudeOnly.1`과 구조적으로 일치해야 한다. 작전 1은 고위험이므로 v2.4.0에서 effort를 medium→high로 올렸다(작전 1의 다른 슬롯과 동일).
 이슈번호는 slash-command 첫 위치 인수 `$0`에서 읽는다. 실행기는 `operation-router.cmd`만 사용한다.
 PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 사용한다.
 

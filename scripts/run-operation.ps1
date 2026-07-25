@@ -238,7 +238,7 @@ function New-WorkerPolicyFailureOutput {
 }
 
 # v2.3: 작전 1과 작전 3 logic의 Claude-only 재개는 Sonnet 전용 Skill로 안내한다.
-# (요구 모델 claude-sonnet-5와 Skill frontmatter 모델이 구조적으로 일치)
+# (요구 모델은 config와 전용 Skill frontmatter가 구조적으로 일치)
 # 작전 2는 기존 /operation-2 --claude-only(Sonnet Skill) 유지, 작전 3 mechanical은 claude_direct(Haiku)라 resume 없음.
 function Get-ResumeCommand {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [string]$Kind = 'logic')

@@ -1,4 +1,4 @@
-# operation-router (v3.0.1)
+# operation-router (v3.0.2)
 
 ## v3.0.0 기본 Git workflow
 
@@ -118,7 +118,7 @@ Claude Code 전역 작전 라우터. GitHub 이슈를 작전 1/2/3으로 Grok CL
 
 ## v2.3에서 실제 구현된 것 (v2.2 대비)
 
-- **Claude-only 전용 Skill 2종**: `/operation-1-claude <이슈번호>`(claude-sonnet-5 / medium), `/operation-3-claude <이슈번호>`(claude-sonnet-5 / low). 작전 1과 작전 3 logic의 `claude_only_required` resumeCommand가 이 전용 Skill을 가리킨다. 전용 Skill은 `-ClaudeOnly` run → `orderPath` 구현 → 커밋·push → `workerReportPath` 구조화 보고 → `postflightCommand` 실행 순서다.
+- **Claude-only 전용 Skill 2종**: `/operation-1-claude <이슈번호>`(`claudeOnly.1`), `/operation-3-claude <이슈번호>`(`claudeOnly.3.logic`). 작전 1과 작전 3 logic의 `claude_only_required` resumeCommand가 이 전용 Skill을 가리킨다. 실제 model/effort는 config와 아래 생성 표가 정하며, 전용 Skill은 `-ClaudeOnly` run → `orderPath` 구현 → 커밋·push → `workerReportPath` 구조화 보고 → `postflightCommand` 실행 순서다.
 - **quota 오류 3분류**: `weeklyExhaustedPatterns`(주간 플랜 소진)만 usage-state를 exhausted/100으로 바꾸고 Plan B로 전환한다. `transientRateLimitPatterns`(429류)는 usage-state를 변경하지 않고 config(`transientRetry`, 기본 5초 후 최대 1회) 재시도 후에도 실패면 `transient_rate_limited`로 중단한다 — 다른 공급자로 넘기지 않는다. `providerFailurePatterns`(인증·결제·권한·모델)는 일반 실패로 중단한다. 기존 "rate limit exceeded → exhausted" 경로를 제거했다.
 - **최종 HEAD의 모든 workflow run 집계**: 첫 run만 보던 `$match[0]` 코드를 제거했다. 하나라도 failure/cancelled/timed_out/startup_failure → `failure`, 실패 없고 하나라도 미완 → `pending`, 하나 이상 존재하고 전부 completed/success → `success`. run 없음 → 기존 polling, API 오류 → `unavailable`.
 - **런타임 상태 네임스페이스**: pending·execution·run/review receipt를 `state/pending/<owner__repo__rootHash>/`로 분리한다. origin이 없어도 canonical root SHA-256으로 격리한다. receipt의 ownerRepo와 canonical root/hash를 모두 확인하므로 같은 origin의 다른 clone도 공유하지 않는다.
@@ -205,6 +205,7 @@ Claude Code 2.1.212의 SKILL.md frontmatter는 `model`·`effort`를 **정적(로
 
 ## 작전별 Claude 모델·effort
 
+<!-- model-contract:start -->
 | Skill | model (frontmatter) | effort | 역할 |
 |---|---|---|---|
 | operation-1 | claude-opus-5 | high | 시작 위험검토 → 작업자 → GPT Sol 검수 → 수리 1회 → 종료 판정 |
@@ -213,18 +214,21 @@ Claude Code 2.1.212의 SKILL.md frontmatter는 `model`·`effort`를 **정적(로
 | operation-1-claude | claude-sonnet-5 | high | 작전 1 Claude-only 재개: claude_execute 주문서 직접 구현 + postflight |
 | operation-3-claude | claude-sonnet-5 | low | 작전 3 logic Claude-only 재개: claude_execute 주문서 직접 구현 + postflight |
 | operation | claude-haiku-4-5-20251001 | low | status/doctor/watch/recover/finalize/set/reset 디스패처 |
+<!-- model-contract:end -->
+
+`config/config.json`이 모델 지정의 유일한 수동 편집 지점이다. 새 고정 모델 ID를 확인한 뒤 config만 바꾸고 `scripts/sync-model-contract.ps1 -Write`를 실행하면 6개 Skill의 정적 frontmatter와 위 표가 함께 갱신된다. `-Check`는 config·Skill·README drift, Operation 2 공유 Skill 불일치, Operation 3 mechanical 공유 Skill 불일치, `latest`/family alias를 fail-closed로 거부하며 CI에서도 실행한다. 자동 업그레이드는 하지 않고 공급자 출시·폐기 발견은 `notify-only` 정책으로 남긴다. 이미 시작한 실행은 receipt의 기존 model을 계속 사용한다.
 
 ## 작업자(Grok/GPT) 경로
 
 | 작전 | Grok 가능 | Grok 소진 + GPT 작업 허용 | GPT 차단(80%+/reserved/exhausted) |
 |---|---|---|---|
-| 1 구현 | grok-4.5 high | sol 역할 high† | claude_only_required (claude-sonnet-5) |
+| 1 구현 | grok-4.5 high | sol 역할 high† | claude_only_required (`claudeOnly.1`) |
 | 1 검수 | — | sol 역할 high† | claude_review_fallback (Opus 직접) / 예비분은 `--use-gpt-review-reserve`만 |
 
 † sol 역할은 `gpt-5.6-sol`에 매핑된다. 2026-07-22 `codex-cli 0.144.5` models_cache에서 Sol 노출을 확인해, 테스트 환경의 임시 `gpt-5.6-terra` 매핑을 제거했다. 과거 Terra로 수행한 V11~V13·V15는 실제 Sol 재검증 전까지 `PASS_PENDING_SOL_RETEST`를 유지한다.
-| 2 구현 | grok-4.5 medium | gpt-5.6-terra medium | claude_only_required (claude-sonnet-5) |
-| 3 logic | grok-4.5 low | gpt-5.6-terra medium | claude_only_required (claude-sonnet-5 low) |
-| 3 mechanical | grok-4.5 low | gpt-5.6-luna low | claude_direct (claude-haiku, 기계적 작업만) |
+| 2 구현 | grok-4.5 medium | gpt-5.6-terra medium | claude_only_required (`claudeOnly.2`) |
+| 3 logic | grok-4.5 low | gpt-5.6-terra medium | claude_only_required (`claudeOnly.3.logic`) |
+| 3 mechanical | grok-4.5 low | gpt-5.6-luna low | claude_direct (`claudeOnly.3.mechanical`, 기계적 작업만) |
 
 ## 사용량 수동 관리
 
@@ -367,7 +371,7 @@ Windows PowerShell 5.1 (`powershell.exe`)만 있고 `pwsh`는 없다. 스크립�
 
 ## 실제 확인된 CLI 모델 ID·옵션 (2026-07-25)
 
-- Skill frontmatter의 `model`,`effort`,`disable-model-invocation`,`argument-hint`,`user-invocable`,`when_to_use` 지원은 claude.exe에서 확인했다. 번들 설정 모델 ID는 `claude-opus-5`/`claude-sonnet-5`/`claude-haiku-4-5-20251001`이며 effort는 low/medium/high/xhigh/max다. Claude Code 2.1.212의 `--model`은 최신 alias 또는 전체 모델명을 받으며, `claude-opus-5`는 [Anthropic 공식 마이그레이션 문서](https://platform.claude.com/docs/en/about-claude/models/migration-guide)의 고정 ID로 확인했다. 모델 가용성 확인을 위한 유료 세션은 실행하지 않았다.
+- Skill frontmatter의 `model`,`effort`,`disable-model-invocation`,`argument-hint`,`user-invocable`,`when_to_use` 지원은 claude.exe에서 확인했다. 현재 번들 값은 위의 config 생성 표가 기준이며 effort 허용값은 low/medium/high/xhigh/max다. Claude Code 2.1.212의 `--model`은 최신 alias 또는 전체 모델명을 받지만 이 번들은 고정 ID만 허용한다. 2026-07-25 Operation 1 교체에 사용한 `claude-opus-5`는 [Anthropic 공식 마이그레이션 문서](https://platform.claude.com/docs/en/about-claude/models/migration-guide)에서 확인했다. 모델 가용성을 증명하는 유료 세션은 실행하지 않았다.
 - Grok 0.2.102: 모델 grok-4.5(유일). `--cwd --model --reasoning-effort --max-turns --prompt-file --output-format json --always-approve --allow <RULE> --deny <RULE> --no-plan --no-subagents`. stdin은 임시 `.cmd` 래퍼의 `< NUL`로 고정한다. `--deny`가 자동 승인보다 우선하며 `--no-auto-update`는 존재하지 않는다.
 - Codex 0.144.5: `codex exec --cd -m -c model_reasoning_effort=<e> -s workspace-write -c approval_policy=never -c sandbox_workspace_write.network_access=true --json -` (프롬프트 stdin). `-a`는 `codex exec`에 없는 옵션이므로 쓰지 않는다. 2026-07-22 `~/.codex/models_cache.json`에서 `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna`를 확인했다. doctor에서 `unresolved`로 판정된 모델 호출은 계속 fail-closed로 차단된다.
 
@@ -383,5 +387,5 @@ Windows PowerShell 5.1 (`powershell.exe`)만 있고 `pwsh`는 없다. 스크립�
 - **중첩 claude 실행 미확인**: 자동 재귀 실행 안 함. claude-only는 수동 재개.
 - **GPT/Grok 사용량 자동 조회 불가**: 전부 수동(`/operation set`).
 - **작전 1 Sol 재검증 대기**: 임시 Terra 매핑은 제거했고 작전 1은 `gpt-5.6-sol`을 사용한다. 다만 Terra로 수행한 기존 V11~V13·V15는 Sol로 재실행해 통과하기 전까지 `PASS_PENDING_SOL_RETEST`를 유지한다. 상세는 [VERIFICATION_MATRIX.md](VERIFICATION_MATRIX.md).
-- **grok models = grok-4.5 하나뿐**: 추가 모델 생기면 config.json 갱신 필요.
+- **공급자 모델 발견은 notify-only**: 새 모델 출시·기존 모델 폐기는 자동 반영하지 않는다. 공식 고정 ID를 확인해 config를 갱신하고 model contract 동기화·검증을 수행해야 한다.
 - **한글 별칭 `/작전` 미제공**: 별칭 필드 지원 미확인.

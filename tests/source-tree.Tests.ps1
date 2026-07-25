@@ -116,6 +116,40 @@ function Get-SkillFrontmatter {
     }
     return $h
 }
+
+function New-ModelContractFixture {
+    $root = Join-Path $TestWorkRoot ('model-contract-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path (Join-Path $root 'config'),(Join-Path $root 'skills') -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $RouterRoot 'config\config.json') -Destination (Join-Path $root 'config\config.json')
+    Copy-Item -LiteralPath (Join-Path $RouterRoot 'README.md') -Destination (Join-Path $root 'README.md')
+    foreach ($name in @('operation','operation-1','operation-1-claude','operation-2','operation-3','operation-3-claude')) {
+        $target = Join-Path $root "skills\$name"
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $RouterRoot "skills\$name\SKILL.md") -Destination (Join-Path $target 'SKILL.md')
+    }
+    return $root
+}
+
+function Invoke-ModelContractTool {
+    param([Parameter(Mandatory)][string]$FixtureRoot, [switch]$Write)
+    $mode = if ($Write) { '-Write' } else { '-Check' }
+    $scriptPath = Join-Path $RouterRoot 'scripts\sync-model-contract.ps1'
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = 'powershell.exe'
+    $start.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RootPath `"$FixtureRoot`" $mode"
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $start
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    return [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = (($stdout,$stderr) -join "`n").Trim() }
+}
+
 $issue = { param($n,$p) "Do the thing verbatim body." }
 $ciNone = { param($p) 'not-requested' }
 
@@ -445,28 +479,92 @@ Describe 'v2.4.0 정책 B·C. 작전1 claude-only high + 고위험 경고' {
 }
 
 Describe '3. 작전별 model/effort frontmatter' {
-    It 'operation-1 = opus 5 / high and matches config' {
+    It 'operation-1 frontmatter는 config와 일치' {
         $fm = Get-SkillFrontmatter -Path (Join-Path $SkillsRoot 'operation-1\SKILL.md')
-        $cfg.claudeSession.'1'.model | Should Be 'claude-opus-5'
         $fm.model | Should Be $cfg.claudeSession.'1'.model
         $fm.effort | Should Be $cfg.claudeSession.'1'.effort
     }
-    It 'operation-2 = sonnet 5 / medium' {
+    It 'operation-2 frontmatter는 config와 일치' {
         $fm = Get-SkillFrontmatter -Path (Join-Path $SkillsRoot 'operation-2\SKILL.md')
-        $fm.model | Should Be 'claude-sonnet-5'; $fm.effort | Should Be 'medium'
+        $fm.model | Should Be $cfg.claudeSession.'2'.model
+        $fm.effort | Should Be $cfg.claudeSession.'2'.effort
     }
-    It 'operation-3 = haiku 4.5 / low' {
+    It 'operation-3 frontmatter는 config와 일치' {
         $fm = Get-SkillFrontmatter -Path (Join-Path $SkillsRoot 'operation-3\SKILL.md')
-        $fm.model | Should Be 'claude-haiku-4-5-20251001'; $fm.effort | Should Be 'low'
+        $fm.model | Should Be $cfg.claudeSession.'3'.model
+        $fm.effort | Should Be $cfg.claudeSession.'3'.effort
     }
-    It 'operation dispatcher = haiku / low' {
+    It 'operation dispatcher frontmatter는 config와 일치' {
         $fm = Get-SkillFrontmatter -Path (Join-Path $SkillsRoot 'operation\SKILL.md')
-        $fm.model | Should Be 'claude-haiku-4-5-20251001'; $fm.effort | Should Be 'low'
+        $fm.model | Should Be $cfg.claudeSession.dispatcher.model
+        $fm.effort | Should Be $cfg.claudeSession.dispatcher.effort
     }
     It '각 Skill에 argument-hint 존재' {
         foreach ($n in @('operation','operation-1','operation-2','operation-3')) {
             (Get-SkillFrontmatter -Path (Join-Path $SkillsRoot "$n\SKILL.md")).ContainsKey('argument-hint') | Should Be $true
         }
+    }
+}
+
+Describe '3b. config 단일 원본 모델 계약' {
+    It '현재 source tree의 config·Skill 6종·README 생성 표가 일치한다' {
+        $result = Invoke-ModelContractTool -FixtureRoot $RouterRoot
+        $result.ExitCode | Should Be 0
+        $result.Output | Should Match 'model_contract_valid'
+    }
+
+    It 'Skill drift를 탐지하고 -Write가 frontmatter와 README를 함께 복구한다' {
+        $fixture = New-ModelContractFixture
+        $skillPath = Join-Path $fixture 'skills\operation-1\SKILL.md'
+        $raw = Get-Content -LiteralPath $skillPath -Raw -Encoding UTF8
+        $raw = $raw -replace '(?m)^model:\s*.+$', 'model: claude-opus-4-8'
+        [System.IO.File]::WriteAllText($skillPath,$raw,(New-Object System.Text.UTF8Encoding($false)))
+        (Invoke-ModelContractTool -FixtureRoot $fixture).ExitCode | Should Not Be 0
+        (Invoke-ModelContractTool -FixtureRoot $fixture -Write).ExitCode | Should Be 0
+        (Invoke-ModelContractTool -FixtureRoot $fixture).ExitCode | Should Be 0
+        $fixtureConfig = Get-Content -LiteralPath (Join-Path $fixture 'config\config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        (Get-SkillFrontmatter -Path $skillPath).model | Should Be $fixtureConfig.claudeSession.'1'.model
+    }
+
+    It 'latest/family alias는 쓰기 전에 fail-closed한다' {
+        $fixture = New-ModelContractFixture
+        $configPath = Join-Path $fixture 'config\config.json'
+        $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $config.claudeSession.'1'.model = 'opus'
+        [System.IO.File]::WriteAllText($configPath,($config | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+        $skillPath = Join-Path $fixture 'skills\operation-1\SKILL.md'
+        $before = (Get-FileHash -LiteralPath $skillPath -Algorithm SHA256).Hash
+        (Invoke-ModelContractTool -FixtureRoot $fixture -Write).ExitCode | Should Not Be 0
+        (Get-FileHash -LiteralPath $skillPath -Algorithm SHA256).Hash | Should Be $before
+    }
+
+    It 'Operation 2 공유 Skill의 session/Claude-only 불일치를 거부한다' {
+        $fixture = New-ModelContractFixture
+        $configPath = Join-Path $fixture 'config\config.json'
+        $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $config.claudeOnly.'2'.model = 'claude-sonnet-4-9'
+        [System.IO.File]::WriteAllText($configPath,($config | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+        $result = Invoke-ModelContractTool -FixtureRoot $fixture
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'Operation 2 session and Claude-only'
+    }
+
+    It 'Operation 3 공유 Skill의 session/mechanical 불일치를 거부한다' {
+        $fixture = New-ModelContractFixture
+        $configPath = Join-Path $fixture 'config\config.json'
+        $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $config.claudeOnly.'3'.mechanical.model = 'claude-haiku-5'
+        [System.IO.File]::WriteAllText($configPath,($config | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
+        $result = Invoke-ModelContractTool -FixtureRoot $fixture
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'Operation 3 session and mechanical'
+    }
+
+    It 'modelPolicy는 pinned·별칭 금지·notify-only를 고정한다' {
+        $sourceConfig = Get-Content -LiteralPath (Join-Path $RouterRoot 'config\config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $sourceConfig.modelPolicy.selection | Should Be 'pinned'
+        $sourceConfig.modelPolicy.allowLatestAliases | Should Be $false
+        $sourceConfig.modelPolicy.discovery | Should Be 'notify-only'
     }
 }
 
@@ -484,7 +582,7 @@ Describe '4. 작전 1 단계 상태 전이' {
     }
     It 'grok 소진 + gpt 차단 → claude_only_required sonnet' {
         $r = Resolve-OperationRoute -OperationNumber 1 -Purpose implement -GrokState (GS 'exhausted' 100) -GptState (GS 'available' 80) -Config $cfg
-        $r.status | Should Be 'claude_only_required'; $r.requiredModel | Should Be 'claude-sonnet-5'
+        $r.status | Should Be 'claude_only_required'; $r.requiredModel | Should Be $cfg.claudeOnly.'1'.model
     }
     It '검수는 sol (gpt<80)' {
         $r = Resolve-OperationRoute -OperationNumber 1 -Purpose review -GrokState (GS 'available' 0) -GptState (GS 'available' 10) -Config $cfg
@@ -986,7 +1084,18 @@ Describe '추가: 검증/주입/워커/doctor (기존 유지분)' {
         $r.report.codex.models.luna | Should Be 'gpt-5.6-luna'
         $r.report.codex.models.terra | Should Be 'gpt-5.6-terra'
         $r.report.codex.models.sol | Should Match '^(gpt-5\.6-sol|unresolved)$'
-        (@($r.report.skillFrontmatter.modelIdsRecognized) -contains 'claude-opus-5') | Should Be $true
+        $configured = @(
+            $cfg.claudeSession.'1'.model
+            $cfg.claudeSession.'2'.model
+            $cfg.claudeSession.'3'.model
+            $cfg.claudeSession.dispatcher.model
+            $cfg.claudeOnly.'1'.model
+            $cfg.claudeOnly.'2'.model
+            $cfg.claudeOnly.'3'.logic.model
+            $cfg.claudeOnly.'3'.mechanical.model
+        ) | Select-Object -Unique
+        (@($r.report.skillFrontmatter.configuredModelIds) -join ',') | Should Be (@($configured) -join ',')
+        (@($r.report.skillFrontmatter.modelIdsRecognized) -join ',') | Should Be (@($configured) -join ',')
         $r.report.skillFrontmatter.dynamicModelSwitchConfirmed | Should Be $false
     }
     It 'dirty worktree 시작 전제 차단' {
@@ -998,7 +1107,7 @@ Describe '추가: 검증/주입/워커/doctor (기존 유지분)' {
     }
     It 'op3 mechanical + gpt 80% → claude_direct(haiku)' {
         $r = Resolve-OperationRoute -OperationNumber 3 -Kind mechanical -GrokState (GS 'exhausted' 100) -GptState (GS 'available' 80) -Config $cfg
-        $r.status | Should Be 'claude_direct'; $r.requiredModel | Should Be 'claude-haiku-4-5-20251001'
+        $r.status | Should Be 'claude_direct'; $r.requiredModel | Should Be $cfg.claudeOnly.'3'.mechanical.model
     }
     It 'claude_only_required 시 resumeCommand 포함' {
         Invoke-ResetCommand | Out-Null
@@ -1037,7 +1146,7 @@ Describe 'v2.1-1. --claude-only 무한 루프 방지' {
             $res.status | Should Be 'claude_execute'
             $res.status | Should Not Be 'claude_only_required'
             ($res.PSObject.Properties.Name -contains 'resumeCommand') | Should Be $false
-            $res.requiredModel | Should Be 'claude-sonnet-5'
+            $res.requiredModel | Should Be $cfg.claudeOnly.'2'.model
         } finally {
             Remove-PendingSnapshot -Operation 2 -IssueNumber 30 -RepoPath $repo
             $op = Get-PendingOrderPath -Operation 2 -IssueNumber 30 -RepoPath $repo
@@ -1082,7 +1191,7 @@ Describe 'v2.1-3. operation-3 claude_direct 실제 흐름' {
             $res = Invoke-RunOperation -OperationNumber 3 -Kind mechanical -IssueNumber 33 -RepoPath $repo -IssueFetcher $issue -ClaudeImplementer (New-ClaudeImplPush -Operation 3 -IssueNumber 33) -CiProbe $ciNone
             $res.status | Should Be 'completed'
             $res.route | Should Be 'claude-direct-executed'
-            $res.model | Should Be 'claude-haiku-4-5-20251001'
+            $res.model | Should Be $cfg.claudeOnly.'3'.mechanical.model
         } finally { Remove-Item -Recurse -Force $repo; Invoke-ResetCommand | Out-Null }
     }
 }
@@ -1561,7 +1670,7 @@ Describe 'v2.3-1. Claude-only 전용 Skill 라우팅' {
             $res = Invoke-RunOperation -OperationNumber 1 -IssueNumber 91 -RepoPath $repo -IssueFetcher $issue -CiProbe $ciNone
             $res.status | Should Be 'claude_only_required'
             $res.resumeCommand | Should Be '/operation-1-claude 91'
-            $res.requiredModel | Should Be 'claude-sonnet-5'
+            $res.requiredModel | Should Be $cfg.claudeOnly.'1'.model
         } finally { Remove-Item -Recurse -Force $repo; Invoke-ResetCommand | Out-Null }
     }
     It 'run 수준: 작전 3 logic claude_only_required의 resume이 /operation-3-claude' {
@@ -3151,9 +3260,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v3.0.1을 현재 버전으로 기록한다' {
+    It '12. README는 v3.0.2를 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v3\.0\.1\)'
+        $readme | Should Match '^# operation-router \(v3\.0\.2\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {
@@ -4352,6 +4461,7 @@ Describe 'v3.0.0 외부 비판적 검토 결함 회귀' {
         $raw|Should Match 'tests\\run-installed-fixture\.ps1'
         $raw|Should Match 'Language\.Parser'
         $raw|Should Match 'config\\config\.json'
+        $raw|Should Match 'scripts\\sync-model-contract\.ps1'
         $raw|Should Match 'manifest-sha256\.txt'
         $raw|Should Match 'Create isolated doctor fixtures'
         $raw|Should Match 'tests\\fixtures\\ci-bin'

@@ -2,6 +2,14 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
+## v3.0.2 (2026-07-25)
+
+- model contract: `config/config.json`을 모델 배치의 단일 원본으로 정하고 `pinned`, latest alias 금지, `notify-only` 발견 정책을 명시했다.
+- synchronization: `scripts/sync-model-contract.ps1`의 `-Write`가 Skill 6종의 정적 model/effort와 README 생성 표를 갱신하고, `-Check`가 drift·위험 alias·Operation 2/3 공유 Skill 충돌을 fail-closed한다.
+- doctor/CI: Claude configured model 목록을 하드코딩 대신 config에서 파생하며 Windows Actions에 model contract 검사를 추가했다.
+- tests: source tree 일치, drift 복구, invalid alias 쓰기 전 차단, 공유 Skill 충돌, policy와 doctor 파생 보고 회귀를 추가했다. 라우팅, fallback, PR workflow 상태 머신과 active receipt model pin은 변경하지 않았다.
+- lifecycle: 공급자 모델 출시·폐기는 자동 업그레이드하지 않는다. 운영자가 공식 고정 ID를 확인해 config를 바꾸고 동기화·전체 검증을 거치는 최소 절차로 제한한다.
+
 ## v3.0.1 (2026-07-25)
 
 - models: Operation 1 Claude 세션의 고정 모델 ID를 `claude-opus-4-8`에서 `claude-opus-5`로 갱신했다. 기존 `effort: high`, 라우팅, fallback, PR workflow 상태 머신은 변경하지 않았다.

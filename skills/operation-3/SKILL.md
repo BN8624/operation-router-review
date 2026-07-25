@@ -17,7 +17,7 @@ effort: low
 
 # 작전 3 (명확한 소규모 작업)
 
-이 Skill은 Claude Haiku 4.5 / low 세션에서만 실행된다 (frontmatter 고정).
+이 Skill은 frontmatter에 고정된 model / effort 세션에서만 실행된다. 모델 지정의 단일 원본은 번들 `config/config.json`이다.
 
 ## 자연어 자동 호출 시 soft confirmation policy
 `disable-model-invocation: false`라서 사용자가 자연어로 지시하면 모델이 이 Skill을 호출할 수 있다. `run`은 유료 worker 호출과 기본값인 issue branch·Draft PR 생성으로 이어지므로, 자연어 자동 호출일 때는 아래 soft confirmation policy를 따른다.
@@ -44,8 +44,8 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
   - `--kind logic` → GPT-5.6 Terra / medium
   - `--kind mechanical` → GPT-5.6 Luna / low
 - GPT 80% 이상:
-  - `logic` → `status: claude_only_required`(claude-sonnet-5 / low). resumeCommand `/operation-3-claude <이슈번호>`(Sonnet 전용 Skill)를 안내한다.
-  - `mechanical` → `status: claude_direct`(claude-haiku). 문서·버전 문자열·명백한 설정 치환처럼 기계적 작업만 현재 Haiku 세션이 직접 수행할 수 있다.
+  - `logic` → `status: claude_only_required`와 config 기반 `requiredModel`/`requiredEffort`. resumeCommand `/operation-3-claude <이슈번호>`(Claude 전용 Skill)를 안내한다.
+  - `mechanical` → `status: claude_direct`와 config 기반 `requiredModel`. 문서·버전 문자열·명백한 설정 치환처럼 기계적 작업만 현재 경량 세션이 직접 수행할 수 있다.
 - `worker_starting`/`worker_running`/`execution_already_active`가 반환되면 즉시 같은 이슈의 `watch -Follow`를 실행한다.
 - `watch_checkpoint`/`watch_recovery_locked`이면 같은 `executionId`와 `generation`의 watch만 다시 실행한다.
 - terminal `nextAction=report`이면 결과를 표시하고 끝낸다. 별도 review나 종료 검토를 자동 추가하지 않는다.
