@@ -546,7 +546,7 @@ Describe '3b. config 단일 원본 모델 계약' {
         [System.IO.File]::WriteAllText($configPath,($config | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
         $result = Invoke-ModelContractTool -FixtureRoot $fixture
         $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match 'Operation 2 session and Claude-only'
+        $result.Output | Should Match 'Operation 2 session and\s+Claude-only'
     }
 
     It 'Operation 3 공유 Skill의 session/mechanical 불일치를 거부한다' {
@@ -557,7 +557,7 @@ Describe '3b. config 단일 원본 모델 계약' {
         [System.IO.File]::WriteAllText($configPath,($config | ConvertTo-Json -Depth 30),(New-Object System.Text.UTF8Encoding($false)))
         $result = Invoke-ModelContractTool -FixtureRoot $fixture
         $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match 'Operation 3 session and mechanical'
+        $result.Output | Should Match 'Operation 3 session and\s+mechanical'
     }
 
     It 'modelPolicy는 pinned·별칭 금지·notify-only를 고정한다' {
