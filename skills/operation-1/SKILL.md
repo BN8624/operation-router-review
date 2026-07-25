@@ -9,7 +9,7 @@ effort: high
 
 # 작전 1 (고위험)
 
-이 Skill은 Claude Opus 5 / high 세션에서만 실행된다 (frontmatter로 고정). 동적 모델 전환은 하지 않는다.
+이 Skill은 frontmatter에 고정된 model / effort 세션에서만 실행된다. 모델 지정의 단일 원본은 번들 `config/config.json`이며 동적 모델 전환은 하지 않는다.
 이슈번호는 slash-command 첫 위치 인수 `$0`에서 읽는다. 실행기는 `operation-router.cmd`만 사용한다.
 PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 사용한다.
 
@@ -110,7 +110,7 @@ CI pending/failed/unavailable, unresolved router state, dirty worktree, push 미
 
 라우터 결과가 `claude_only_required`이면 반환된 `resumeCommand`(`/operation-1-claude <n>` — Sonnet 전용 Skill)만 안내하고 중단한다. Opus가 직접 구현하지 않는다.
 
-라우터 결과가 `claude_execute`이면 (요구 모델 claude-sonnet-5와 현재 세션이 일치할 때, 즉 `/operation-1-claude` 세션에서):
+라우터 결과가 `claude_execute`이면 (반환된 `requiredModel`과 Claude-only Skill frontmatter가 일치할 때, 즉 `/operation-1-claude` 세션에서):
 1. `orderPath`를 읽는다.
 2. 고정 실행 계약과 이슈 주문서를 현재 세션이 수행한다.
 3. 주문서에 고정된 expected branch에서 의미 단위 커밋을 만들고 expected remote branch에만 push한다.

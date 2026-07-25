@@ -59,6 +59,12 @@ jobs:
             ConvertFrom-Json |
             Out-Null
 
+      - name: Check generated model contract
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-model-contract.ps1 -Check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Create isolated doctor fixtures
         shell: powershell
         run: |

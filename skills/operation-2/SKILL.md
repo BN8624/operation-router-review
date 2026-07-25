@@ -9,7 +9,7 @@ effort: medium
 
 # 작전 2 (일반 복합 구현)
 
-이 Skill은 Claude Sonnet 5 / medium 세션에서만 실행된다 (frontmatter 고정).
+이 Skill은 frontmatter에 고정된 model / effort 세션에서만 실행된다. 모델 지정의 단일 원본은 번들 `config/config.json`이다.
 이슈번호는 slash-command 첫 위치 인수 `$0`에서 읽는다. 실행기는 `operation-router.cmd`만 사용한다.
 PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 사용한다.
 
@@ -48,7 +48,7 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 - 설정에 `gitWorkflow`가 없는 legacy 설치본 또는 명시적 `direct-main` mode에서는 v2 계약을 유지한다.
 - Grok 사용 가능 → Grok 4.5 / medium
 - Grok 소진·GPT 작업 허용 → GPT-5.6 Terra / medium
-- GPT 80% 이상 → `status: claude_only_required`(claude-sonnet-5) 반환. 이 Sonnet 세션이 반환된 `resumeCommand`(`/operation-2 <n> --claude-only`)로 직접 구현을 이어갈 수 있다.
+- GPT 80% 이상 → `status: claude_only_required`와 config 기반 `requiredModel` 반환. 이 세션이 반환된 `resumeCommand`(`/operation-2 <n> --claude-only`)로 직접 구현을 이어갈 수 있다.
 - Grok 85~94%면 신규 실행이 보호 차단된다(기존 마감은 `--finish-current`).
 - recover는 Claude 세션이 이미 종료되었거나 사용자가 나중에 새 세션으로 재진입할 때만 `/operation recover 2 <이슈번호>`로 사용한다. watch가 살아 있는 동안 수동으로 호출하지 않는다. recover는 구현 worker를 0회 호출하며 CI 성공을 로컬 검증 완료로 위장하지 않는다.
 

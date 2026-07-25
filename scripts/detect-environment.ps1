@@ -151,7 +151,19 @@ function Invoke-EnvironmentDetection {
 
     # Skill frontmatter 지원 (claude.exe 문자열 실측으로 확인된 사실. executionVerified=false).
     $report.skillFrontmatter.supportedKeysConfirmed = @('name','description','model','allowed-tools','argument-hint','disable-model-invocation','user-invocable','effort','when_to_use')
-    $report.skillFrontmatter.modelIdsRecognized = @('claude-opus-5','claude-sonnet-5','claude-haiku-4-5-20251001')
+    $configuredClaudeModels = @(
+        [string]$cfg.claudeSession.'1'.model
+        [string]$cfg.claudeSession.'2'.model
+        [string]$cfg.claudeSession.'3'.model
+        [string]$cfg.claudeSession.dispatcher.model
+        [string]$cfg.claudeOnly.'1'.model
+        [string]$cfg.claudeOnly.'2'.model
+        [string]$cfg.claudeOnly.'3'.logic.model
+        [string]$cfg.claudeOnly.'3'.mechanical.model
+    ) | Select-Object -Unique
+    $report.skillFrontmatter.configuredModelIds = @($configuredClaudeModels)
+    # 하위 소비자를 위해 필드명은 유지하되, 값은 더 이상 하드코딩하지 않고 config에서 만든다.
+    $report.skillFrontmatter.modelIdsRecognized = @($configuredClaudeModels)
     $report.skillFrontmatter.dynamicModelSwitchConfirmed = $false
     $report.skillFrontmatter.note = 'Configured model IDs are pinned by the bundle. Frontmatter key support was inspected in claude.exe; no paid model session was run.'
 

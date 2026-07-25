@@ -1,4 +1,4 @@
-# REENTRY — operation-router v3.0.1 pull-request workflow
+# REENTRY — operation-router v3.0.2 pull-request workflow
 
 ## 현재 계약
 
@@ -10,6 +10,7 @@
 - 외부 worker의 마지막 `[ORH_WORKER_REPORT]` 또는 Claude-only/direct의 HEAD·operation·issue·work branch 고정 JSON 보고가 유효하고, 로컬 검증 완료가 `true`이며 남은 문제가 없어야 최종 `merge_ready` 자격을 얻는다.
 - 한 clone에서는 run, repair, Claude 직접 구현, branch 전환 등 mutation 실행을 하나만 허용한다. watch, status, doctor, terminal receipt 읽기는 mutation lock 중에도 가능하다.
 - 자동 Draft 해제, 자동 merge, branch 삭제, main fast-forward, rebase, conflict 해결은 없다. `merge_ready`는 병합 완료가 아니며 Draft 상태로 남는다.
+- 모델 배치는 `config/config.json`이 단일 원본이다. 새 고정 ID는 동기화 도구로 Skill 6종과 README 표에 반영하며 `latest` alias와 자동 업그레이드는 사용하지 않는다.
 
 ```text
 run -Detach → watch -Follow → operation_terminal → nextAction → final review → finalize → merge_ready
@@ -32,13 +33,26 @@ PR CI는 preflight에 고정된 base workflow와 final head workflow를 함께 �
 - `scripts/git-workflow.ps1` — 설정 검증, branch preflight, clone mutation lock, Draft PR·PR CI, PR postflight/recover/finalize
 - `scripts/run-operation.ps1` — run/watch/recover/review/repair/finalize 상태 전이
 - `scripts/common.ps1` — workflow receipt와 실제 값이 포함된 worker 계약
+- `scripts/sync-model-contract.ps1` — config 모델 배치와 Skill frontmatter·README 생성 표의 drift 검사·동기화
 - `scripts/progress.ps1`, `scripts/worker-host.ps1` — generation 고정 progress와 detached worker
 - `config/config.json` — 기본 PR 정책과 polling
 - `tests/source-tree.Tests.ps1` — fake Git/bare remote/mock PR probe 기반 v3 회귀
 
+## 모델 교체
+
+공급자의 새 모델 출시·기존 모델 폐기는 자동 변경하지 않고 운영자가 확인한다. 공식 고정 ID를 확인한 뒤 `config/config.json`만 편집하고 아래 순서로 정합성을 만든다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-model-contract.ps1 -Write
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-model-contract.ps1 -Check
+```
+
+`-Write`는 6개 Skill의 `model`·`effort`와 README 생성 표만 갱신한다. `-Check`는 model policy, 고정 ID, 공유 Skill 제약, config·Skill·README drift를 검사한다. 실행 중인 receipt의 model은 config 변경으로 바뀌지 않는다.
+
 ## 재검증
 
 ```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-model-contract.ps1 -Check
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixture.ps1
 git diff --check
@@ -53,5 +67,6 @@ git rev-list --left-right --count origin/main...HEAD
 - worker deny 계약은 우회될 수 있고 postflight는 일부 위반을 사후 탐지한다.
 - GitHub 계정과 token 권한은 별도 신뢰 경계다.
 - repository mutation lock은 한 clone 안에서만 동시 실행을 막는다.
+- 공급자 모델 출시·폐기 발견은 `notify-only` 운영 절차다. doctor의 configured ID 보고는 현재 config를 보여줄 뿐 공급자 가용성을 증명하거나 자동 교체하지 않는다.
 - 대상 저장소 CI가 `pull_request` event를 지원해야 한다. operation-router가 대상 Actions 설정을 자동 변경하지 않는다.
 - active 실행 중 prompt/raw artifact가 일시적으로 존재하며 terminal sanitization 뒤 제거된다.
