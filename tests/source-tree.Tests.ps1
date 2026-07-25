@@ -445,9 +445,11 @@ Describe 'v2.4.0 정책 B·C. 작전1 claude-only high + 고위험 경고' {
 }
 
 Describe '3. 작전별 model/effort frontmatter' {
-    It 'operation-1 = opus 4.8 / high' {
+    It 'operation-1 = opus 5 / high and matches config' {
         $fm = Get-SkillFrontmatter -Path (Join-Path $SkillsRoot 'operation-1\SKILL.md')
-        $fm.model | Should Be 'claude-opus-4-8'; $fm.effort | Should Be 'high'
+        $cfg.claudeSession.'1'.model | Should Be 'claude-opus-5'
+        $fm.model | Should Be $cfg.claudeSession.'1'.model
+        $fm.effort | Should Be $cfg.claudeSession.'1'.effort
     }
     It 'operation-2 = sonnet 5 / medium' {
         $fm = Get-SkillFrontmatter -Path (Join-Path $SkillsRoot 'operation-2\SKILL.md')
@@ -984,6 +986,7 @@ Describe '추가: 검증/주입/워커/doctor (기존 유지분)' {
         $r.report.codex.models.luna | Should Be 'gpt-5.6-luna'
         $r.report.codex.models.terra | Should Be 'gpt-5.6-terra'
         $r.report.codex.models.sol | Should Match '^(gpt-5\.6-sol|unresolved)$'
+        (@($r.report.skillFrontmatter.modelIdsRecognized) -contains 'claude-opus-5') | Should Be $true
         $r.report.skillFrontmatter.dynamicModelSwitchConfirmed | Should Be $false
     }
     It 'dirty worktree 시작 전제 차단' {
@@ -3148,9 +3151,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v3.0.0을 현재 버전으로 기록한다' {
+    It '12. README는 v3.0.1을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v3\.0\.0\)'
+        $readme | Should Match '^# operation-router \(v3\.0\.1\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {

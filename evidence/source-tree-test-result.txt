@@ -1,35 +1,32 @@
-operation-router v3.0.0 PR #2 repair verification
-Date: 2026-07-23 (KST)
+operation-router v3.0.1 Claude Opus 5 migration verification
+Date: 2026-07-25 (KST)
 Runner: Windows PowerShell 5.1, Pester 3.4 (-Strict)
 
-Focused PR #2 external-review regressions:
-  Claude report / base-head workflow / PR-associated CI / Draft / review coverage / Actions: 20 passed, 0 failed
-  incomplete review coverage persistence: 1 passed, 0 failed
-  focused total: 21 passed, 0 failed
+Scope:
+  Operation 1 Claude session model: claude-opus-5
+  Operation 1 effort: high (unchanged)
+  Core routing, fallback, PR workflow state machine: unchanged
 
 Final source-tree command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 Final result:
   exit code: 0
-  duration: 1056 seconds
-  339 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  duration: 892.07 seconds
+  345 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   installedIntegrationTests: not-requested
 
 Installed fixture command:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixture.ps1
 Final result:
   exit code: 0
-  duration: 1051.51 seconds
-  source tree: 339 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  duration: 877.89 seconds
+  source tree: 345 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   installedIntegrationTests: executed
   installedIntegrationFailures: 0
   installed Skill byte-equivalence: 6/6
 
-Final focused integrity checks:
-  v2.3.4 reproducibility / manifest group: 22 passed, 0 failed
-  v2.4.7 Skill watch-first group: 4 passed, 0 failed
-  v2.4.7 cross-document workflow group: 1 passed, 0 failed
-  PowerShell parser: 15 files passed
+Final integrity checks:
+  PowerShell parser: 17 files passed
   config JSON parse: passed
   manifest SHA-256: 38 entries passed
   git diff --check: passed
@@ -37,7 +34,7 @@ Final focused integrity checks:
 Isolation:
   fake Git repositories and bare remotes, injected workers, mock PR probe,
   ordinary OS process fixture, synthetic model cache, and unique temporary
-  USERPROFILE only for the accepted installed integration run.
+  USERPROFILE only for the installed integration run.
   Real user-home reads and writes: 0.
   Real GitHub PR/check mutations during tests: 0.
   Paid Grok/GPT/Claude live calls: 0.

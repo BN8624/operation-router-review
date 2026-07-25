@@ -1,4 +1,4 @@
-# VERIFICATION_MATRIX — operation-router v3.0.0
+# VERIFICATION_MATRIX — operation-router v3.0.1
 
 현재 실행 계약은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` → final review → `finalize` 순서다. recover는 watch가 없는 새 세션 재진입에만 사용한다.
 
@@ -48,14 +48,13 @@ PR CI 기대 여부는 receipt에 고정된 base/head commit workflow 스냅샷�
 ## 실행 결과
 
 - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1`
-  - 종료 코드 0, 1056초
-  - 339 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  - 종료 코드 0, 892.07초
+  - 345 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
 - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-installed-fixture.ps1`
-  - 종료 코드 0, 1051.51초
-  - source tree 339 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  - 종료 코드 0, 877.89초
+  - source tree 345 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   - installed integration 실행, Skill 6종 byte-equivalence 실패 0
 - 최종 집중 검증
-  - 재현성·manifest 22 passed, Skill watch-first 4 passed, 문서 흐름 1 passed
   - PowerShell 17개 파일 구문 검사, config JSON 파싱, manifest 38개 SHA-256, `git diff --check` 통과
 - 신규 테스트는 fake Git/bare remote, 주입 worker, mock PR/check probe, 합성 model cache와 고유 임시 USERPROFILE만 사용했다.
 - 실제 GitHub PR/check 변경과 유료 Grok·GPT·Claude 호출은 0회다.
@@ -64,4 +63,4 @@ PR CI 기대 여부는 receipt에 고정된 base/head commit workflow 스냅샷�
 
 ## 외부 검토 상태
 
-PR #2의 외부 비판적 검토에서 보고된 여섯 결함만 수리했다. 구현·검증 중 다른 Grok, Claude, Codex worker나 하위 agent는 호출하지 않았다.
+PR #2 외부 비판적 검토에서 추가된 결함 회귀는 현재 345개 전체 suite에 그대로 포함된다. v3.0.1 Opus 5 교체에서는 외부 worker나 유료 모델을 호출하지 않았다.

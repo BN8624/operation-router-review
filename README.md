@@ -1,4 +1,4 @@
-# operation-router (v3.0.0)
+# operation-router (v3.0.1)
 
 ## v3.0.0 기본 Git workflow
 
@@ -207,7 +207,7 @@ Claude Code 2.1.212의 SKILL.md frontmatter는 `model`·`effort`를 **정적(로
 
 | Skill | model (frontmatter) | effort | 역할 |
 |---|---|---|---|
-| operation-1 | claude-opus-4-8 | high | 시작 위험검토 → 작업자 → GPT Sol 검수 → 수리 1회 → 종료 판정 |
+| operation-1 | claude-opus-5 | high | 시작 위험검토 → 작업자 → GPT Sol 검수 → 수리 1회 → 종료 판정 |
 | operation-2 | claude-sonnet-5 | medium | 좁은 시작검토 → 작업자 → 종료검토 1회 |
 | operation-3 | claude-haiku-4-5-20251001 | low | 인수검증 → run/watch → Draft PR 결과 표시, 자동 review/finalize 없음 |
 | operation-1-claude | claude-sonnet-5 | high | 작전 1 Claude-only 재개: claude_execute 주문서 직접 구현 + postflight |
@@ -365,9 +365,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixt
 
 Windows PowerShell 5.1 (`powershell.exe`)만 있고 `pwsh`는 없다. 스크립트는 PS 5.1 문법(삼항연산자 미사용 등)으로 작성했다.
 
-## 실제 확인된 CLI 모델 ID·옵션 (2026-07-20 실측)
+## 실제 확인된 CLI 모델 ID·옵션 (2026-07-25)
 
-- Skill frontmatter (claude.exe 실측): `model`,`effort`,`disable-model-invocation`,`argument-hint`,`user-invocable`,`when_to_use` 지원. 모델 ID `claude-opus-4-8`/`claude-sonnet-5`/`claude-haiku-4-5-20251001` 인식. effort low/medium/high/xhigh/max.
+- Skill frontmatter의 `model`,`effort`,`disable-model-invocation`,`argument-hint`,`user-invocable`,`when_to_use` 지원은 claude.exe에서 확인했다. 번들 설정 모델 ID는 `claude-opus-5`/`claude-sonnet-5`/`claude-haiku-4-5-20251001`이며 effort는 low/medium/high/xhigh/max다. Claude Code 2.1.212의 `--model`은 최신 alias 또는 전체 모델명을 받으며, `claude-opus-5`는 [Anthropic 공식 마이그레이션 문서](https://platform.claude.com/docs/en/about-claude/models/migration-guide)의 고정 ID로 확인했다. 모델 가용성 확인을 위한 유료 세션은 실행하지 않았다.
 - Grok 0.2.102: 모델 grok-4.5(유일). `--cwd --model --reasoning-effort --max-turns --prompt-file --output-format json --always-approve --allow <RULE> --deny <RULE> --no-plan --no-subagents`. stdin은 임시 `.cmd` 래퍼의 `< NUL`로 고정한다. `--deny`가 자동 승인보다 우선하며 `--no-auto-update`는 존재하지 않는다.
 - Codex 0.144.5: `codex exec --cd -m -c model_reasoning_effort=<e> -s workspace-write -c approval_policy=never -c sandbox_workspace_write.network_access=true --json -` (프롬프트 stdin). `-a`는 `codex exec`에 없는 옵션이므로 쓰지 않는다. 2026-07-22 `~/.codex/models_cache.json`에서 `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna`를 확인했다. doctor에서 `unresolved`로 판정된 모델 호출은 계속 fail-closed로 차단된다.
 
