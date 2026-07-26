@@ -7,6 +7,9 @@
 - detach/watch/recover: 완료된 result envelope에 동기 실행과 같은 구조화 실패 정책을 적용한다. `weekly_exhausted`만 usage exhausted/100과 clean Plan B를 허용하고, 부분 변경은 `partial_worker_changes`로 fallback을 막으며, `transient_rate_limit`·`provider_failure`·`quota_unknown`·cancelled·turn-limit·protocol 분류를 PR mode에서도 `worker_failed`로 붕괴하지 않는다.
 - recover Plan B: clean weekly 소진 시 이슈 원문을 재구성해 기존 `Invoke-QuotaFallback` 계약을 수행한다. 성공 합성과 중복 worker 시작은 금지하며 watch generation 고정·mutation lock을 유지한다.
 - abandon-claude: 방치된 `claude_execute`/`claude-direct` pending 지시와 clone mutation lock을 명시 명령으로만 해제한다. 저장소·작전·이슈 일치, 활성 worker 부재, clean HEAD/worktree를 검증하고 다른 clone/이슈 영수증은 건드리지 않는다. dirty/HEAD 변경은 `claude_abandon_manual_resolution_required`로 거부한다.
+- follow-up review: recover Plan B의 2차 worker 오류 `errorClass`를 보존하고 1차 weekly 원인은 `primaryErrorClass`로 분리한다. `partial_worker_changes` 반환과 execution receipt 상태를 일치시킨다.
+- abandon hardening: pending snapshot이 없거나 mutation purpose가 `run`·`recover`·`claude-postflight`가 아니면 lock을 자동 해제하지 않는다.
+- tests: Plan B 2차 provider 오류, 동기 partial receipt, pending 누락·비Claude mutation 해제 거부 회귀 3건을 추가했다.
 - docs: REENTRY를 v3.0.3으로 맞추고 README·SECURITY·VERIFICATION_MATRIX·Skill에 detach 오류 정책과 abandon-claude 복구를 반영했다.
 - tests: pull-request/direct-main detached envelope, watch follow E2E, usage-state/fallback 가드, abandon 유효·거부·idempotent·clone 격리 회귀를 추가했다. 유료 worker 호출 0.
 - doctor: Codex `sol`·`terra`·`luna`와 Grok 가용성 판정을 고정 문자열 대신 현재 config의 고정 모델 ID로 수행한다. configured ID가 로컬 CLI 목록·cache에 없으면 역할별 `unresolved`와 missing 목록을 보고한다.

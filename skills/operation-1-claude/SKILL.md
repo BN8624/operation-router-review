@@ -31,7 +31,7 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 
 `claude_execute` JSON을 표시만 하고 끝내지 않는다. 재라우팅·재귀 handoff·다른 작업자 호출은 없다.
 
-구현을 포기하고 lock만 남은 경우 `abandon-claude -Operation 1 -IssueNumber $0`을 사용한다. dirty/HEAD 변경 증거가 있으면 거부된다.
+구현을 포기하고 lock만 남은 경우 `abandon-claude -Operation 1 -IssueNumber $0`을 사용한다. pending 누락·비Claude mutation purpose·dirty/HEAD 변경 증거가 있으면 거부된다.
 기본 PR mode에서 branch 생성·변경·삭제, main checkout·push, PR/이슈 생성·수정·병합, force push·reset·clean·rebase는 모두 금지된다. branch와 Draft PR은 라우터가 관리한다. legacy direct-main mode에서는 주문서에 고정된 v2 계약을 따른다.
 GPT Sol 독립 검수는 Grok 구현 결과에만 적용되므로, 이 경로의 결과는 검수 없이 사용자·외부 ChatGPT 검토로 넘어간다.
 

@@ -232,6 +232,37 @@ function New-WorkerPolicyFailureOutput {
                   workerExitCode = $workerExit; workerStopReason = $stopReason }
 }
 
+# 부분 변경으로 fallback을 거부할 때 사용자 반환값과 persistent execution receipt를 같은 terminal 상태로 맞춘다.
+function Complete-PartialWorkerExecutionReceipt {
+    param(
+        [Parameter(Mandatory)]$WorkerResult, [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)][int]$OperationNumber, [Parameter(Mandatory)][int]$IssueNumber
+    )
+    if ($WorkerResult.PSObject.Properties.Name -notcontains 'ExecutionReceipt' -or $null -eq $WorkerResult.ExecutionReceipt) {
+        return $null
+    }
+    $receipt = Get-ExecutionReceiptStable -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    if ($null -eq $receipt -or [string]$receipt.executionId -cne [string]$WorkerResult.ExecutionReceipt.executionId) {
+        throw 'partial worker execution receipt is missing or generation-mismatched'
+    }
+    $receipt.status = 'partial_worker_changes'
+    $receipt.finalHead = Get-GitHead -Path $RepoPath
+    $receipt.workerExitCode = $WorkerResult.ExitCode
+    $receipt.workerStopReason = if ($WorkerResult.PSObject.Properties.Name -contains 'WorkerStopReason') { $WorkerResult.WorkerStopReason } else { $null }
+    $receipt.remainingProblems = @(Get-RemainingProblems -Status 'partial_worker_changes')
+    foreach ($item in @(
+        @('interrupted',$false), @('localVerificationComplete',$false), @('recoveredByPostflight',$false),
+        @('resultEnvelopePresent',$true), @('verificationProvenance','valid_worker_result_envelope')
+    )) {
+        Add-Member -InputObject $receipt -NotePropertyName $item[0] -NotePropertyValue $item[1] -Force
+    }
+    $receipt = Complete-ExecutionTerminalArtifacts -Receipt $receipt -RepoPath $RepoPath -IntendedStatus 'partial_worker_changes'
+    Add-Member -InputObject $receipt -NotePropertyName nextAction -NotePropertyValue (Get-WatchNextAction -Receipt $receipt -Status ([string]$receipt.status)) -Force
+    Write-ExecutionProgressEvent -Receipt $receipt -Event operation_terminal -Phase postflight -Summary "status=$($receipt.status) nextAction=$($receipt.nextAction)" | Out-Null
+    Save-ExecutionReceipt -Receipt $receipt -RepoPath $RepoPath | Out-Null
+    return $receipt
+}
+
 # v2.3: 작전 1과 작전 3 logic의 Claude-only 재개는 Sonnet 전용 Skill로 안내한다.
 # (요구 모델은 config와 전용 Skill frontmatter가 구조적으로 일치)
 # 작전 2는 기존 /operation-2 --claude-only(Sonnet Skill) 유지, 작전 3 mechanical은 claude_direct(Haiku)라 resume 없음.
@@ -568,6 +599,7 @@ function Invoke-RunOperation {
             if ($change.changed) {
                 # 부분 변경 발생 -> fallback 금지, reset/stash 금지
                 $log.Add("partial changes detected (headChanged=$($change.headChanged) dirty=$($change.worktreeDirty) newCommits=$($change.newCommits)) -> fallback withheld")
+                Complete-PartialWorkerExecutionReceipt -WorkerResult $result -RepoPath $RepoPath -OperationNumber $OperationNumber -IssueNumber $IssueNumber | Out-Null
                 $lp = Write-RouterLog -Name "op$OperationNumber-issue$IssueNumber" -Content ($log -join "`n")
                 $extra = @{ fallbackAttempted = $false; headChanged = $change.headChanged; worktreeDirty = $change.worktreeDirty; newCommits = $change.newCommits }
                 return New-FinalOutput -Operation $OperationNumber -RouteLabel 'partial' -Status 'partial_worker_changes' `
@@ -990,6 +1022,7 @@ function Invoke-QuotaFallback {
         if (-not $execution.Success -and $execution.ErrorClass -eq 'weekly_exhausted') {
             $change = Test-WorkerChangedRepo -RepoPath $RepoPath -StartSnapshot $Snapshot
             if ($change.changed) {
+                Complete-PartialWorkerExecutionReceipt -WorkerResult $result -RepoPath $RepoPath -OperationNumber $OperationNumber -IssueNumber $IssueNumber | Out-Null
                 $out = New-FinalOutput -Operation $OperationNumber -RouteLabel 'partial' -Status 'partial_worker_changes' `
                     -Worker $newRoute.worker -Model $newRoute.model -Effort $newRoute.effort -Snapshot $Snapshot -Postflight $null `
                     -IssueNumber $IssueNumber -LogPath $null -RemainingProblems (Get-RemainingProblems -Status 'partial_worker_changes') `
@@ -1806,7 +1839,12 @@ function Invoke-RecoverCommand {
                     }
                     Add-Member -InputObject $term -NotePropertyName recoveredByPostflight -NotePropertyValue $true -Force
                     Add-Member -InputObject $term -NotePropertyName usageStateChanged -NotePropertyValue $true -Force
-                    Add-Member -InputObject $term -NotePropertyName errorClass -NotePropertyValue 'weekly_exhausted' -Force
+                    $terminalErrorClass = if ($term.PSObject.Properties.Name -contains 'errorClass' -and
+                        -not [string]::IsNullOrWhiteSpace([string]$term.errorClass) -and [string]$term.errorClass -ne 'none') {
+                        [string]$term.errorClass
+                    } else { 'weekly_exhausted' }
+                    Add-Member -InputObject $term -NotePropertyName errorClass -NotePropertyValue $terminalErrorClass -Force
+                    Add-Member -InputObject $term -NotePropertyName primaryErrorClass -NotePropertyValue 'weekly_exhausted' -Force
                     Add-Member -InputObject $term -NotePropertyName primaryExecutionId -NotePropertyValue $primaryExecutionId -Force
                     Add-Member -InputObject $term -NotePropertyName fallbackAttempted -NotePropertyValue $true -Force
                     if ($term.PSObject.Properties.Name -notcontains 'nextAction') {
@@ -2078,6 +2116,21 @@ function Invoke-AbandonClaudeDirective {
                 operation=$OperationNumber; issueNumber=$IssueNumber; status='claude_abandon_lock_owned_elsewhere'; cleared=$false
                 activeOperation=[int]$mutation.operation; activeIssueNumber=[int]$mutation.issueNumber
                 note='mutation lock이 다른 작전/이슈 소유다. 해당 실행을 먼저 종료하거나 abandon 대상 이슈를 맞춘다.'
+            }
+        }
+        $allowedClaudePurposes = @('run','recover','claude-postflight')
+        if ([string]$mutation.purpose -notin $allowedClaudePurposes) {
+            return [pscustomobject]@{
+                operation=$OperationNumber; issueNumber=$IssueNumber; status='claude_abandon_manual_resolution_required'; cleared=$false
+                mutationPurpose=[string]$mutation.purpose
+                note='mutation lock이 Claude 지시 연속 경로 소유가 아니다. 실행 상태를 수동 확인하고 해당 경로로 종료한다.'
+            }
+        }
+        if ($null -eq $pend) {
+            return [pscustomobject]@{
+                operation=$OperationNumber; issueNumber=$IssueNumber; status='claude_abandon_manual_resolution_required'; cleared=$false
+                mutationPurpose=[string]$mutation.purpose
+                note='pending snapshot이 없어 시작 HEAD·branch를 검증할 수 없다. mutation lock을 자동 해제하지 않는다.'
             }
         }
     }

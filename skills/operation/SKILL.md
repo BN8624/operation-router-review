@@ -66,7 +66,7 @@ Claude 세션이 이미 종료됐거나 사용자가 나중에 새 세션으로 
 ```
 
 ### `/operation abandon-claude <작전번호> <이슈번호>`
-방치된 `claude_execute`/`claude-direct` pending 지시와 clone mutation lock을 안전하게 해제한다. 동일 저장소·작전·이슈, 활성 worker 부재, clean HEAD/worktree를 모두 검증한다. 미검증 변경이 있으면 자동 삭제하지 않고 수동 해결 상태를 반환한다.
+방치된 `claude_execute`/`claude-direct` pending 지시와 clone mutation lock을 안전하게 해제한다. 동일 저장소·작전·이슈, pending 존재, 활성 worker 부재, clean HEAD/worktree와 Claude 연속 mutation purpose를 모두 검증한다. pending 누락·비Claude purpose·미검증 변경이면 자동 삭제하지 않고 수동 해결 상태를 반환한다.
 ```
 & "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command abandon-claude -Operation <작전번호> -IssueNumber <이슈번호>
 # Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command abandon-claude -Operation <작전번호> -IssueNumber <이슈번호>

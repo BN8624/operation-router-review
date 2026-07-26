@@ -32,7 +32,7 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 
 `claude_execute` JSON을 표시만 하고 끝내지 않는다. 재라우팅·재귀 handoff·다른 작업자 호출은 없다.
 
-구현 포기 시 `abandon-claude -Operation 3 -IssueNumber $0`으로 pending·mutation lock만 안전하게 해제한다.
+구현 포기 시 `abandon-claude -Operation 3 -IssueNumber $0`으로 pending·mutation lock만 안전하게 해제한다. pending 누락·비Claude mutation purpose면 자동 해제하지 않는다.
 기본 PR mode에서 branch 생성·변경·삭제, main checkout·push, PR/이슈 생성·수정·병합, force push·reset·clean·rebase는 모두 금지된다. branch와 Draft PR은 라우터가 관리한다. legacy direct-main mode에서는 주문서에 고정된 v2 계약을 따른다.
 
 ## 출력

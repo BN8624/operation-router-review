@@ -126,7 +126,7 @@ CI pending/failed/unavailable, unresolved router state, dirty worktree, push 미
 & "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command abandon-claude -Operation 1 -IssueNumber $0
 ```
 
-dirty worktree·HEAD 변경·활성 worker·다른 이슈 lock이면 거부된다. 증거를 보존한 채 수동 정리 후 다시 호출한다.
+pending 누락·비Claude mutation purpose·dirty worktree·HEAD 변경·활성 worker·다른 이슈 lock이면 거부된다. 증거를 보존한 채 수동 정리 후 다시 호출한다.
 
 ## 출력
 라우터 최종 JSON의 workflowMode/baseBranch/workBranch/prNumber/prUrl/prDraft/ciStatus/status/pushComplete/reviewVerdict/remainingProblems을 짧게 요약한다. `merge_ready`를 completed나 merged라고 표현하지 않는다. 작업자 전체 출력·이슈 원문·장문 로그는 대화에 넣지 않는다.

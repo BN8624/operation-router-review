@@ -5041,6 +5041,50 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
         } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
     }
 
+    It 'recover weekly 뒤 GPT Plan B의 2차 provider 오류 분류를 덮어쓰지 않는다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8325 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId secondary-provider
+            New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
+            $script:v303SecondaryCalls=0
+            $gpt={param($r,$p,$o)$script:v303SecondaryCalls++;[pscustomobject]@{
+                ExitCode=1;Success=$false;QuotaExhausted=$false;ErrorClass='provider_failure';Output='mock provider unavailable'
+            }}
+            $result=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 8325 -RepoPath $repo -IssueFetcher $issue -GptRunner $gpt -CiProbe $ciNone
+            $result.status|Should Be 'provider_failure'
+            $result.errorClass|Should Be 'provider_failure'
+            $result.primaryErrorClass|Should Be 'weekly_exhausted'
+            $result.usageStateChanged|Should Be $true
+            $result.fallbackAttempted|Should Be $true
+            $script:v303SecondaryCalls|Should Be 1
+            (Get-ExecutionReceipt -Operation 2 -IssueNumber 8325 -RepoPath $repo).status|Should Be 'provider_failure'
+            (Get-RepositoryMutationReceipt -RepoPath $repo)|Should Be $null
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It '동기 weekly 부분 변경은 반환값과 execution receipt를 모두 partial_worker_changes로 남긴다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $runner={param($r,$p,$o)Push-Location $p;try{
+                'partial'|Set-Content partial-sync.txt
+                [pscustomobject]@{ExitCode=1;Success=$false;QuotaExhausted=$true;ErrorClass='weekly_exhausted';Output='weekly limit'}
+            }finally{Pop-Location}}
+            $result=Invoke-RunOperation -OperationNumber 2 -IssueNumber 8326 -RepoPath $repo -IssueFetcher $issue -GrokRunner $runner -CiProbe $ciNone
+            $result.status|Should Be 'partial_worker_changes'
+            $result.fallbackAttempted|Should Be $false
+            $saved=Get-ExecutionReceipt -Operation 2 -IssueNumber 8326 -RepoPath $repo
+            $saved.status|Should Be 'partial_worker_changes'
+            $saved.nextAction|Should Be 'stop'
+            $saved.resultEnvelopePresent|Should Be $true
+            (Test-ExecutionStatusActive -Status ([string]$saved.status))|Should Be $false
+            (Get-RepositoryMutationReceipt -RepoPath $repo)|Should Be $null
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
     It 'Get-WorkerPolicyStatus는 weekly/transient/provider/quota_unknown/protocol을 구분한다' {
         (Get-WorkerPolicyStatus -ErrorClass weekly_exhausted)|Should Be 'quota_exhausted'
         (Get-WorkerPolicyStatus -ErrorClass transient_rate_limit)|Should Be 'transient_rate_limited'
@@ -5162,6 +5206,28 @@ Describe 'v3.0.3. abandon-claude mutation lock 안전 해제 (F4)' {
             (Get-PendingSnapshot -Operation 2 -IssueNumber 8406 -RepoPath $b)|Should Not Be $null
             (Get-RepositoryMutationReceipt -RepoPath $b)|Should Not Be $null
         } finally {Remove-Item -LiteralPath $a,$b -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'pending 없는 mutation 또는 Claude 경로가 아닌 mutation은 자동 해제하지 않는다' {
+        foreach ($case in @(
+            @{n=8408;purpose='run';note='pending snapshot'},
+            @{n=8409;purpose='repair';note='Claude 지시 연속 경로'}
+        )) {
+            $repo=New-FakeRepo -WithRemote
+            try {
+                $mutation=Enter-RepositoryMutation -RepoPath $repo -Operation 2 -IssueNumber $case.n -Purpose $case.purpose
+                $mutation.acquired|Should Be $true
+                (Get-PendingSnapshot -Operation 2 -IssueNumber $case.n -RepoPath $repo)|Should Be $null
+                $result=Invoke-AbandonClaudeDirective -OperationNumber 2 -IssueNumber $case.n -RepoPath $repo
+                $result.status|Should Be 'claude_abandon_manual_resolution_required'
+                $result.cleared|Should Be $false
+                $result.mutationPurpose|Should Be $case.purpose
+                $result.note|Should Match $case.note
+                $remaining=Get-RepositoryMutationReceipt -RepoPath $repo
+                $remaining|Should Not Be $null
+                $remaining.token|Should Be $mutation.token
+            } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+        }
     }
 
     It 'Skill/README에 abandon-claude 복구 명령이 문서화되어 있다' {

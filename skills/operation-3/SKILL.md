@@ -70,7 +70,7 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 
 `claude_execute` JSON을 표시만 하고 끝내지 않는다.
 
-방치된 `claude_execute`/`claude-direct` lock은 `abandon-claude -Operation 3 -IssueNumber $0`으로만 해제한다.
+방치된 `claude_execute`/`claude-direct` lock은 `abandon-claude -Operation 3 -IssueNumber $0`으로만 해제한다. pending 누락·비Claude purpose면 자동 해제하지 않는다.
 
 ## 출력
 라우터 최종 JSON의 workflow mode, work branch, Draft PR, CI, push 상태를 짧게 요약해 표시한다. Operation 3은 `merge_ready`를 판정하거나 자동 병합하지 않는다. 전체 로그는 대화에 넣지 않는다.

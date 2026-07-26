@@ -2,7 +2,7 @@
 
 ## 최근 검증
 
-Grok 전수검사 지적 사항 F1–F5 수정 후 정식 source-tree 372개와 고유 임시 USERPROFILE installed fixture 372개가 모두 통과했다. installed integration failure는 0개이며, 저장소의 PowerShell 18개 구문 검사, config JSON 파싱, model contract, manifest 39개 SHA-256, `git diff --check`도 통과했다. 유료 모델 호출과 실제 사용자 홈 변경은 없었다.
+Grok 전수검사와 수정 후 재검토 지적 사항까지 수리한 뒤 정식 source-tree 375개와 고유 임시 USERPROFILE installed fixture 375개가 모두 통과했다. installed integration failure는 0개이며, 저장소의 PowerShell 18개 구문 검사, config JSON 파싱, model contract, manifest 39개 SHA-256, `git diff --check`도 통과했다. 테스트 중 유료 모델 호출과 실제 사용자 홈 변경은 없었다.
 
 ## 현재 계약
 
@@ -13,8 +13,8 @@ Grok 전수검사 지적 사항 F1–F5 수정 후 정식 source-tree 372개와 
 - 라우터가 base 동기화, branch 생성·선택·소유권, Draft PR, PR CI, receipt, `merge_ready`를 관리한다. worker는 지정 branch에서 수정·테스트·커밋하고 지정 원격 branch에만 push한다.
 - 외부 worker의 마지막 `[ORH_WORKER_REPORT]` 또는 Claude-only/direct의 HEAD·operation·issue·work branch 고정 JSON 보고가 유효하고, 로컬 검증 완료가 `true`이며 남은 문제가 없어야 최종 `merge_ready` 자격을 얻는다.
 - 한 clone에서는 run, repair, Claude 직접 구현, branch 전환 등 mutation 실행을 하나만 허용한다. watch, status, doctor, terminal receipt 읽기는 mutation lock 중에도 가능하다.
-- 방치된 `claude_execute`/`claude-direct` 지시는 `abandon-claude`로만 안전하게 해제한다. PID 부재만으로 lock을 지우지 않으며, dirty worktree·HEAD 변경·활성 worker·다른 이슈/clone은 거부한다.
-- `run -Detach` → `watch -Follow`/recover 경로의 완료 result envelope는 동기 실행과 같은 구조화 실패 정책을 쓴다. weekly만 usage exhausted·Plan B, 부분 변경 시 fallback 금지, PR mode에서도 분류를 `worker_failed`로 붕괴하지 않는다.
+- 방치된 `claude_execute`/`claude-direct` 지시는 `abandon-claude`로만 안전하게 해제한다. PID 부재만으로 lock을 지우지 않으며, pending 누락·비Claude mutation purpose·dirty worktree·HEAD 변경·활성 worker·다른 이슈/clone은 거부한다.
+- `run -Detach` → `watch -Follow`/recover 경로의 완료 result envelope는 동기 실행과 같은 구조화 실패 정책을 쓴다. weekly만 usage exhausted·Plan B, 부분 변경 시 반환과 receipt 모두 `partial_worker_changes`, Plan B 2차 실패 분류 보존, PR mode에서도 분류를 `worker_failed`로 붕괴하지 않는다.
 - 자동 Draft 해제, 자동 merge, branch 삭제, main fast-forward, rebase, conflict 해결은 없다. `merge_ready`는 병합 완료가 아니며 Draft 상태로 남는다.
 - 모델 배치는 `config/config.json`이 단일 원본이다. 새 고정 ID는 동기화 도구로 Skill 6종과 README 표에 반영하며 `latest` alias와 자동 업그레이드는 사용하지 않는다.
 
