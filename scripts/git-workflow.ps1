@@ -890,7 +890,16 @@ function Resolve-PullRequestPostflight {
     $localBase=Get-GitRefHead -RepoPath $RepoPath -Ref "refs/heads/$($w.baseBranch)"
     $pushComplete=($remoteWork -and $final -ceq $remoteWork)
     $status=$null;$ci='not-checked';$pr=$null
-    if(-not $WorkerResult.Success){$status='worker_failed'}
+    if(-not $WorkerResult.Success){
+        # PR mode에서도 worker_failed로 붕괴하지 않고 구조화 실패 분류를 보존한다.
+        $errorClass = Get-WorkerResultErrorClass -Result $WorkerResult
+        if ([string]::IsNullOrWhiteSpace($errorClass) -or $errorClass -eq 'none') {
+            if ($WorkerResult.PSObject.Properties.Name -contains 'QuotaExhausted' -and [bool]$WorkerResult.QuotaExhausted) {
+                $errorClass = 'weekly_exhausted'
+            }
+        }
+        $status = Get-WorkerPolicyStatus -ErrorClass $errorClass
+    }
     elseif($commits -lt 1 -or $final -ceq [string]$StartSnapshot.startHead){$status='no_commit'}
     elseif(-not $wt.Clean){$status='dirty_worktree'}
     elseif($branch -cne [string]$w.workBranch){$status='work_branch_mismatch'}

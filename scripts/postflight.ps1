@@ -129,7 +129,15 @@ function Resolve-Postflight {
     #         Complete-BoundaryFinalizer가 모든 종료 경로에서 일괄 처리한다(조기 반환 포함).
     $status = $null
     if (-not $WorkerResult.Success) {
-        if ($WorkerResult.QuotaExhausted) { $status = 'quota_exhausted' } else { $status = 'worker_failed' }
+        # Detach→watch/recover 포함 모든 경로에서 구조화 실패 분류를 유지한다.
+        # weekly만 quota_exhausted; transient/provider/quota_unknown/cancelled/turn-limit/protocol은 각각 보존.
+        $errorClass = Get-WorkerResultErrorClass -Result $WorkerResult
+        if ([string]::IsNullOrWhiteSpace($errorClass) -or $errorClass -eq 'none') {
+            if ($WorkerResult.PSObject.Properties.Name -contains 'QuotaExhausted' -and [bool]$WorkerResult.QuotaExhausted) {
+                $errorClass = 'weekly_exhausted'
+            }
+        }
+        $status = Get-WorkerPolicyStatus -ErrorClass $errorClass
     }
     elseif ((-not $headChanged -or $commitCount -eq 0)) {
         if ($DeclaredNoCodeChange) { $status = 'completed_no_change_declared' } else { $status = 'no_commit' }

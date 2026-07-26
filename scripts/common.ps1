@@ -300,6 +300,21 @@ function Get-WorkerResultErrorClass {
     return (Get-WorkerErrorClass -Text $t)
 }
 
+# errorClass → 최종 status 매핑. weekly는 Plan B 후보(quota_exhausted), 그 외는 분류별 고정 상태.
+function Get-WorkerPolicyStatus {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$ErrorClass)
+    switch ($ErrorClass) {
+        'weekly_exhausted'      { return 'quota_exhausted' }
+        'transient_rate_limit'  { return 'transient_rate_limited' }
+        'provider_failure'      { return 'provider_failure' }
+        'quota_unknown'         { return 'quota_unknown' }
+        'worker_cancelled'      { return 'worker_cancelled' }
+        'worker_turn_limit'     { return 'worker_turn_limit' }
+        'worker_protocol_error' { return 'worker_protocol_error' }
+        default                 { return 'worker_failed' }
+    }
+}
+
 function ConvertFrom-WorkerCompletionReport {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
     $invalid = {

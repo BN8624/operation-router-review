@@ -1,7 +1,7 @@
 ---
 name: operation
-description: operation-router 보조 명령. status|doctor|set|reset, 새 세션 재진입용 recover, 최종 검토 뒤 finalize를 제공한다. 작전 실행은 /operation-1, /operation-2, /operation-3를 쓴다.
-argument-hint: status | doctor | watch <작전번호> <이슈번호> | recover <작전번호> <이슈번호> | finalize <작전번호> <이슈번호> | set grok <0-100|available|exhausted> | set gpt <0-100|available|reserved|exhausted> | reset
+description: operation-router 보조 명령. status|doctor|set|reset, watch/recover, 방치된 Claude 지시 해제, 최종 검토 뒤 finalize를 제공한다. 작전 실행은 /operation-1, /operation-2, /operation-3를 쓴다.
+argument-hint: status | doctor | watch <작전번호> <이슈번호> | recover <작전번호> <이슈번호> | abandon-claude <작전번호> <이슈번호> | finalize <작전번호> <이슈번호> | set grok <0-100|available|exhausted> | set gpt <0-100|available|reserved|exhausted> | reset
 disable-model-invocation: true
 model: claude-haiku-4-5-20251001
 effort: low
@@ -63,6 +63,13 @@ Claude 세션이 이미 종료됐거나 사용자가 나중에 새 세션으로 
 ```
 & "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command recover -Operation <작전번호> -IssueNumber <이슈번호>
 # Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command recover -Operation <작전번호> -IssueNumber <이슈번호>
+```
+
+### `/operation abandon-claude <작전번호> <이슈번호>`
+방치된 `claude_execute`/`claude-direct` pending 지시와 clone mutation lock을 안전하게 해제한다. 동일 저장소·작전·이슈, 활성 worker 부재, clean HEAD/worktree를 모두 검증한다. 미검증 변경이 있으면 자동 삭제하지 않고 수동 해결 상태를 반환한다.
+```
+& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command abandon-claude -Operation <작전번호> -IssueNumber <이슈번호>
+# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command abandon-claude -Operation <작전번호> -IssueNumber <이슈번호>
 ```
 
 ### `/operation finalize <작전번호> <이슈번호>`

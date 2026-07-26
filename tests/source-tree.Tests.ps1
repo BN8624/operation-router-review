@@ -178,6 +178,34 @@ function Invoke-ModelContractTool {
 $issue = { param($n,$p) "Do the thing verbatim body." }
 $ciNone = { param($p) 'not-requested' }
 
+function New-DetachedFailureEnvelope {
+    param(
+        [Parameter(Mandatory)]$Receipt,
+        [Parameter(Mandatory)][string]$ErrorClass,
+        [string]$Output = '',
+        [int]$ExitCode = 1
+    )
+    $quota = ($ErrorClass -eq 'weekly_exhausted')
+    if ([string]::IsNullOrWhiteSpace($Output)) {
+        $Output = switch ($ErrorClass) {
+            'weekly_exhausted' { 'weekly limit reached' }
+            'transient_rate_limit' { 'HTTP 429 too many requests' }
+            'provider_failure' { 'authentication failed invalid api key' }
+            'quota_unknown' { 'quota exceeded' }
+            default { 'worker boom' }
+        }
+    }
+    [System.IO.File]::WriteAllText([string]$Receipt.rawStdoutPath, $Output, (New-Object System.Text.UTF8Encoding($false)))
+    Write-AtomicJsonFile -Path $Receipt.resultPath -Object ([pscustomobject]@{
+        schemaVersion=1;executionId=$Receipt.executionId;generation=$Receipt.generation;worker=$Receipt.worker
+        exitCode=$ExitCode;success=$false;quotaExhausted=$quota;errorClass=$ErrorClass;workerStopReason=$null
+        localVerificationComplete=$false;stdoutPath=$Receipt.rawStdoutPath;stderrPath=$Receipt.rawStderrPath
+    })
+    $Receipt.status='worker_exited_postflight_pending'
+    $repoRoot = if ($Receipt.PSObject.Properties.Name -contains 'repoRoot' -and $Receipt.repoRoot) { [string]$Receipt.repoRoot } else { [string]$Receipt.canonicalRepoRoot }
+    Save-ExecutionReceipt -Receipt $Receipt -RepoPath $repoRoot | Out-Null
+}
+
 function Set-TestGitWorkflow {
     param([Parameter(Mandatory)][ValidateSet('direct-main','pull-request')][string]$Mode)
     $source=Join-Path $Script:ConfigDir 'config.json'
@@ -4774,6 +4802,373 @@ Describe 'v3.0.0. direct-main과 기존 안전 회귀 보존' {
         $fixture|Should Not Match 'Join-Path\s+\$originalProfile\s+''\.codex'
         $fixture|Should Match 'tests\\fixtures\\ci-bin'
         $fixture|Should Match '\$env:PATH\s*=\s*\$originalPath'
+    }
+}
+
+Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F3)' {
+    BeforeEach {
+        $script:v303SavedBoundary=$env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=Join-Path $TestWorkRoot 'v303-safe-boundary.txt'
+        if(-not (Test-Path -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)){'safe'|Set-Content -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -Encoding UTF8}
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=$script:v303SavedBoundary
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It 'direct-main detached weekly clean → usage exhausted + GPT Plan B (유료 호출 0)' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
+            $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8301 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId weekly-clean
+            New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
+            $script:v303GptCalls=0
+            $gpt={param($r,$p,$o)$script:v303GptCalls++;Push-Location $p;try{'ok'|Set-Content b.txt;git add .;git commit -q -m gpt;git push -q origin main;[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;ErrorClass='none';Output='ok'}}finally{Pop-Location}}
+            $before=(Get-UsageState).grok.status
+            $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 8301 -RepoPath $repo -IssueFetcher $issue -GptRunner $gpt -CiProbe $ciNone
+            $res.status|Should Be 'completed'
+            $res.usageStateChanged|Should Be $true
+            $res.fallbackAttempted|Should Be $true
+            $res.errorClass|Should Be 'weekly_exhausted'
+            $script:v303GptCalls|Should Be 1
+            (Get-UsageState).grok.status|Should Be 'exhausted'
+            (Get-UsageState).grok.percent|Should Be 100
+            $before|Should Not Be 'exhausted'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'direct-main detached weekly partial → partial_worker_changes, fallback 금지, usage exhausted' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8302 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId weekly-partial
+            Push-Location $repo; try { 'dirty'|Set-Content partial.txt } finally { Pop-Location }
+            New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
+            $script:v303GptCalls=0
+            $gpt={param($r,$p,$o)$script:v303GptCalls++;[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;Output='should-not-run'}}
+            $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 8302 -RepoPath $repo -IssueFetcher $issue -GptRunner $gpt -CiProbe $ciNone
+            $res.status|Should Be 'partial_worker_changes'
+            $res.usageStateChanged|Should Be $true
+            $res.fallbackAttempted|Should Be $false
+            $res.nextAction|Should Be 'stop'
+            $script:v303GptCalls|Should Be 0
+            (Get-UsageState).grok.status|Should Be 'exhausted'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'direct-main detached transient/provider/quota_unknown → 분류 보존, usage 불변, Plan B 금지' {
+        Set-TestGitWorkflow -Mode direct-main
+        foreach ($case in @(
+            @{n=8303;ec='transient_rate_limit';st='transient_rate_limited'},
+            @{n=8304;ec='provider_failure';st='provider_failure'},
+            @{n=8305;ec='quota_unknown';st='quota_unknown'}
+        )) {
+            Invoke-ResetCommand|Out-Null
+            $repo=New-FakeRepo -WithRemote
+            try {
+                $snap=Get-StartSnapshot -RepoPath $repo
+                $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+                $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber $case.n -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId ("ec-$($case.ec)")
+                New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass $case.ec
+                $script:v303GptCalls=0
+                $gpt={param($r,$p,$o)$script:v303GptCalls++;[pscustomobject]@{ExitCode=0;Success=$true;Output='no'}}
+                $before=Get-UsageState
+                $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber $case.n -RepoPath $repo -IssueFetcher $issue -GptRunner $gpt -CiProbe $ciNone
+                $res.status|Should Be $case.st
+                $res.errorClass|Should Be $case.ec
+                $res.usageStateChanged|Should Be $false
+                $res.fallbackAttempted|Should Be $false
+                $res.nextAction|Should Be 'stop'
+                $script:v303GptCalls|Should Be 0
+                (Get-UsageState).grok.status|Should Be $before.grok.status
+                (Get-UsageState).grok.percent|Should Be $before.grok.percent
+            } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+        }
+    }
+
+    It 'pull-request detached 실패 envelope는 worker_failed로 붕괴하지 않는다' {
+        Set-TestGitWorkflow -Mode pull-request
+        foreach ($case in @(
+            @{n=8310;ec='weekly_exhausted';partial=$true;st='partial_worker_changes'},
+            @{n=8311;ec='transient_rate_limit';partial=$false;st='transient_rate_limited'},
+            @{n=8312;ec='provider_failure';partial=$false;st='provider_failure'},
+            @{n=8313;ec='quota_unknown';partial=$false;st='quota_unknown'}
+        )) {
+            Invoke-ResetCommand|Out-Null
+            $f=New-PrFakeRepo
+            try {
+                $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber $case.n -Config (Get-Config) -FetchProbe {param($p)$true} -PrProbe {param($p,$o,$b)[pscustomobject]@{ok=$true;items=@()}}
+                $pre.ok|Should Be $true
+                $snap=$pre.snapshot;$wf=Copy-WorkflowContext -Workflow $pre.workflow
+                Add-Member -InputObject $wf -NotePropertyName issueNumber -NotePropertyValue $case.n -Force
+                $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+                $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber $case.n -RepoPath $f.Repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId ("pr-$($case.ec)") -Workflow $wf
+                if ($case.partial) {
+                    Push-Location $f.Repo
+                    try {
+                        git checkout -q -B $wf.workBranch
+                        'x'|Set-Content dirty-pr.txt
+                    } finally { Pop-Location }
+                }
+                New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass $case.ec
+                $script:v303GptCalls=0
+                $gpt={param($r,$p,$o)$script:v303GptCalls++;[pscustomobject]@{ExitCode=0;Success=$true;Output='no'}}
+                $res=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber $case.n -RepoPath $f.Repo -IssueFetcher $issue -GptRunner $gpt -CiProbe $ciNone `
+                    -PrProbe {param($p,$o,$b)[pscustomobject]@{ok=$true;items=@()}}
+                $res.status|Should Be $case.st
+                $res.status|Should Not Be 'worker_failed'
+                $script:v303GptCalls|Should Be 0
+                if ($case.ec -eq 'weekly_exhausted') {
+                    $res.usageStateChanged|Should Be $true
+                    (Get-UsageState).grok.status|Should Be 'exhausted'
+                } else {
+                    $res.usageStateChanged|Should Be $false
+                }
+            } finally {Remove-PrFakeRepo $f}
+        }
+    }
+
+    It 'watch follow Detach→envelope 경로는 transient를 정직히 종료하고 worker를 재시작하지 않는다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 8320 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId watch-transient
+            New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass transient_rate_limit
+            $script:v303GptCalls=0
+            $gpt={param($r,$p,$o)$script:v303GptCalls++;throw 'paid gpt must not run'}
+            $result=Invoke-WatchCommand -OperationNumber 1 -IssueNumber 8320 -RepoPath $repo -Follow -Emitter {param($line)} -CiProbe $ciNone `
+                -IssueFetcher $issue -GptRunner $gpt
+            $result.terminal|Should Be $true
+            $result.status|Should Be 'transient_rate_limited'
+            $result.nextAction|Should Be 'stop'
+            $result.workerCalls|Should Be 0
+            $script:v303GptCalls|Should Be 0
+            $saved=Get-ExecutionReceipt -Operation 1 -IssueNumber 8320 -RepoPath $repo
+            $saved.executionId|Should Be $receipt.executionId
+            $saved.generation|Should Be $receipt.generation
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'watch follow weekly clean Plan B 후 terminal nextAction이 정직하다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 8321 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId watch-weekly
+            New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
+            $script:v303GptCalls=0
+            $gpt={param($r,$p,$o)$script:v303GptCalls++;Push-Location $p;try{'planb'|Set-Content p.txt;git add .;git commit -q -m planb;git push -q origin main;[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;ErrorClass='none';Output='ok';LocalVerificationComplete=$true}}finally{Pop-Location}}
+            $result=Invoke-WatchCommand -OperationNumber 1 -IssueNumber 8321 -RepoPath $repo -Follow -Emitter {param($line)} -CiProbe $ciNone `
+                -IssueFetcher $issue -GptRunner $gpt
+            $result.terminal|Should Be $true
+            $result.status|Should Be 'completed'
+            $result.nextAction|Should Be 'opus_end_review'
+            $script:v303GptCalls|Should Be 1
+            (Get-UsageState).grok.status|Should Be 'exhausted'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'failed envelope 뒤 일반 run 재호출은 같은 generation을 재사용하고 worker를 다시 시작하지 않는다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        $prompt=New-TempOrderFile -Content 'fixture'
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8322 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId first
+            New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
+            $script:v303UnexpectedCalls=0
+            $runner={param($r,$p,$o)$script:v303UnexpectedCalls++;throw 'ordinary run must not replace a failed generation'}
+            $again=Invoke-PersistentRouteWorker -Route $route -RepoPath $repo -PromptPath $prompt -Config (Get-Config) `
+                -OperationNumber 2 -IssueNumber 8322 -Kind logic -Snapshot $snap -RunId second -InjectedRunner $runner -Detach
+            $again.AlreadyActive|Should Be $true
+            $again.WorkerCalls|Should Be 0
+            $again.ExecutionReceipt.executionId|Should Be $receipt.executionId
+            $again.ExecutionReceipt.generation|Should Be $receipt.generation
+            $script:v303UnexpectedCalls|Should Be 0
+        } finally {
+            Remove-TempOrderFile -Path $prompt
+            Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It '동기 실패 결과는 active receipt를 남기지 않고 분류된 terminal 상태로 확정한다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        $prompt=New-TempOrderFile -Content 'fixture'
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $runner={param($r,$p,$o)[pscustomobject]@{ExitCode=1;Success=$false;QuotaExhausted=$false;ErrorClass='transient_rate_limit';Output='HTTP 429'}}
+            $result=Invoke-PersistentRouteWorker -Route $route -RepoPath $repo -PromptPath $prompt -Config (Get-Config) `
+                -OperationNumber 2 -IssueNumber 8323 -Kind logic -Snapshot $snap -RunId sync-failure -InjectedRunner $runner
+            $result.Success|Should Be $false
+            $result.ErrorClass|Should Be 'transient_rate_limit'
+            $saved=Get-ExecutionReceipt -Operation 2 -IssueNumber 8323 -RepoPath $repo
+            $saved.status|Should Be 'transient_rate_limited'
+            (Test-ExecutionStatusActive -Status ([string]$saved.status))|Should Be $false
+        } finally {
+            Remove-TempOrderFile -Path $prompt
+            Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'weekly Plan B 이슈 조회 실패는 terminal quota 상태로 끝나고 mutation lock을 남기지 않는다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8324 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId issue-fetch-failure
+            New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
+            $result=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 8324 -RepoPath $repo `
+                -IssueFetcher {param($n,$p)throw 'mock issue lookup unavailable'} -CiProbe $ciNone
+            $result.status|Should Be 'quota_exhausted'
+            $result.planBStatus|Should Be 'issue_fetch_failed'
+            $result.fallbackAttempted|Should Be $false
+            $result.usageStateChanged|Should Be $true
+            (Get-RepositoryMutationReceipt -RepoPath $repo)|Should Be $null
+            $saved=Get-ExecutionReceipt -Operation 2 -IssueNumber 8324 -RepoPath $repo
+            (Test-ExecutionStatusActive -Status ([string]$saved.status))|Should Be $false
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'Get-WorkerPolicyStatus는 weekly/transient/provider/quota_unknown/protocol을 구분한다' {
+        (Get-WorkerPolicyStatus -ErrorClass weekly_exhausted)|Should Be 'quota_exhausted'
+        (Get-WorkerPolicyStatus -ErrorClass transient_rate_limit)|Should Be 'transient_rate_limited'
+        (Get-WorkerPolicyStatus -ErrorClass provider_failure)|Should Be 'provider_failure'
+        (Get-WorkerPolicyStatus -ErrorClass quota_unknown)|Should Be 'quota_unknown'
+        (Get-WorkerPolicyStatus -ErrorClass worker_protocol_error)|Should Be 'worker_protocol_error'
+        (Get-WorkerPolicyStatus -ErrorClass none)|Should Be 'worker_failed'
+    }
+}
+
+Describe 'v3.0.3. abandon-claude mutation lock 안전 해제 (F4)' {
+    BeforeEach {
+        $script:v303aSavedBoundary=$env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=Join-Path $TestWorkRoot 'v303a-safe-boundary.txt'
+        if(-not (Test-Path -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE)){'safe'|Set-Content -LiteralPath $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE -Encoding UTF8}
+        Set-TestGitWorkflow -Mode direct-main
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        $env:OPERATION_ROUTER_BOUNDARY_WATCH_OVERRIDE=$script:v303aSavedBoundary
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It '유효한 방치 claude_execute 지시는 abandon으로 해제된다' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $res=Invoke-RunOperation -OperationNumber 2 -IssueNumber 8401 -RepoPath $repo -IssueFetcher $issue -ClaudeOnly
+            $res.status|Should Be 'claude_execute'
+            (Get-RepositoryMutationReceipt -RepoPath $repo)|Should Not Be $null
+            (Get-PendingSnapshot -Operation 2 -IssueNumber 8401 -RepoPath $repo)|Should Not Be $null
+            $cleared=Invoke-AbandonClaudeDirective -OperationNumber 2 -IssueNumber 8401 -RepoPath $repo
+            $cleared.status|Should Be 'claude_directive_cleared'
+            $cleared.cleared|Should Be $true
+            (Get-RepositoryMutationReceipt -RepoPath $repo)|Should Be $null
+            (Get-PendingSnapshot -Operation 2 -IssueNumber 8401 -RepoPath $repo)|Should Be $null
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'idempotent: 이미 없으면 claude_directive_absent' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $a=Invoke-AbandonClaudeDirective -OperationNumber 2 -IssueNumber 8402 -RepoPath $repo
+            $a.status|Should Be 'claude_directive_absent'
+            $a.cleared|Should Be $false
+            $b=Invoke-AbandonClaudeDirective -OperationNumber 2 -IssueNumber 8402 -RepoPath $repo
+            $b.status|Should Be 'claude_directive_absent'
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It '잘못된 이슈 번호로는 다른 이슈 lock을 지우지 않는다' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $null=Invoke-RunOperation -OperationNumber 2 -IssueNumber 8403 -RepoPath $repo -IssueFetcher $issue -ClaudeOnly
+            $bad=Invoke-AbandonClaudeDirective -OperationNumber 2 -IssueNumber 8499 -RepoPath $repo
+            $bad.cleared|Should Be $false
+            $bad.status|Should Match 'elsewhere|absent|mismatch'
+            (Get-PendingSnapshot -Operation 2 -IssueNumber 8403 -RepoPath $repo)|Should Not Be $null
+            (Get-RepositoryMutationReceipt -RepoPath $repo).issueNumber|Should Be 8403
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It '활성 worker execution이 있으면 abandon을 거부한다' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $snap=Get-StartSnapshot -RepoPath $repo
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8404 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId active-abandon
+            $mut=Enter-RepositoryMutation -RepoPath $repo -Operation 2 -IssueNumber 8404 -Purpose run
+            Set-RepositoryMutationExecution -RepoPath $repo -Token $mut.token -ExecutionReceipt $receipt
+            Save-PendingSnapshot -Operation 2 -IssueNumber 8404 -Snapshot $snap -RepoPath $repo -Kind logic | Out-Null
+            $res=Invoke-AbandonClaudeDirective -OperationNumber 2 -IssueNumber 8404 -RepoPath $repo
+            $res.status|Should Be 'claude_abandon_execution_active'
+            $res.cleared|Should Be $false
+            (Get-PendingSnapshot -Operation 2 -IssueNumber 8404 -RepoPath $repo)|Should Not Be $null
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'HEAD 변경 또는 dirty worktree면 manual_resolution_required' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $null=Invoke-RunOperation -OperationNumber 2 -IssueNumber 8405 -RepoPath $repo -IssueFetcher $issue -ClaudeOnly
+            Push-Location $repo
+            try { 'mut'|Set-Content evidence.txt } finally { Pop-Location }
+            $res=Invoke-AbandonClaudeDirective -OperationNumber 2 -IssueNumber 8405 -RepoPath $repo
+            $res.status|Should Be 'claude_abandon_manual_resolution_required'
+            $res.cleared|Should Be $false
+            (Get-PendingSnapshot -Operation 2 -IssueNumber 8405 -RepoPath $repo)|Should Not Be $null
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'worktree가 clean이어도 HEAD가 바뀌면 manual_resolution_required' {
+        $repo=New-FakeRepo -WithRemote
+        try {
+            $null=Invoke-RunOperation -OperationNumber 2 -IssueNumber 8407 -RepoPath $repo -IssueFetcher $issue -ClaudeOnly
+            Push-Location $repo
+            try {
+                'committed mutation'|Set-Content committed.txt
+                git add committed.txt
+                git commit -q -m 'unverified claude mutation'
+            } finally { Pop-Location }
+            (Get-GitWorktreeStatus -Path $repo).Clean|Should Be $true
+            $res=Invoke-AbandonClaudeDirective -OperationNumber 2 -IssueNumber 8407 -RepoPath $repo
+            $res.status|Should Be 'claude_abandon_manual_resolution_required'
+            $res.cleared|Should Be $false
+            $res.headChanged|Should Be $true
+            $res.worktreeClean|Should Be $true
+            (Get-PendingSnapshot -Operation 2 -IssueNumber 8407 -RepoPath $repo)|Should Not Be $null
+        } finally {Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It '다른 clone namespace의 pending/lock은 독립이며 교차 삭제되지 않는다' {
+        $a=New-FakeRepo -WithRemote;$b=New-FakeRepo -WithRemote
+        try {
+            $null=Invoke-RunOperation -OperationNumber 2 -IssueNumber 8406 -RepoPath $a -IssueFetcher $issue -ClaudeOnly
+            $null=Invoke-RunOperation -OperationNumber 2 -IssueNumber 8406 -RepoPath $b -IssueFetcher $issue -ClaudeOnly
+            $cleared=Invoke-AbandonClaudeDirective -OperationNumber 2 -IssueNumber 8406 -RepoPath $a
+            $cleared.cleared|Should Be $true
+            (Get-PendingSnapshot -Operation 2 -IssueNumber 8406 -RepoPath $a)|Should Be $null
+            (Get-PendingSnapshot -Operation 2 -IssueNumber 8406 -RepoPath $b)|Should Not Be $null
+            (Get-RepositoryMutationReceipt -RepoPath $b)|Should Not Be $null
+        } finally {Remove-Item -LiteralPath $a,$b -Recurse -Force -ErrorAction SilentlyContinue}
+    }
+
+    It 'Skill/README에 abandon-claude 복구 명령이 문서화되어 있다' {
+        $readme=Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
+        $readme|Should Match 'abandon-claude'
+        $skill=Get-Content -LiteralPath (Join-Path $SkillsRoot 'operation-1\SKILL.md') -Raw -Encoding UTF8
+        $skill|Should Match 'abandon-claude'
     }
 }
 

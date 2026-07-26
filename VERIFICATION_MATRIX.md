@@ -19,6 +19,7 @@
 | 6–13 | branch preflight | synced base 생성, dirty/ahead/behind/fetch/임의 branch 차단, 완전한 receipt+Draft PR 재개, 무소유 remote branch 차단 |
 | 14–19 | worker/postflight | 실제 expected branch·issue·remote·엄격 완료 보고 계약, main 금지, branch 변경·base 직접 push 차단, work branch push 확인 |
 | 20–24 | clone mutation lock | 다른 이슈·Operation 동시 mutation 차단, watch 읽기 허용, 안전한 해제, clone namespace 격리 |
+| F4 abandon-claude | 방치 claude 지시 | 유효 해제, 잘못된 이슈/repo 거부, 활성 execution 거부, dirty/HEAD 변경 수동 해결 요구, 다른 clone 격리, idempotent |
 | 25–34 | Draft PR | push 뒤 생성, 정확한 OPEN Draft 재사용, base/head/repository/state/Draft 불일치 차단, 생성 실패, body 마스킹·임시 파일 정리 |
 | 35–42 | PR CI | 모든 success, failure 우선, pending, neutral/skipped/unknown, no-check 정책, API 오류, 전체 check 집계 |
 | 43–50 | receipt/review/repair/recover | workflow round-trip, v1 legacy, mode pin, branch/PR SHA review gate, 같은 PR repair, 새 PR 금지, unverified recover |
@@ -27,6 +28,7 @@
 | PR #2 외부 검토 회귀 | 완료 보고·workflow·CI·Draft·review coverage·원격 CI | Claude 보고 6경로, base/head workflow 4경로, PR 연관 check 6경로, finalize 재시도, 대형 diff/실패·`INCOMPLETE` coverage, Actions 정적 계약 |
 | v3.0.2 모델 계약 | config 단일 원본·고정 ID·생성물 drift | source tree 정합성, Skill drift 복구, latest/family alias 쓰기 전 차단, Operation 2·3 공유 Skill 충돌 차단, modelPolicy 고정, doctor config 파생 보고 |
 | v3.0.3 모델 수명주기 | 미래 고정 ID 전파·provider 진단 | 가상 Grok/GPT/Claude ID를 config에서 Skill·README 두 표·CI cache·manifest로 생성, Codex 역할별 available/missing, Grok 성공 목록 exact-ID 판정, malformed/error fail-closed, 쓰기 선검증·rollback, source/installed fixture 격리 |
+| v3.0.3 detach 오류 정책 | F1-F3 envelope fidelity | direct-main/PR detached weekly/transient/provider/quota_unknown, clean Plan B, partial 거부, usage-state 정직성, watch follow E2E, 유료 호출 0 |
 
 ## 상태별 기대 판정
 

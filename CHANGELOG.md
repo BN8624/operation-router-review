@@ -2,8 +2,13 @@
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
-## v3.0.3 (2026-07-25)
+## v3.0.3 (2026-07-26)
 
+- detach/watch/recover: 완료된 result envelope에 동기 실행과 같은 구조화 실패 정책을 적용한다. `weekly_exhausted`만 usage exhausted/100과 clean Plan B를 허용하고, 부분 변경은 `partial_worker_changes`로 fallback을 막으며, `transient_rate_limit`·`provider_failure`·`quota_unknown`·cancelled·turn-limit·protocol 분류를 PR mode에서도 `worker_failed`로 붕괴하지 않는다.
+- recover Plan B: clean weekly 소진 시 이슈 원문을 재구성해 기존 `Invoke-QuotaFallback` 계약을 수행한다. 성공 합성과 중복 worker 시작은 금지하며 watch generation 고정·mutation lock을 유지한다.
+- abandon-claude: 방치된 `claude_execute`/`claude-direct` pending 지시와 clone mutation lock을 명시 명령으로만 해제한다. 저장소·작전·이슈 일치, 활성 worker 부재, clean HEAD/worktree를 검증하고 다른 clone/이슈 영수증은 건드리지 않는다. dirty/HEAD 변경은 `claude_abandon_manual_resolution_required`로 거부한다.
+- docs: REENTRY를 v3.0.3으로 맞추고 README·SECURITY·VERIFICATION_MATRIX·Skill에 detach 오류 정책과 abandon-claude 복구를 반영했다.
+- tests: pull-request/direct-main detached envelope, watch follow E2E, usage-state/fallback 가드, abandon 유효·거부·idempotent·clone 격리 회귀를 추가했다. 유료 worker 호출 0.
 - doctor: Codex `sol`·`terra`·`luna`와 Grok 가용성 판정을 고정 문자열 대신 현재 config의 고정 모델 ID로 수행한다. configured ID가 로컬 CLI 목록·cache에 없으면 역할별 `unresolved`와 missing 목록을 보고한다.
 - doctor hardening: `grok models`가 비정상 종료하거나 오류 문장에 configured ID를 포함해도 available로 오인하지 않고, 성공 목록의 줄 단위 정확 ID만 인정한다. doctor는 진단이며 실행 차단기가 아님을 문서에 명시했다.
 - synchronization: model contract `-Write`가 Claude Skill 표뿐 아니라 Grok/GPT 작업자 표와 CI용 합성 Codex model cache·manifest도 생성한다. 모든 입력과 대상 구조를 쓰기 전에 검증하고 일반적인 중간 쓰기 실패는 원복하며, `-Check`가 생성면과 manifest drift를 fail-closed한다.

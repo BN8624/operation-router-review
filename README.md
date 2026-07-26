@@ -176,13 +176,14 @@ Claude-only resumeCommand 라우팅: 작전 1 → `/operation-1-claude <n>`, 작
 작전 1/2/3 Skill의 Claude 세션이 단계 진행에 쓰는 `run-operation.ps1` 하위 명령이다. 사용자가 직접 칠 필요는 없다.
 
 ```
--Command run       -Operation N -IssueNumber X -Detach [-Kind ..] [-ClaudeOnly] [-FinishCurrent] [-UseGptReviewReserve]
--Command watch     -Operation N -IssueNumber X -Follow    # 현재 executionId·generation을 terminal까지 관찰
--Command review    -Operation 1 -IssueNumber X    # run 영수증 자동 복원 (StartHead 수동 입력 없음), GPT Sol 실제 검수, 엄격 JSON
--Command repair    -Operation 1 -IssueNumber X    # review 영수증에서 findings/postReviewHead/원래 worker 자동 복원, 최대 1회
--Command finalize  -Operation 1|2 -IssueNumber X -ReviewVerdict PASS|REPAIR_REQUIRED
--Command postflight -Operation N -IssueNumber X -WorkerReportPath <returned path>
--Command recover    -Operation N -IssueNumber X    # 새 세션 재진입 전용, worker 재호출 없음
+-Command run            -Operation N -IssueNumber X -Detach [-Kind ..] [-ClaudeOnly] [-FinishCurrent] [-UseGptReviewReserve]
+-Command watch          -Operation N -IssueNumber X -Follow    # 현재 executionId·generation을 terminal까지 관찰
+-Command review         -Operation 1 -IssueNumber X    # run 영수증 자동 복원 (StartHead 수동 입력 없음), GPT Sol 실제 검수, 엄격 JSON
+-Command repair         -Operation 1 -IssueNumber X    # review 영수증에서 findings/postReviewHead/원래 worker 자동 복원, 최대 1회
+-Command finalize       -Operation 1|2 -IssueNumber X -ReviewVerdict PASS|REPAIR_REQUIRED
+-Command postflight     -Operation N -IssueNumber X -WorkerReportPath <returned path>
+-Command recover        -Operation N -IssueNumber X    # 새 세션 재진입 전용; 실패 envelope는 동기와 같은 오류 정책
+-Command abandon-claude -Operation N -IssueNumber X    # 방치된 claude_execute 지시·mutation lock 안전 해제
 ```
 
 PR mode에서는 모든 Operation run receipt에 workflow context가 저장된다. 작전 1 review가 REPAIR_REQUIRED면 findings가 review receipt에 저장되고, repair receipt는 같은 work branch와 같은 Draft PR의 새 head SHA를 기록한다. repair에는 verified run과 review receipt가 모두 필수다. `-PostReviewHead`/`-FindingsFile`/`-Target`을 명시해도 override가 되지 않고 receipt assertion으로만 검사된다.
@@ -193,9 +194,11 @@ Operation 1의 Opus 종료 검토 또는 Operation 2의 Sonnet 종료 검토가 
 
 ### 장시간 실행과 재진입 recover
 
-작전 1/2/3의 정상 경로는 `run -Detach` 직후 `watch -Follow`를 실행해 `operation_terminal`과 `nextAction`까지 같은 세션에서 기다리는 것이다. watch가 살아 있는 동안 recover를 수동 호출하지 않는다. Claude 세션이 이미 종료되었거나 사용자가 나중에 새 세션으로 재진입했고 watch가 없다면 `/operation recover 2 9`로 최신 실행을 복구한다. 활성 프로세스면 `worker_running`과 기존 `executionId`·`logPath`를 반환하고 postflight를 실행하지 않는다. 정상 result envelope가 있으면 정상 postflight를 이어간다. result 없이 커밋·push만 남았으면 workflow별 `recovered_*_unverified`로 판정하며 자동 PASS나 작전 1 review 자격을 만들지 않는다. recover는 구현 worker를 다시 호출하지 않는다.
+작전 1/2/3의 정상 경로는 `run -Detach` 직후 `watch -Follow`를 실행해 `operation_terminal`과 `nextAction`까지 같은 세션에서 기다리는 것이다. watch가 살아 있는 동안 recover를 수동 호출하지 않는다. Claude 세션이 이미 종료되었거나 사용자가 나중에 새 세션으로 재진입했고 watch가 없다면 `/operation recover 2 9`로 최신 실행을 복구한다. 활성 프로세스면 `worker_running`과 기존 `executionId`·`logPath`를 반환하고 postflight를 실행하지 않는다. 정상 성공 result envelope가 있으면 정상 postflight를 이어간다. 실패 envelope는 동기 실행과 같은 구조화 정책으로 처리한다. `weekly_exhausted`만 usage-state exhausted/100과 clean 저장소 Plan B를 허용하고, 부분 변경은 `partial_worker_changes`로 fallback하지 않으며, `transient_rate_limit`·`provider_failure`·`quota_unknown` 등은 PR mode에서도 `worker_failed`로 붕괴하지 않는다. result 없이 커밋·push만 남았으면 workflow별 `recovered_*_unverified`로 판정하며 자동 PASS나 작전 1 review 자격을 만들지 않는다. recover는 임의 성공 합성과 중복 worker 시작을 하지 않는다.
 
 동일 저장소·작전·이슈의 활성 상태(`worker_starting`, `worker_running`, `worker_exited_postflight_pending`, `interrupted_postflight_pending`)에서 `run`을 다시 호출하면 `execution_already_active`와 기존 실행의 `watchCommand`를 반환한다. 이때 새 `run`을 시작하지 않고 같은 `executionId`·`generation`의 watch만 다시 실행한다. PID와 프로세스 시작시각을 함께 비교하고 result 부재와 heartbeat 정체까지 확인하기 전에는 stale로 간주하지 않는다.
+
+방치된 `claude_execute`/`claude-direct` 지시로 clone mutation lock이 남은 경우, 상태 파일을 수동 삭제하지 말고 `abandon-claude`를 사용한다. 동일 저장소·작전·이슈, pending 소유, 활성 worker 부재, clean HEAD/worktree를 검증한 뒤에만 pending·order·report·mutation lock을 해제한다. dirty worktree나 HEAD 변경은 `claude_abandon_manual_resolution_required`로 거부하며 다른 이슈·clone 영수증은 지우지 않는다.
 
 기본 검증 계층은 worker가 targeted test·관련 정적 검사/lint·typecheck·핵심 시뮬레이션·커밋 전 최소 회귀를 수행하고, 전체 장시간 suite·멀티브라우저 E2E·dist·release asset·Pages는 CI로 확인하는 방식이다. 주문서가 전체 로컬 검증을 명시하면 이를 임의로 삭제하지 않는다.
 

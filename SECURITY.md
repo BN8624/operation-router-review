@@ -16,6 +16,8 @@
 - `baseBranch`와 `branchPrefix`는 안전한 Git ref 구성요소만 허용한다. 공백, 제어 문자, `..`, `~`, `^`, `:`, `?`, `*`, `[`, 역슬래시, 선두·후행 slash, 연속 slash, `.lock` suffix와 shell meta 문자를 거부한다.
 - 한 clone의 mutation lock은 run, repair, Claude 직접 실행과 branch 전환을 직렬화한다. watch, status, doctor, terminal receipt 조회는 읽기 전용이다.
 - stale lock은 PID만 보고 제거하지 않는다. process 시작 시각, heartbeat, execution receipt와 terminal 여부를 함께 확인한다.
+- 방치된 `claude_execute` 지시 해제는 `abandon-claude`만 사용한다. 저장소 identity·작전·이슈·pending 소유·활성 worker 부재·clean worktree/HEAD를 검증하며 다른 clone/이슈 영수증을 삭제하지 않는다.
+- detach 완료 envelope의 weekly/transient/provider/quota_unknown 분류는 watch/recover에서도 유지한다. weekly만 usage exhausted이며 부분 변경 시 fallback하지 않는다.
 - worker 계약에는 실제 workflow mode, base branch/head, expected work/remote branch, issue number를 넣는다. PR mode worker는 branch·PR·이슈 관리, main push, force push, reset, clean, rebase를 하지 않는다.
 - 외부 worker의 로컬 검증은 Grok JSON 또는 Codex JSONL의 최종 agent message 안에 있는 엄격한 `[ORH_WORKER_REPORT]`만 증거로 읽는다. Claude-only/direct는 별도 JSON 보고서의 operation, issue, current HEAD, expected work branch를 receipt와 대조한다. 누락·invalid JSON·고정 완료 문구·HEAD/branch 불일치·`false`·남은 문제는 유효 provenance를 받지 못하거나 `merge_ready`를 차단한다.
 - postflight는 current branch, base ref 불변, worker final HEAD의 base 포함 여부, upstream, local/remote work HEAD, worktree, commit, artifact와 watched boundary를 검사한다.
@@ -35,7 +37,7 @@
 
 - workflow mode와 base/work/PR context는 pending, execution, run, review, repair receipt에 고정한다. v1 receipt 또는 workflow 누락 receipt는 direct-main legacy로만 읽으며 PR receipt로 추측 변환하지 않는다.
 - progress summary는 `Protect-SecretText` 뒤 개행을 정규화하고 최대 500자로 제한한다. prompt·환경 전체·raw 출력·hidden reasoning은 progress journal에 기록하지 않는다.
-- watch는 기존 execution과 generation을 읽고 postflight를 재개할 뿐 worker, fallback, review, repair, 새 generation을 시작하지 않는다.
+- watch는 기존 execution과 generation을 읽고 recover/postflight를 재개한다. 임의 review·repair 시작과 성공 합성은 하지 않는다. clean weekly envelope에 한해 동기 계약과 같은 Plan B만 허용하며 generation 고정과 mutation lock을 유지한다.
 - active 중 prompt와 raw stdout/stderr가 execution artifact root에 일시적으로 존재한다. terminal sanitization이 마스킹본을 만든 뒤 원본을 제거하며 retention은 active와 receipt 참조 generation을 보호한다.
 
 ## 정직한 한계

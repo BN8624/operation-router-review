@@ -1,4 +1,8 @@
-# REENTRY — operation-router v3.0.2 pull-request workflow
+# REENTRY — operation-router v3.0.3 pull-request workflow
+
+## 최근 검증
+
+Grok 전수검사 지적 사항 F1–F5 수정 후 정식 source-tree 372개와 고유 임시 USERPROFILE installed fixture 372개가 모두 통과했다. installed integration failure는 0개이며, 저장소의 PowerShell 18개 구문 검사, config JSON 파싱, model contract, manifest 39개 SHA-256, `git diff --check`도 통과했다. 유료 모델 호출과 실제 사용자 홈 변경은 없었다.
 
 ## 현재 계약
 
@@ -9,6 +13,8 @@
 - 라우터가 base 동기화, branch 생성·선택·소유권, Draft PR, PR CI, receipt, `merge_ready`를 관리한다. worker는 지정 branch에서 수정·테스트·커밋하고 지정 원격 branch에만 push한다.
 - 외부 worker의 마지막 `[ORH_WORKER_REPORT]` 또는 Claude-only/direct의 HEAD·operation·issue·work branch 고정 JSON 보고가 유효하고, 로컬 검증 완료가 `true`이며 남은 문제가 없어야 최종 `merge_ready` 자격을 얻는다.
 - 한 clone에서는 run, repair, Claude 직접 구현, branch 전환 등 mutation 실행을 하나만 허용한다. watch, status, doctor, terminal receipt 읽기는 mutation lock 중에도 가능하다.
+- 방치된 `claude_execute`/`claude-direct` 지시는 `abandon-claude`로만 안전하게 해제한다. PID 부재만으로 lock을 지우지 않으며, dirty worktree·HEAD 변경·활성 worker·다른 이슈/clone은 거부한다.
+- `run -Detach` → `watch -Follow`/recover 경로의 완료 result envelope는 동기 실행과 같은 구조화 실패 정책을 쓴다. weekly만 usage exhausted·Plan B, 부분 변경 시 fallback 금지, PR mode에서도 분류를 `worker_failed`로 붕괴하지 않는다.
 - 자동 Draft 해제, 자동 merge, branch 삭제, main fast-forward, rebase, conflict 해결은 없다. `merge_ready`는 병합 완료가 아니며 Draft 상태로 남는다.
 - 모델 배치는 `config/config.json`이 단일 원본이다. 새 고정 ID는 동기화 도구로 Skill 6종과 README 표에 반영하며 `latest` alias와 자동 업그레이드는 사용하지 않는다.
 
@@ -24,7 +30,7 @@ Operation 1의 `nextAction`은 `review`, `opus_end_review`, `manual_verification
 
 v2.4.7부터 run은 watch와 함께 사용한다. recover는 Claude 세션이 이미 종료됐거나 사용자가 나중에 새 세션으로 재진입했고 watch가 없을 때만 사용한다. watch가 살아 있는 동안 recover를 수동 호출하지 않는다.
 
-recover는 새 worker를 호출하지 않고 receipt에 고정된 mode를 사용한다. PR mode에서는 current branch/HEAD, remote work HEAD, OPEN Draft PR base/head/head SHA와 PR CI까지 확인한다. 정상 result envelope가 없으면 `recovered_pr_*_unverified` 또는 기존 direct-main unverified 상태를 유지하며 Operation 1 review·repair 자격을 만들지 않는다.
+recover는 새 구현 worker를 임의로 재시작하지 않는다. 정상 실패 envelope가 있으면 동기 경로와 같은 오류 정책(weekly usage·clean Plan B, partial 거부, transient/provider/quota_unknown 구분)을 적용한다. result가 없으면 receipt에 고정된 mode로 Git·PR 사실만 복구한다. PR mode에서는 current branch/HEAD, remote work HEAD, OPEN Draft PR base/head/head SHA와 PR CI까지 확인한다. 정상 result envelope가 없으면 `recovered_pr_*_unverified` 또는 기존 direct-main unverified 상태를 유지하며 Operation 1 review·repair 자격을 만들지 않는다.
 
 PR CI는 preflight에 고정된 base workflow와 final head workflow를 함께 사용한다. base workflow 전체 삭제, push-only check, PR 번호/head SHA 불일치, check 연관성 불명은 성공이 아니다. Operation 1 review는 모든 변경 파일의 모든 diff 청크가 검토된 경우에만 PASS receipt를 만든다.
 

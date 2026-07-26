@@ -1,51 +1,25 @@
-operation-router v3.0.3 model lifecycle verification
-Date: 2026-07-26 (KST)
-Runner: Windows PowerShell 5.1, Pester 3.4 (-Strict)
-
-Scope:
-  config/config.json is the single model assignment source.
-  Skill frontmatter, generated README model tables, and CI model fixtures are checked/synchronized.
-  Doctor compares configured Grok/GPT IDs with isolated CLI/cache discovery.
-  Pinned model IDs are required; latest/family aliases are rejected.
-  Provider lifecycle discovery is notify-only; no automatic model upgrade.
-  Core routing, fallback, PR workflow state machine: unchanged
-
-Model contract command:
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-model-contract.ps1 -Check
-Result:
-  exit code: 0
-  status: model_contract_valid
-  Skill contracts: 6
-  worker routing roles: 4
-
-Final source-tree command:
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
-Final result:
-  exit code: 0
-  duration: 1117.52 seconds
-  354 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
-  installedIntegrationTests: not-requested
-
-Installed fixture command:
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-installed-fixture.ps1
-Final result:
-  exit code: 0
-  duration: 1118.37 seconds
-  source tree: 354 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
-  installedIntegrationTests: executed
-  installedIntegrationFailures: 0
-  installed Skill byte-equivalence: 6/6
-
-Final integrity checks:
-  PowerShell parser: 18 files passed
-  config JSON parse: passed
-  manifest SHA-256: 39 entries passed
-  git diff --check: passed
-
-Isolation:
-  fake Git repositories and bare remotes, injected workers, mock PR probe,
-  ordinary OS process fixture, synthetic provider CLI/cache, and unique temporary
-  USERPROFILE only for the installed integration run.
-  Real user-home reads and writes: 0.
-  Real GitHub PR/check mutations during tests: 0.
-  Paid Grok/GPT/Claude live calls: 0.
+verificationStatus=PASS
+runAtUtc=2026-07-26T12:08:30.8473239Z
+startHead=e9ba6e49bd9b7fe755f5e4e36523ee14ca119f88
+targetedTests=18 passed, 0 failed
+sourceTreeCommand=powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1
+sourceTreeResult=372 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+sourceTreeDurationSeconds=1227.37
+sourceTreeInstalledIntegrationTests=not-requested
+installedFixtureCommand=powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-installed-fixture.ps1
+installedFixtureResult=372 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+installedFixtureDurationSeconds=1241.51
+installedIntegrationTests=executed
+installedIntegrationFailures=0
+installedSkillByteEquivalence=6/6
+powerShellParserScope=all 18 repository *.ps1 files
+powerShellParserResult=18 passed, 0 errors
+configJsonParse=passed
+modelContractCheck=passed
+manifestScope=39 deployment files; manifest-sha256.txt excludes itself
+manifestSha256=passed
+gitDiffCheck=passed
+isolation=fake Git repositories and bare remotes, injected workers, mock PR probes, synthetic provider CLI/cache, and a unique temporary USERPROFILE
+realUserHomeReadsWrites=0
+paidModelCalls=0
+result=PASS
