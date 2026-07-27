@@ -36,42 +36,11 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'detect-environment.ps1')
 
 # ---------------- 보조 명령 ----------------
-function Invoke-StatusCommand {
-    $s = Get-UsageState
-    [pscustomobject]@{ command = 'status'; grok = $s.grok; gpt = $s.gpt; updatedAt = $s.updatedAt }
-}
 function Invoke-DoctorCommand {
     param([string]$CodexModelsCachePath)
     $report = Invoke-EnvironmentDetection -CodexModelsCachePath $CodexModelsCachePath
     Write-JsonFile -Path $Script:DoctorReportPath -Object $report
     [pscustomobject]@{ command = 'doctor'; report = $report; reportPath = $Script:DoctorReportPath }
-}
-function Invoke-SetCommand {
-    param([Parameter(Mandatory)][ValidateSet('grok','gpt')][string]$Target, [Parameter(Mandatory)][string]$Value)
-    $cfg = Get-Config
-    if ($Target -eq 'grok') {
-        $v = Assert-ValidGrokSetting -Value $Value
-    } else {
-        $v = Assert-ValidGptSetting -Value $Value
-    }
-    $state = Invoke-UsageStateUpdate -Update {
-        param($current)
-        if ($Target -eq 'grok') {
-            return (Set-GrokState -State $current -Validated $v -Config $cfg)
-        }
-        return (Set-GptState -State $current -Validated $v)
-    }
-    [pscustomobject]@{ command = 'set'; target = $Target; value = $Value; state = $state }
-}
-# reset은 런타임 상태만 초기화한다. Skill/스크립트/config는 건드리지 않는다.
-function Invoke-ResetCommand {
-    $default = [pscustomobject]@{
-        grok = [pscustomobject]@{ status = 'available'; percent = 0 }
-        gpt  = [pscustomobject]@{ status = 'available'; percent = 0 }
-        updatedAt = $null
-    }
-    $default = Invoke-UsageStateUpdate -Update { param($current) return $default }
-    [pscustomobject]@{ command = 'reset'; scope = 'runtime_state_only'; state = $default }
 }
 
 # ---------------- 출력 조립 ----------------

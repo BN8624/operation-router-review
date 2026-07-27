@@ -5238,6 +5238,54 @@ Describe 'v3.0.3. abandon-claude mutation lock 안전 해제 (F4)' {
     }
 }
 
+Describe 'v3.0.4 핵심 모듈 1차 분해' {
+    It '1. common은 state-store와 worker-contract를 고정 순서로 로드한다' {
+        $common = Get-Content -LiteralPath (Join-Path $ScriptsDir 'common.ps1') -Raw -Encoding UTF8
+        $stateIndex = $common.IndexOf("state-store.ps1")
+        $workerIndex = $common.IndexOf("worker-contract.ps1")
+        ($stateIndex -ge 0) | Should Be $true
+        ($workerIndex -gt $stateIndex) | Should Be $true
+    }
+
+    It '2. common은 reviewed baseline보다 400줄 이상 감소한다' {
+        @(Get-Content -LiteralPath (Join-Path $ScriptsDir 'common.ps1')).Count | Should BeLessThan 1292
+    }
+
+    It '3. 이동 대상 함수는 지정 모듈에만 한 번 존재한다' {
+        $targets = @{
+            'state-store.ps1' = @('Read-JsonFileStable','Write-AtomicJsonFile','Get-UsageState','Save-UsageState','Open-UsageStateLock','Invoke-UsageStateUpdate')
+            'worker-contract.ps1' = @('Get-WorkerErrorClass','Get-WorkerResultErrorClass','Get-WorkerPolicyStatus','ConvertFrom-WorkerCompletionReport','ConvertFrom-ClaudeCompletionReport','ConvertFrom-StrictReviewJson')
+        }
+        foreach ($entry in $targets.GetEnumerator()) {
+            foreach ($name in $entry.Value) {
+                $hits = @(Get-ChildItem -LiteralPath $ScriptsDir -File -Filter '*.ps1' | Where-Object {
+                    (Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8) -match "(?m)^function\s+$([regex]::Escape($name))\s*\{"
+                })
+                $hits.Count | Should Be 1
+                $hits[0].Name | Should Be $entry.Key
+            }
+        }
+    }
+
+    It '4. 새 모듈은 run-operation을 다시 로드하지 않고 scripts 함수명도 중복되지 않는다' {
+        foreach ($name in @('state-store.ps1','worker-contract.ps1')) {
+            (Get-Content -LiteralPath (Join-Path $ScriptsDir $name) -Raw -Encoding UTF8) | Should Not Match 'run-operation\.ps1'
+        }
+        $definitions = @()
+        foreach ($file in Get-ChildItem -LiteralPath $ScriptsDir -File -Filter '*.ps1') {
+            $tokens = $null
+            $parseErrors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$parseErrors)
+            @($parseErrors).Count | Should Be 0
+            $definitions += @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $false) | ForEach-Object { $_.Name })
+        }
+        @($definitions | Group-Object | Where-Object { $_.Count -gt 1 }).Count | Should Be 0
+    }
+}
+
 Describe 'v3.0.4 usage-state 원자 저장과 직렬화' {
     It '1. Save-UsageState는 BOM 없는 유효 JSON을 원자적으로 저장한다' {
         Invoke-ResetCommand | Out-Null
