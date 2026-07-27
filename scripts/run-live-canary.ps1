@@ -37,12 +37,33 @@ function Get-CanaryGitValue {
 function New-CanaryUsageResult {
     param([string]$Reason = 'Explicit paid-provider confirmation and all target arguments are required.')
     return [pscustomobject][ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         finalStatus = 'LIVE_CANARY_NOT_EXECUTED'
         usage = 'run-live-canary.ps1 -ConfirmPaidProviderCall -RepoPath <path> -Operation <1|2|3> -IssueNumber <number> [-Phase Start|Continue|Finalize] [-FinalReviewEvidencePath <path>] [-ResultPath <path>]'
         paidProviderCalls = 0
         paidProviderCallsVerified = $true
         notExecutedReason = $Reason
+    }
+}
+
+function New-CanaryCheckpointFailure {
+    param(
+        [Parameter(Mandatory)][string]$Status,
+        [Parameter(Mandatory)][string]$Reason,
+        [AllowNull()]$Checkpoint,
+        [AllowNull()]$CurrentExecution
+    )
+    return [pscustomobject][ordered]@{
+        schemaVersion = 3
+        finalStatus = $Status
+        failureReason = $Reason
+        executionId = Get-CanaryProperty -Object $Checkpoint -Name 'executionId'
+        generation = Get-CanaryProperty -Object $Checkpoint -Name 'generation'
+        currentExecutionId = Get-CanaryProperty -Object $CurrentExecution -Name 'executionId'
+        currentGeneration = Get-CanaryProperty -Object $CurrentExecution -Name 'generation'
+        routerCommands = @()
+        paidProviderCalls = 0
+        paidProviderCallsVerified = $true
     }
 }
 
@@ -146,6 +167,97 @@ function Get-CanaryWorkerReportEvidence {
     }
 }
 
+function Get-CanaryPhaseEvidence {
+    param(
+        [Parameter(Mandatory)][ValidateSet('implementation','repair')][string]$Phase,
+        [AllowNull()]$ExecutionReceipt,
+        [AllowNull()]$WorkerReceipt,
+        [Parameter(Mandatory)][int]$Operation,
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)]$RepositoryIdentity,
+        [AllowNull()][string]$ExpectedHead
+    )
+    $envelope = Test-CanaryResultEnvelope -ExecutionReceipt $ExecutionReceipt
+    $worker = Get-CanaryWorkerReportEvidence -ExecutionReceipt $ExecutionReceipt `
+        -AuthoritativeReceipt $WorkerReceipt -EnvelopeEvidence $envelope
+    $contextValid = $false
+    $reason = $null
+    if ($null -eq $ExecutionReceipt -or $null -eq $WorkerReceipt) {
+        $reason = "$Phase`_receipt_missing"
+    } else {
+        $required = @(
+            'executionId','generation','operation','issueNumber','ownerRepo','repoRootHash',
+            'worker','finalHead'
+        )
+        foreach ($field in $required) {
+            if ($ExecutionReceipt.PSObject.Properties.Name -notcontains $field) {
+                $reason = "$Phase`_field_missing:$field"
+                break
+            }
+        }
+        if ($null -eq $reason -and $Phase -eq 'repair' -and
+            ([string]$ExecutionReceipt.executionId -cne [string](Get-CanaryProperty -Object $WorkerReceipt -Name 'executionId') -or
+             [int]$ExecutionReceipt.generation -ne [int](Get-CanaryProperty -Object $WorkerReceipt -Name 'generation' -Default 0))) {
+            $reason = 'repair_receipt_execution_mismatch'
+        }
+        if ($null -eq $reason -and
+            ([int]$ExecutionReceipt.operation -ne $Operation -or
+             [int]$ExecutionReceipt.issueNumber -ne $IssueNumber -or
+             [string]$ExecutionReceipt.ownerRepo -cne [string]$RepositoryIdentity.ownerRepo -or
+             [string]$ExecutionReceipt.repoRootHash -cne [string]$RepositoryIdentity.repoRootHash)) {
+            $reason = "$Phase`_repository_or_request_mismatch"
+        }
+        if ($null -eq $reason -and
+            ([string]$ExecutionReceipt.worker -cne [string](Get-CanaryProperty -Object $WorkerReceipt -Name 'worker') -or
+             [string]$ExecutionReceipt.finalHead -cne [string](Get-CanaryProperty -Object $WorkerReceipt -Name 'finalHead') -or
+             (-not [string]::IsNullOrWhiteSpace($ExpectedHead) -and
+              [string]$ExecutionReceipt.finalHead -cne $ExpectedHead))) {
+            $reason = "$Phase`_worker_or_head_mismatch"
+        }
+        if ($null -eq $reason -and $Phase -eq 'repair') {
+            $repairEnvelope = $envelope.envelope
+            foreach ($field in @('operation','issueNumber','ownerRepo','repoRootHash','purpose','finalHead')) {
+                if ($null -eq $repairEnvelope -or $repairEnvelope.PSObject.Properties.Name -notcontains $field) {
+                    $reason = "repair_result_field_missing:$field"
+                    break
+                }
+            }
+            if ($null -eq $reason -and
+                ([int]$repairEnvelope.operation -ne $Operation -or
+                 [int]$repairEnvelope.issueNumber -ne $IssueNumber -or
+                 [string]$repairEnvelope.ownerRepo -cne [string]$RepositoryIdentity.ownerRepo -or
+                 [string]$repairEnvelope.repoRootHash -cne [string]$RepositoryIdentity.repoRootHash -or
+                 [string]$repairEnvelope.purpose -cne 'repair' -or
+                 [string]$repairEnvelope.worker -cne [string]$ExecutionReceipt.worker -or
+                 [string]$repairEnvelope.finalHead -cne [string]$ExecutionReceipt.finalHead)) {
+                $reason = 'repair_result_context_mismatch'
+            }
+        }
+        if ($null -eq $reason) { $contextValid = $true }
+    }
+    $valid = ([bool]$contextValid -and [bool]$envelope.valid -and [bool]$worker.valid)
+    if (-not $valid -and $null -eq $reason) {
+        $reason = if (-not $envelope.valid) { [string]$envelope.reason } else { "$Phase`_worker_report_invalid" }
+    }
+    return [pscustomobject][ordered]@{
+        performed = ($Phase -eq 'implementation' -or $null -ne $WorkerReceipt)
+        valid = [bool]$valid
+        executionId = Get-CanaryProperty -Object $ExecutionReceipt -Name 'executionId'
+        generation = Get-CanaryProperty -Object $ExecutionReceipt -Name 'generation'
+        resultEnvelope = $envelope.path
+        resultEnvelopePresent = [bool]$envelope.valid
+        resultEnvelopeReason = $envelope.reason
+        worker = Get-CanaryProperty -Object $ExecutionReceipt -Name 'worker'
+        workerReportValid = [bool]$worker.valid
+        localVerificationComplete = [bool]$worker.localVerificationComplete
+        verificationProvenance = $worker.verificationProvenance
+        remainingProblems = @($worker.remainingProblems)
+        finalHead = Get-CanaryProperty -Object $ExecutionReceipt -Name 'finalHead'
+        contextVerified = [bool]$contextValid
+        reason = $reason
+    }
+}
+
 function Test-CanaryFinalReviewEvidence {
     param(
         [string]$Path,
@@ -235,7 +347,8 @@ function Get-CanaryPrEvidence {
         [AllowNull()]$Receipt,
         [scriptblock]$PrProbe,
         [scriptblock]$CheckLister,
-        [scriptblock]$RemoteHeadProbe
+        [scriptblock]$RemoteHeadProbe,
+        [scriptblock]$MergeMutationProbe
     )
     $out = [pscustomobject][ordered]@{
         queried = $false
@@ -249,6 +362,8 @@ function Get-CanaryPrEvidence {
         prState = $null
         draftRetained = $null
         merged = $null
+        prRemainsDraft = $null
+        prMerged = $null
         prContextVerified = $false
         ciStatus = 'not-checked'
         automaticMergeCalled = $null
@@ -281,6 +396,8 @@ function Get-CanaryPrEvidence {
     $out.prState = [string]$pr.state
     $out.draftRetained = [bool]$pr.draft
     $out.merged = [bool]$pr.merged
+    $out.prRemainsDraft = [bool]$pr.draft
+    $out.prMerged = [bool]$pr.merged
     $out.remoteWorkBranchHead = Get-GitRemoteBranchHead -RepoPath $RepoPath `
         -Branch $out.workBranch -RemoteHeadProbe $RemoteHeadProbe
     $receiptHead = [string](Get-CanaryProperty -Object $Receipt -Name 'finalHead')
@@ -299,9 +416,19 @@ function Get-CanaryPrEvidence {
         -PrNumber ([int]$out.draftPrNumber) -HeadSha ([string]$out.prHeadSha) `
         -CheckLister $CheckLister -BaseWorkflow $baseWorkflow -HeadWorkflow $headWorkflow `
         -RequireCiWhenWorkflowPresent (Get-WorkflowRequireCi -Workflow $workflow)
-    if ([bool]$out.draftRetained -and -not [bool]$out.merged) {
-        $out.automaticMergeCalled = $false
-        $out.automaticMergeVerification = 'github-pr-draft-and-merge-state'
+    $out.automaticMergeVerification = 'not-directly-observable'
+    if ($null -ne $MergeMutationProbe) {
+        try {
+            $mergeProbe = & $MergeMutationProbe $RepoPath ([int]$out.draftPrNumber) ([string]$out.prHeadSha)
+            $mergeCalls = [int](Get-CanaryProperty -Object $mergeProbe -Name 'mergeCalls' -Default -1)
+            if ($mergeCalls -ge 0) {
+                $out.automaticMergeCalled = ($mergeCalls -gt 0)
+                $out.automaticMergeVerification = 'router-mutation-probe'
+            }
+        } catch {
+            $out.automaticMergeCalled = $null
+            $out.automaticMergeVerification = 'mutation-probe-failed'
+        }
     }
     $out.status = if ($out.prContextVerified) { 'verified' } else { 'pr_context_mismatch' }
     return $out
@@ -310,35 +437,103 @@ function Get-CanaryPrEvidence {
 function Get-CanaryPaidCallEvidence {
     param(
         [AllowNull()]$ExecutionReceipt,
+        [AllowNull()]$RepairReceipt,
+        [Parameter(Mandatory)][int]$Operation,
+        [Parameter(Mandatory)][int]$IssueNumber,
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$RouterCommands
     )
-    if ($null -eq $ExecutionReceipt -or
-        $ExecutionReceipt.PSObject.Properties.Name -notcontains 'artifactRoot' -or
-        [string]::IsNullOrWhiteSpace([string]$ExecutionReceipt.artifactRoot) -or
-        -not (Test-Path -LiteralPath ([string]$ExecutionReceipt.artifactRoot) -PathType Container)) {
-        return [pscustomobject]@{ count=$null; verified=$false; source='invocation-receipt-unavailable' }
-    }
-    if (@($RouterCommands | Where-Object { $_ -in @('review','repair') }).Count -gt 0) {
-        return [pscustomobject]@{ count=$null; verified=$false; source='review-or-repair-invocation-not-receipted' }
-    }
-    $prefix = "op$([int]$ExecutionReceipt.operation)-issue$([int]$ExecutionReceipt.issueNumber)-g"
-    $count = 0
-    foreach ($file in @(Get-ChildItem -LiteralPath ([string]$ExecutionReceipt.artifactRoot) `
-        -Recurse -File -Filter 'invocation.json' -ErrorAction SilentlyContinue)) {
-        if ((Split-Path -Leaf (Split-Path -Parent $file.FullName)) -notlike "$prefix*") { continue }
-        try {
-            $invocation = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 |
-                ConvertFrom-Json -ErrorAction Stop
-            if ($invocation.schemaVersion -is [int] -and [int]$invocation.schemaVersion -eq 1 -and
-                -not [string]::IsNullOrWhiteSpace([string]$invocation.executionId) -and
-                $invocation.generation -is [int]) {
-                $count++
-            }
-        } catch {
-            return [pscustomobject]@{ count=$null; verified=$false; source='invocation-receipt-invalid' }
+    $byPhase = [ordered]@{ implementation=$null; review=0; repair=0; finalReview=0 }
+    $failure = {
+        param([string]$Reason)
+        return [pscustomobject]@{
+            count=$null;verified=$false;source=$Reason;reason=$Reason
+            byPhase=[pscustomobject]$byPhase
         }
     }
-    return [pscustomobject]@{ count=[int]$count; verified=$true; source='validated-invocation-receipts' }
+    if ($null -eq $ExecutionReceipt -or
+        $ExecutionReceipt.PSObject.Properties.Name -notcontains 'artifactPath' -or
+        [string]::IsNullOrWhiteSpace([string]$ExecutionReceipt.artifactPath) -or
+        -not (Test-Path -LiteralPath ([string]$ExecutionReceipt.artifactPath) -PathType Container)) {
+        return (& $failure 'invocation-receipt-unavailable')
+    }
+    $invocationFiles = @(Get-ChildItem -LiteralPath ([string]$ExecutionReceipt.artifactPath) `
+        -File -Filter 'invocation.json' -ErrorAction SilentlyContinue)
+    if ($invocationFiles.Count -ne 1) {
+        return (& $failure 'invocation-receipt-count-invalid')
+    }
+    try {
+        $invocation = Get-Content -LiteralPath $invocationFiles[0].FullName -Raw -Encoding UTF8 |
+            ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return (& $failure 'invocation-receipt-invalid')
+    }
+    $required = @(
+        'schemaVersion','executionId','generation','operation','issueNumber',
+        'provider','invocationKind','isPaidProviderInvocation','createdAt'
+    )
+    foreach ($name in $required) {
+        if ($invocation.PSObject.Properties.Name -notcontains $name) {
+            return (& $failure "invocation-field-missing:$name")
+        }
+    }
+    $timestamp = [datetime]::MinValue
+    $timestampValid = [datetime]::TryParse(
+        [string]$invocation.createdAt,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$timestamp
+    )
+    if ($invocation.schemaVersion -isnot [int] -or [int]$invocation.schemaVersion -ne 1 -or
+        [string]::IsNullOrWhiteSpace([string]$invocation.executionId) -or
+        $invocation.generation -isnot [int] -or
+        $invocation.operation -isnot [int] -or
+        $invocation.issueNumber -isnot [int] -or
+        [string]::IsNullOrWhiteSpace([string]$invocation.provider) -or
+        [string]::IsNullOrWhiteSpace([string]$invocation.invocationKind) -or
+        $invocation.isPaidProviderInvocation -isnot [bool] -or
+        -not $timestampValid) {
+        return (& $failure 'invocation-field-type-invalid')
+    }
+    if ([string]$invocation.executionId -cne [string]$ExecutionReceipt.executionId) {
+        return (& $failure 'invocation-execution-mismatch')
+    }
+    if ([int]$invocation.generation -ne [int]$ExecutionReceipt.generation) {
+        return (& $failure 'invocation-generation-mismatch')
+    }
+    if ([int]$invocation.operation -ne $Operation) {
+        return (& $failure 'invocation-operation-mismatch')
+    }
+    if ([int]$invocation.issueNumber -ne $IssueNumber) {
+        return (& $failure 'invocation-issue-mismatch')
+    }
+    if ([string]$invocation.provider -cne [string]$ExecutionReceipt.worker -or
+        [string]$invocation.invocationKind -cne 'implementation') {
+        return (& $failure 'invocation-provider-or-kind-mismatch')
+    }
+    $byPhase.implementation = if ([bool]$invocation.isPaidProviderInvocation) { 1 } else { 0 }
+    $reviewUnreceipted = (@($RouterCommands | Where-Object { $_ -eq 'review' }).Count -gt 0)
+    $repairUnreceipted = (@($RouterCommands | Where-Object { $_ -eq 'repair' }).Count -gt 0 -or $null -ne $RepairReceipt)
+    if ($reviewUnreceipted) {
+        $byPhase.review = $null
+    }
+    if ($repairUnreceipted) {
+        $byPhase.repair = $null
+    }
+    if ($reviewUnreceipted -or $repairUnreceipted) {
+        $reason = if ($reviewUnreceipted -and $repairUnreceipted) {
+            'review-or-repair-invocation-not-receipted'
+        } elseif ($reviewUnreceipted) {
+            'review-invocation-not-receipted'
+        } else {
+            'repair-invocation-not-receipted'
+        }
+        return (& $failure $reason)
+    }
+    $count = [int]$byPhase.implementation
+    return [pscustomobject]@{
+        count=$count;verified=$true;source='execution-bound-invocation-receipt';reason=$null
+        byPhase=[pscustomobject]$byPhase
+    }
 }
 
 function Invoke-LiveCanary {
@@ -357,7 +552,8 @@ function Invoke-LiveCanary {
         [scriptblock]$RepairReceiptReader,
         [scriptblock]$PrProbe,
         [scriptblock]$CheckLister,
-        [scriptblock]$RemoteHeadProbe
+        [scriptblock]$RemoteHeadProbe,
+        [scriptblock]$MergeMutationProbe
     )
     if (-not $ConfirmPaidProviderCall -or [string]::IsNullOrWhiteSpace($RepoPath) -or
         $Operation -notin @(1,2,3) -or $IssueNumber -lt 1) {
@@ -367,7 +563,8 @@ function Invoke-LiveCanary {
     if (-not (Test-GitRepository -Path $resolvedRepo)) {
         return (New-CanaryUsageResult -Reason "Canary target is not a Git repository: $resolvedRepo")
     }
-    if ([string]::IsNullOrWhiteSpace($ResultPath)) {
+    $resultPathWasExplicit = -not [string]::IsNullOrWhiteSpace($ResultPath)
+    if (-not $resultPathWasExplicit) {
         if ($Phase -ne 'Start') {
             return (New-CanaryUsageResult -Reason 'Continue and Finalize require an existing -ResultPath checkpoint.')
         }
@@ -390,13 +587,24 @@ function Invoke-LiveCanary {
     if (Test-Path -LiteralPath $ResultPath -PathType Leaf) {
         try { $checkpoint = Read-JsonFile -Path $ResultPath } catch { $checkpoint = $null }
     }
-    if ($Phase -ne 'Start') {
-        if ($null -eq $checkpoint -or
+    if ($Phase -ne 'Start' -or $null -ne $checkpoint) {
+        if ($null -eq $checkpoint) {
+            return (New-CanaryUsageResult -Reason 'Canary checkpoint is required.')
+        }
+        $checkpointIdentity = Get-CanaryProperty -Object $checkpoint -Name 'targetRepositoryIdentity'
+        if ((Get-CanaryProperty -Object $checkpoint -Name 'schemaVersion') -isnot [int] -or
+            [int]$checkpoint.schemaVersion -ne 3 -or
             [int](Get-CanaryProperty -Object $checkpoint -Name 'operation' -Default 0) -ne $Operation -or
             [int](Get-CanaryProperty -Object $checkpoint -Name 'issueNumber' -Default 0) -ne $IssueNumber -or
-            [string](Get-CanaryProperty -Object (Get-CanaryProperty -Object $checkpoint -Name 'targetRepositoryIdentity') -Name 'ownerRepo') -cne [string]$repoIdentity.ownerRepo -or
-            [string](Get-CanaryProperty -Object (Get-CanaryProperty -Object $checkpoint -Name 'targetRepositoryIdentity') -Name 'repoRootHash') -cne [string]$repoIdentity.repoRootHash) {
-            return (New-CanaryUsageResult -Reason 'Canary checkpoint does not match the requested repository, operation, and issue.')
+            [string](Get-CanaryProperty -Object $checkpointIdentity -Name 'ownerRepo') -cne [string]$repoIdentity.ownerRepo -or
+            [string](Get-CanaryProperty -Object $checkpointIdentity -Name 'repoRootHash') -cne [string]$repoIdentity.repoRootHash) {
+            return (New-CanaryCheckpointFailure -Status 'LIVE_CANARY_CHECKPOINT_CONTEXT_MISMATCH' `
+                -Reason 'checkpoint_schema_or_repository_context_mismatch' -Checkpoint $checkpoint -CurrentExecution $null)
+        }
+        if ([string]::IsNullOrWhiteSpace([string](Get-CanaryProperty -Object $checkpoint -Name 'executionId')) -or
+            (Get-CanaryProperty -Object $checkpoint -Name 'generation') -isnot [int]) {
+            return (New-CanaryCheckpointFailure -Status 'LIVE_CANARY_CHECKPOINT_EXECUTION_MISMATCH' `
+                -Reason 'checkpoint_execution_identity_missing' -Checkpoint $checkpoint -CurrentExecution $null)
         }
         $startedAt = [string](Get-CanaryProperty -Object $checkpoint -Name 'startedAtUtc' -Default $startedAt)
     }
@@ -479,6 +687,22 @@ function Invoke-LiveCanary {
     $script:CanaryRouterFailure = $null
 
     $execution = & $ExecutionReader $resolvedRepo $Operation $IssueNumber
+    if ($Phase -eq 'Start' -and $null -eq $checkpoint -and $null -ne $execution -and -not $resultPathWasExplicit) {
+        return (New-CanaryCheckpointFailure -Status 'LIVE_CANARY_CHECKPOINT_REQUIRED' `
+            -Reason 'existing_execution_requires_explicit_new_result_path' -Checkpoint $null -CurrentExecution $execution)
+    }
+    if ($null -ne $checkpoint) {
+        if ($null -eq $execution -or
+            [int](Get-CanaryProperty -Object $execution -Name 'operation' -Default 0) -ne $Operation -or
+            [int](Get-CanaryProperty -Object $execution -Name 'issueNumber' -Default 0) -ne $IssueNumber -or
+            [string](Get-CanaryProperty -Object $execution -Name 'ownerRepo') -cne [string]$repoIdentity.ownerRepo -or
+            [string](Get-CanaryProperty -Object $execution -Name 'repoRootHash') -cne [string]$repoIdentity.repoRootHash -or
+            [string](Get-CanaryProperty -Object $execution -Name 'executionId') -cne [string]$checkpoint.executionId -or
+            [int](Get-CanaryProperty -Object $execution -Name 'generation' -Default 0) -ne [int]$checkpoint.generation) {
+            return (New-CanaryCheckpointFailure -Status 'LIVE_CANARY_CHECKPOINT_EXECUTION_MISMATCH' `
+                -Reason 'checkpoint_does_not_match_current_execution_receipt' -Checkpoint $checkpoint -CurrentExecution $execution)
+        }
+    }
     $anchorExecutionId = if ($null -ne $execution) { [string]$execution.executionId } else { $null }
     $anchorGeneration = if ($null -ne $execution) { [int]$execution.generation } else { $null }
     if ($Phase -eq 'Start' -and $null -eq $execution) {
@@ -547,7 +771,71 @@ function Invoke-LiveCanary {
         }
     }
 
+    $implementationEvidence = Get-CanaryPhaseEvidence -Phase implementation `
+        -ExecutionReceipt $execution -WorkerReceipt $runReceipt -Operation $Operation `
+        -IssueNumber $IssueNumber -RepositoryIdentity $repoIdentity `
+        -ExpectedHead ([string](Get-CanaryProperty -Object $runReceipt -Name 'finalHead'))
+    $repairEvidence = [pscustomobject][ordered]@{
+        performed=$false;valid=$false;executionId=$null;generation=$null;resultEnvelope=$null
+        resultEnvelopePresent=$false;resultEnvelopeReason='repair_not_performed';worker=$null
+        workerReportValid=$false;localVerificationComplete=$false;verificationProvenance=$null
+        remainingProblems=@();finalHead=$null;contextVerified=$false;reason='repair_not_performed'
+    }
+    if ($null -ne $repairReceipt) {
+        $repairEvidence = Get-CanaryPhaseEvidence -Phase repair `
+            -ExecutionReceipt $repairReceipt -WorkerReceipt $repairReceipt -Operation $Operation `
+            -IssueNumber $IssueNumber -RepositoryIdentity $repoIdentity `
+            -ExpectedHead (Get-CanaryGitValue -Path $resolvedRepo -Arguments @('rev-parse','HEAD'))
+    }
+
+    if ($null -eq $routerFailure) {
+        switch ($Operation) {
+            3 {
+                if ($nextAction -cne 'report') {
+                    $routerFailure = "operation3_next_action_invalid:$nextAction"
+                }
+            }
+            2 {
+                if ($nextAction -cne 'sonnet_end_review') {
+                    $routerFailure = "operation2_next_action_invalid:$nextAction"
+                }
+            }
+            1 {
+                if ($nextAction -eq 'review') {
+                    $reviewContextValid = (
+                        $null -ne $reviewReceipt -and
+                        [int](Get-CanaryProperty -Object $reviewReceipt -Name 'operation' -Default 0) -eq $Operation -and
+                        [int](Get-CanaryProperty -Object $reviewReceipt -Name 'issueNumber' -Default 0) -eq $IssueNumber -and
+                        [string](Get-CanaryProperty -Object $reviewReceipt -Name 'ownerRepo') -ceq [string]$repoIdentity.ownerRepo -and
+                        [string](Get-CanaryProperty -Object $reviewReceipt -Name 'repoRootHash') -ceq [string]$repoIdentity.repoRootHash -and
+                        [string](Get-CanaryProperty -Object $reviewReceipt -Name 'postReviewHead') -ceq
+                            [string](Get-CanaryProperty -Object $runReceipt -Name 'finalHead')
+                    )
+                    $reviewVerdict = [string](Get-CanaryProperty -Object $reviewReceipt -Name 'verdict')
+                    if (-not $reviewContextValid) {
+                        $routerFailure = 'operation1_review_receipt_context_mismatch'
+                    } elseif ($reviewVerdict -eq 'PASS') {
+                        if ($null -ne $repairReceipt) {
+                            $routerFailure = 'operation1_unexpected_repair_after_pass'
+                        }
+                    } elseif ($reviewVerdict -eq 'REPAIR_REQUIRED') {
+                        if ($null -eq $repairReceipt) {
+                            $routerFailure = 'operation1_repair_receipt_missing'
+                        } elseif (-not [bool]$repairEvidence.valid) {
+                            $routerFailure = 'repair_provenance_mismatch:' + [string]$repairEvidence.reason
+                        }
+                    } else {
+                        $routerFailure = 'operation1_review_not_terminal'
+                    }
+                } elseif ($nextAction -ne 'opus_end_review') {
+                    $routerFailure = "operation1_next_action_invalid:$nextAction"
+                }
+            }
+        }
+    }
+
     $authoritativeReceipt = if ($null -ne $repairReceipt) { $repairReceipt } else { $runReceipt }
+    $authoritativeEvidence = if ($null -ne $repairReceipt) { $repairEvidence } else { $implementationEvidence }
     $workBranch = $null
     if ($null -ne $authoritativeReceipt) {
         $workflow = Get-ReceiptWorkflowContext -Receipt $authoritativeReceipt
@@ -567,7 +855,11 @@ function Invoke-LiveCanary {
     }
 
     $prEvidence = Get-CanaryPrEvidence -RepoPath $resolvedRepo -Receipt $authoritativeReceipt `
-        -PrProbe $PrProbe -CheckLister $CheckLister -RemoteHeadProbe $RemoteHeadProbe
+        -PrProbe $PrProbe -CheckLister $CheckLister -RemoteHeadProbe $RemoteHeadProbe `
+        -MergeMutationProbe $MergeMutationProbe
+    if ($null -eq $routerFailure -and $prEvidence.automaticMergeCalled -eq $true) {
+        $routerFailure = 'automatic_merge_invocation_observed'
+    }
     $finalizeOutput = $null
     if ($null -eq $routerFailure -and $Operation -in @(1,2) -and $finalReview.valid) {
         if ([string]$finalReview.verdict -ne 'PASS') {
@@ -583,21 +875,32 @@ function Invoke-LiveCanary {
                 & $RunReceiptReader $resolvedRepo $Operation $IssueNumber
             }
             $prEvidence = Get-CanaryPrEvidence -RepoPath $resolvedRepo -Receipt $authoritativeReceipt `
-                -PrProbe $PrProbe -CheckLister $CheckLister -RemoteHeadProbe $RemoteHeadProbe
+                -PrProbe $PrProbe -CheckLister $CheckLister -RemoteHeadProbe $RemoteHeadProbe `
+                -MergeMutationProbe $MergeMutationProbe
+            if ($prEvidence.automaticMergeCalled -eq $true) {
+                $routerFailure = 'automatic_merge_invocation_observed'
+            }
         }
     }
 
-    $envelopeEvidence = Test-CanaryResultEnvelope -ExecutionReceipt $execution
-    $workerEvidence = Get-CanaryWorkerReportEvidence -ExecutionReceipt $execution `
-        -AuthoritativeReceipt $authoritativeReceipt -EnvelopeEvidence $envelopeEvidence
-    $paidEvidence = Get-CanaryPaidCallEvidence -ExecutionReceipt $execution -RouterCommands @($commands)
+    $paidEvidence = Get-CanaryPaidCallEvidence -ExecutionReceipt $execution `
+        -RepairReceipt $repairReceipt -Operation $Operation -IssueNumber $IssueNumber `
+        -RouterCommands @($commands)
     $routerOutputParsed = [bool]$script:CanaryRouterOutputParsed
     $routerOutput = $script:CanaryLastRouterOutput
     if ($null -eq $routerFailure) { $routerFailure = $script:CanaryRouterFailure }
 
     $finalStatus = $null
     if ($null -ne $routerFailure) {
-        $finalStatus = 'LIVE_CANARY_FAILED'
+        if ($routerFailure -like 'operation3_next_action_invalid:*') {
+            $finalStatus = 'LIVE_CANARY_OPERATION3_NEXT_ACTION_INVALID'
+        } elseif ($routerFailure -like 'operation2_next_action_invalid:*') {
+            $finalStatus = 'LIVE_CANARY_OPERATION2_NEXT_ACTION_INVALID'
+        } elseif ($routerFailure -like 'operation1_next_action_invalid:*') {
+            $finalStatus = 'LIVE_CANARY_OPERATION1_NEXT_ACTION_INVALID'
+        } else {
+            $finalStatus = 'LIVE_CANARY_FAILED'
+        }
     } elseif ($Operation -eq 3) {
         if ($nextAction -eq 'report' -and [bool](Get-CanaryProperty -Object $terminal -Name 'terminal' -Default $false)) {
             $finalStatus = 'LIVE_CANARY_OPERATION3_COMPLETE'
@@ -616,7 +919,7 @@ function Invoke-LiveCanary {
     }
 
     $result = [pscustomobject][ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         routerVersion = [string]$summary.version
         routerHead = $routerHead
         targetRepositoryIdentity = [pscustomobject][ordered]@{
@@ -633,16 +936,20 @@ function Invoke-LiveCanary {
         finalHead = $finalHead
         executionId = Get-CanaryProperty -Object $execution -Name 'executionId'
         generation = Get-CanaryProperty -Object $execution -Name 'generation'
+        authoritativeExecutionId = $authoritativeEvidence.executionId
+        authoritativeGeneration = $authoritativeEvidence.generation
         routerCommands = @($commands)
         routerOutputParsed = $routerOutputParsed
         routerTerminalStatus = Get-CanaryProperty -Object $terminal -Name 'status'
         nextAction = $nextAction
-        resultEnvelopePresent = [bool]$envelopeEvidence.valid
-        resultEnvelopeReason = $envelopeEvidence.reason
-        workerReportValid = [bool]$workerEvidence.valid
-        localVerificationComplete = [bool]$workerEvidence.localVerificationComplete
-        verificationProvenance = $workerEvidence.verificationProvenance
-        remainingProblems = @($workerEvidence.remainingProblems)
+        resultEnvelopePresent = [bool]$authoritativeEvidence.resultEnvelopePresent
+        resultEnvelopeReason = $authoritativeEvidence.resultEnvelopeReason
+        workerReportValid = [bool]$authoritativeEvidence.workerReportValid
+        localVerificationComplete = [bool]$authoritativeEvidence.localVerificationComplete
+        verificationProvenance = $authoritativeEvidence.verificationProvenance
+        remainingProblems = @($authoritativeEvidence.remainingProblems)
+        implementationEvidence = $implementationEvidence
+        repairEvidence = $repairEvidence
         branch = Get-CanaryGitValue -Path $resolvedRepo -Arguments @('branch','--show-current')
         baseBranch = $prEvidence.baseBranch
         workBranch = $prEvidence.workBranch
@@ -659,17 +966,23 @@ function Invoke-LiveCanary {
         failureReason = $routerFailure
         mergeReady = [bool](Get-CanaryProperty -Object $finalizeOutput -Name 'mergeReady' -Default $false)
         draftRetained = $prEvidence.draftRetained
+        prRemainsDraft = $prEvidence.prRemainsDraft
+        prMerged = $prEvidence.prMerged
         automaticMergeCalled = $prEvidence.automaticMergeCalled
         automaticMergeVerification = $prEvidence.automaticMergeVerification
         paidProviderCalls = $paidEvidence.count
         paidProviderCallsVerified = [bool]$paidEvidence.verified
+        paidProviderCallsReason = $paidEvidence.reason
+        paidProviderCallsByPhase = $paidEvidence.byPhase
         startedAtUtc = $startedAt
         finishedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
         evidenceSources = [pscustomobject][ordered]@{
             executionReceipt = if ($null -ne $execution) {
                 Get-ExecutionReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $resolvedRepo
             } else { $null }
-            resultEnvelope = $envelopeEvidence.path
+            resultEnvelope = $authoritativeEvidence.resultEnvelope
+            implementationResultEnvelope = $implementationEvidence.resultEnvelope
+            repairResultEnvelope = $repairEvidence.resultEnvelope
             runReceipt = if ($null -ne $runReceipt) {
                 Get-RunReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $resolvedRepo
             } else { $null }

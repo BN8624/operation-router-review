@@ -4155,6 +4155,15 @@ Describe 'v3.0.0. workflow receipt와 merge_ready' {
             $repair.status|Should Be 'repair_completed_review_pending'
             $pr.State.CreateCalls|Should Be 1
             $repair.workflow.pr.number|Should Be 42
+            $repairReceipt=Get-RepairReceipt -Operation 1 -IssueNumber 48 -RepoPath $f.Repo
+            [string]::IsNullOrWhiteSpace([string]$repairReceipt.executionId)|Should Be $false
+            $repairReceipt.generation|Should Be 1
+            (Test-Path -LiteralPath $repairReceipt.resultPath -PathType Leaf)|Should Be $true
+            $repairEnvelope=Read-JsonFile -Path $repairReceipt.resultPath
+            $repairEnvelope.executionId|Should Be $repairReceipt.executionId
+            $repairEnvelope.generation|Should Be $repairReceipt.generation
+            $repairEnvelope.purpose|Should Be 'repair'
+            $repairEnvelope.finalHead|Should Be $repairReceipt.finalHead
         } finally {Remove-PrFakeRepo $f}
     }
 
@@ -5243,7 +5252,7 @@ Describe 'v3.0.3. abandon-claude mutation lock 안전 해제 (F4)' {
 function New-CanaryHarnessFixture {
     param(
         [Parameter(Mandatory)][ValidateSet(1,2,3)][int]$Operation,
-        [Parameter(Mandatory)][string]$NextAction,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$NextAction,
         [ValidateSet('PASS','REPAIR_REQUIRED')][string]$ReviewVerdict = 'PASS',
         [string]$FinalizeStatus = 'merge_ready'
     )
@@ -5269,7 +5278,9 @@ function New-CanaryHarnessFixture {
     $resultPath = Join-Path $artifactPath 'result.json'
     $invocationPath = Join-Path $artifactPath 'invocation.json'
     Write-AtomicJsonFile -Path $invocationPath -Object ([pscustomobject]@{
-        schemaVersion=1;executionId=$executionId;generation=1;filePath='provider-cli'
+        schemaVersion=1;executionId=$executionId;generation=1;operation=$Operation;issueNumber=$issueNumber
+        provider='gpt';invocationKind='implementation';isPaidProviderInvocation=$false
+        createdAt=(Get-Date).ToUniversalTime().ToString('o');filePath='provider-cli'
         argumentList=@('fixture');stdinMode='file';promptPath=(Join-Path $artifactPath 'prompt.txt')
     })
     $workflow = [pscustomobject]@{
@@ -5296,7 +5307,7 @@ function New-CanaryHarnessFixture {
         ownerRepo=$identity.ownerRepo;repoRoot=$identity.repoRoot;canonicalRepoRoot=$identity.canonicalRepoRoot
         repoRootHash=$identity.repoRootHash;namespaceVersion=$identity.namespaceVersion
         executionId=$executionId;generation=1;worker='gpt';model='fixture-model';effort='low'
-        status='worker_running';resultPath=$resultPath;artifactRoot=$artifactRoot;invocationPath=$invocationPath
+        status='worker_running';resultPath=$resultPath;artifactRoot=$artifactRoot;artifactPath=$artifactPath;invocationPath=$invocationPath
         finalHead=$null;localVerificationComplete=$false;verificationProvenance='worker_result_pending'
         workerReportedVerification=$null;remainingProblems=@()
     }
@@ -5344,6 +5355,8 @@ function New-CanaryHarnessFixture {
                 $state.ReviewCalls++
                 $state.Review = [pscustomobject]@{
                     schemaVersion=2;operation=1;issueNumber=$issueNumber;verdict=$state.ReviewVerdict
+                    ownerRepo=$identity.ownerRepo;repoRoot=$identity.repoRoot;canonicalRepoRoot=$identity.canonicalRepoRoot
+                    repoRootHash=$identity.repoRootHash;namespaceVersion=$identity.namespaceVersion
                     postReviewHead=$state.Run.finalHead;originalWorker='gpt';changedFiles=@('canary-1.txt')
                     reviewedFiles=@('canary-1.txt');truncatedFiles=@();coverageComplete=$true;workflow=$state.Run.workflow
                 }
@@ -5362,12 +5375,30 @@ function New-CanaryHarnessFixture {
                     } finally { Pop-Location }
                     $repairWorkflow = ($state.Run.workflow|ConvertTo-Json -Depth 20|ConvertFrom-Json)
                     $repairWorkflow.finalHead=$repairHead
+                    $repairExecutionId=[guid]::NewGuid().ToString('N')
+                    $repairResultPath=Join-Path $fixture.Root "repair-result-$repairExecutionId.json"
+                    $repairEnvelope=[pscustomobject]@{
+                        schemaVersion=1;executionId=$repairExecutionId;generation=1;operation=1;issueNumber=$issueNumber
+                        ownerRepo=$identity.ownerRepo;repoRootHash=$identity.repoRootHash;purpose='repair';worker='gpt'
+                        exitCode=0;success=$true;finalHead=$repairHead;workerReportedVerification='repair fixture verification passed'
+                        localVerificationComplete=$true;workerRemainingProblems=@();workerReportValid=$true
+                        completedAt=(Get-Date).ToUniversalTime().ToString('o')
+                    }
+                    [System.IO.File]::WriteAllText(
+                        $repairResultPath,
+                        ($repairEnvelope|ConvertTo-Json -Depth 8),
+                        (New-Object System.Text.UTF8Encoding($false))
+                    )
                     $state.Repair = [pscustomobject]@{
-                        schemaVersion=2;operation=1;issueNumber=$issueNumber;startHead=$state.Run.finalHead
+                        schemaVersion=2;operation=1;issueNumber=$issueNumber;ownerRepo=$identity.ownerRepo
+                        repoRoot=$identity.repoRoot;canonicalRepoRoot=$identity.canonicalRepoRoot
+                        repoRootHash=$identity.repoRootHash;namespaceVersion=$identity.namespaceVersion
+                        executionId=$repairExecutionId;generation=1;purpose='repair';resultPath=$repairResultPath
+                        invocationReceiptPath=$null;startHead=$state.Run.finalHead
                         finalHead=$repairHead;worker='gpt';model='fixture-model';effort='high'
                         status='repair_completed_review_pending';resultEnvelopePresent=$true;interrupted=$false
                         localVerificationComplete=$true;verificationProvenance='valid_repair_worker_result'
-                        workerReportedVerification='repair fixture verification passed';workerRemainingProblems=@()
+                        workerReportedVerification='repair fixture verification passed';workerReportValid=$true;workerRemainingProblems=@()
                         remainingProblems=@();artifactSanitizationStatus='completed';artifactRetentionStatus='completed'
                         workflow=$repairWorkflow
                     }
@@ -5393,11 +5424,18 @@ function New-CanaryHarnessFixture {
             (New-PrCiCheck -PrNumber $prNumber -HeadSha $headSha -Status completed -Conclusion success)
         )}
     }
+    $mergeProbeState=[pscustomobject]@{Enabled=$false;MergeCalls=0}
+    $mergeProbe={
+        param($repo,$prNumber,$headSha)
+        if(-not $mergeProbeState.Enabled){throw 'merge mutation probe unavailable'}
+        return [pscustomobject]@{mergeCalls=[int]$mergeProbeState.MergeCalls}
+    }.GetNewClosure()
     return [pscustomobject]@{
         Fixture=$fixture;State=$state;Operation=$Operation;IssueNumber=$issueNumber
         WorkBranch=$workBranch;InitialHead=$head;ResultPath=(Join-Path $fixture.Root 'canary-result.json')
         RouterInvoker=$routerInvoker;ExecutionReader=$executionReader;RunReader=$runReader
         ReviewReader=$reviewReader;RepairReader=$repairReader;PrProbe=$probe;CheckLister=$checkLister
+        MergeProbe=$mergeProbe;MergeProbeState=$mergeProbeState
     }
 }
 
@@ -5405,15 +5443,18 @@ function Invoke-TestCanary {
     param(
         [Parameter(Mandatory)]$Fixture,
         [ValidateSet('Start','Continue','Finalize')][string]$Phase='Start',
-        [string]$FinalReviewEvidencePath
+        [string]$FinalReviewEvidencePath,
+        [switch]$UseMergeMutationProbe
     )
-    return Invoke-LiveCanary -ConfirmPaidProviderCall -RepoPath $Fixture.Fixture.Repo `
-        -Operation $Fixture.Operation -IssueNumber $Fixture.IssueNumber -Phase $Phase `
-        -FinalReviewEvidencePath $FinalReviewEvidencePath -ResultPath $Fixture.ResultPath `
-        -RouterInvoker $Fixture.RouterInvoker -ExecutionReader $Fixture.ExecutionReader `
-        -RunReceiptReader $Fixture.RunReader -ReviewReceiptReader $Fixture.ReviewReader `
-        -RepairReceiptReader $Fixture.RepairReader -PrProbe $Fixture.PrProbe.Probe `
-        -CheckLister $Fixture.CheckLister
+    $invokeArgs=@{
+        ConfirmPaidProviderCall=$true;RepoPath=$Fixture.Fixture.Repo;Operation=$Fixture.Operation
+        IssueNumber=$Fixture.IssueNumber;Phase=$Phase;FinalReviewEvidencePath=$FinalReviewEvidencePath
+        ResultPath=$Fixture.ResultPath;RouterInvoker=$Fixture.RouterInvoker;ExecutionReader=$Fixture.ExecutionReader
+        RunReceiptReader=$Fixture.RunReader;ReviewReceiptReader=$Fixture.ReviewReader
+        RepairReceiptReader=$Fixture.RepairReader;PrProbe=$Fixture.PrProbe.Probe;CheckLister=$Fixture.CheckLister
+    }
+    if($UseMergeMutationProbe){$invokeArgs.MergeMutationProbe=$Fixture.MergeProbe}
+    return Invoke-LiveCanary @invokeArgs
 }
 
 function Write-CanaryReviewEvidence {
@@ -5586,10 +5627,10 @@ Describe 'v3.0.5 단계형 live canary와 verification drift' {
             $result.finalStatus|Should Be 'pr_ci_pending'
         }finally{Remove-PrFakeRepo -Fixture $fixture.Fixture}
     }
-    It '17. 성공한 canary도 Draft를 유지하고 merge 미호출을 검증한다' {
+    It '17. 성공한 canary도 Draft를 유지하되 merge 호출 여부는 직접 증거 없이는 unknown이다' {
         $script:CanaryOp3Result.draftRetained|Should Be $true
-        $script:CanaryOp3Result.automaticMergeCalled|Should Be $false
-        $script:CanaryOp3Result.automaticMergeVerification|Should Be 'github-pr-draft-and-merge-state'
+        $script:CanaryOp3Result.automaticMergeCalled|Should BeNullOrEmpty
+        $script:CanaryOp3Result.automaticMergeVerification|Should Be 'not-directly-observable'
     }
     It '18. Operation 1 review nextAction은 router review를 호출한다' {
         $script:CanaryOp1Pass.State.ReviewCalls|Should Be 1
@@ -5649,8 +5690,8 @@ Describe 'v3.0.5 단계형 live canary와 verification drift' {
     }
     It '28. invocation receipt가 없으면 provider 호출 수는 null과 verified false다' {
         $ev=Get-CanaryPaidCallEvidence -ExecutionReceipt ([pscustomobject]@{
-            operation=3;issueNumber=1;artifactRoot=(Join-Path $TestWorkRoot 'absent-artifacts')
-        }) -RouterCommands @('run')
+            operation=3;issueNumber=1;artifactPath=(Join-Path $TestWorkRoot 'absent-artifacts')
+        }) -RepairReceipt $null -Operation 3 -IssueNumber 1 -RouterCommands @('run')
         $ev.count|Should BeNullOrEmpty
         $ev.verified|Should Be $false
     }
@@ -5726,6 +5767,286 @@ Describe 'v3.0.5 단계형 live canary와 verification drift' {
             -ManifestSynchronizer {param($path)throw 'fixture write failure'}}|Should Throw
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($readme))|Should Be $beforeReadme
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifest))|Should Be $beforeManifest
+    }
+}
+
+Describe 'v3.0.6 canary execution identity와 repair provenance' {
+    BeforeAll {
+        $script:V306Invocation=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        $script:V306InvocationResult=Invoke-TestCanary -Fixture $script:V306Invocation
+    }
+    AfterAll {
+        if($null -ne $script:V306Invocation){Remove-PrFakeRepo -Fixture $script:V306Invocation.Fixture}
+    }
+
+    It '1. 동일 executionId와 generation checkpoint는 Continue를 허용한다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $r=Invoke-TestCanary -Fixture $f -Phase Continue
+            $r.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'
+            @($r.routerCommands).Count|Should Be 0
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '2. 현재 executionId가 바뀌면 과거 checkpoint를 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $f.State.Execution.executionId=[guid]::NewGuid().ToString('N')
+            $r=Invoke-TestCanary -Fixture $f -Phase Continue
+            $r.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_EXECUTION_MISMATCH'
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '3. 현재 generation이 바뀌면 과거 checkpoint를 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $f.State.Execution.generation=2
+            (Invoke-TestCanary -Fixture $f -Phase Continue).finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_EXECUTION_MISMATCH'
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '4. executionId 없는 checkpoint는 fail-closed 한다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $c=Read-JsonFile -Path $f.ResultPath
+            $c.PSObject.Properties.Remove('executionId')
+            Write-AtomicJsonFile -Path $f.ResultPath -Object $c -Depth 30
+            (Invoke-TestCanary -Fixture $f -Phase Continue).failureReason|Should Be 'checkpoint_execution_identity_missing'
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '5. generation 없는 checkpoint는 fail-closed 한다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $c=Read-JsonFile -Path $f.ResultPath
+            $c.PSObject.Properties.Remove('generation')
+            Write-AtomicJsonFile -Path $f.ResultPath -Object $c -Depth 30
+            (Invoke-TestCanary -Fixture $f -Phase Finalize).finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_EXECUTION_MISMATCH'
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '6. checkpoint mismatch에서는 모든 router 명령 호출이 0회다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $before=@($f.State.RunCalls,$f.State.WatchCalls,$f.State.ReviewCalls,$f.State.RepairCalls,$f.State.FinalizeCalls)
+            $f.State.Execution.executionId='replacement-execution'
+            $r=Invoke-TestCanary -Fixture $f -Phase Continue
+            @($r.routerCommands).Count|Should Be 0
+            @($f.State.RunCalls,$f.State.WatchCalls,$f.State.ReviewCalls,$f.State.RepairCalls,$f.State.FinalizeCalls)|Should Be $before
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '7. checkpoint mismatch에서는 checkpoint bytes를 수정하지 않는다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $f.State.Execution.generation=9
+            $before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($f.ResultPath))
+            [void](Invoke-TestCanary -Fixture $f -Phase Continue)
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($f.ResultPath))|Should Be $before
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '8. 다른 repo root hash checkpoint를 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $c=Read-JsonFile -Path $f.ResultPath
+            $c.targetRepositoryIdentity.repoRootHash='different-root'
+            Write-AtomicJsonFile -Path $f.ResultPath -Object $c -Depth 30
+            (Invoke-TestCanary -Fixture $f -Phase Continue).finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_CONTEXT_MISMATCH'
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '9. 같은 owner/repo의 다른 clone은 checkpoint를 재사용하지 못한다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        $clone=Join-Path $f.Fixture.Root 'second-clone'
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            git clone -q $f.Fixture.Remote $clone
+            $r=Invoke-LiveCanary -ConfirmPaidProviderCall -RepoPath $clone -Operation 3 `
+                -IssueNumber $f.IssueNumber -Phase Continue -ResultPath $f.ResultPath
+            $r.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_CONTEXT_MISMATCH'
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+
+    It '10. Operation 2 sonnet_end_review에서 evidence가 없으면 review required다' {
+        $f=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review
+        try{(Invoke-TestCanary -Fixture $f).finalStatus|Should Be 'LIVE_CANARY_FINAL_REVIEW_REQUIRED'}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '11. Operation 2 sonnet_end_review와 valid evidence만 finalize 가능하다' {
+        $f=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $e=Write-CanaryReviewEvidence -Fixture $f
+            (Invoke-TestCanary -Fixture $f -Phase Finalize -FinalReviewEvidencePath $e).finalStatus|Should Be 'merge_ready'
+            $f.State.FinalizeCalls|Should Be 1
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '12. Operation 2 report 상태는 finalize를 호출하지 않는다' {
+        $f=New-CanaryHarnessFixture -Operation 2 -NextAction report
+        try{
+            (Invoke-TestCanary -Fixture $f).finalStatus|Should Be 'LIVE_CANARY_OPERATION2_NEXT_ACTION_INVALID'
+            $f.State.FinalizeCalls|Should Be 0
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '13. Operation 2 review 상태는 finalize를 호출하지 않는다' {
+        $f=New-CanaryHarnessFixture -Operation 2 -NextAction review
+        try{(Invoke-TestCanary -Fixture $f).finalStatus|Should Be 'LIVE_CANARY_OPERATION2_NEXT_ACTION_INVALID';$f.State.FinalizeCalls|Should Be 0}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '14. Operation 2 빈 nextAction은 finalize를 호출하지 않는다' {
+        $f=New-CanaryHarnessFixture -Operation 2 -NextAction ''
+        try{(Invoke-TestCanary -Fixture $f).finalStatus|Should Be 'LIVE_CANARY_OPERATION2_NEXT_ACTION_INVALID';$f.State.FinalizeCalls|Should Be 0}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '15. Operation 2 알 수 없는 nextAction은 finalize를 호출하지 않는다' {
+        $f=New-CanaryHarnessFixture -Operation 2 -NextAction stop
+        try{(Invoke-TestCanary -Fixture $f).failureReason|Should Be 'operation2_next_action_invalid:stop';$f.State.FinalizeCalls|Should Be 0}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '16. 과거 checkpoint nextAction과 현재 receipt가 다르면 현재 receipt를 따른다' {
+        $f=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $f.State.Execution.nextAction='report'
+            $e=Write-CanaryReviewEvidence -Fixture $f
+            $r=Invoke-TestCanary -Fixture $f -Phase Finalize -FinalReviewEvidencePath $e
+            $r.finalStatus|Should Be 'LIVE_CANARY_OPERATION2_NEXT_ACTION_INVALID'
+            $f.State.FinalizeCalls|Should Be 0
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+
+    It '17. implementation envelope와 implementation receipt 정상 증거를 보존한다' {
+        $script:V306InvocationResult.implementationEvidence.valid|Should Be $true
+        $script:V306InvocationResult.implementationEvidence.executionId|Should Be $script:V306InvocationResult.executionId
+    }
+    It '18. repair receipt와 implementation envelope 혼합을 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $f.State.Repair.resultPath=$f.State.Execution.resultPath
+            (Invoke-TestCanary -Fixture $f -Phase Continue).failureReason|Should Match '^repair_provenance_mismatch:'
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '19. repair executionId 불일치를 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{[void](Invoke-TestCanary -Fixture $f);$f.State.Repair.executionId='wrong';(Invoke-TestCanary -Fixture $f -Phase Continue).failureReason|Should Match 'repair_provenance_mismatch'}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '20. repair generation 불일치를 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{[void](Invoke-TestCanary -Fixture $f);$f.State.Repair.generation=2;(Invoke-TestCanary -Fixture $f -Phase Continue).failureReason|Should Match 'repair_provenance_mismatch'}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '21. repair result envelope 누락을 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{[void](Invoke-TestCanary -Fixture $f);Remove-Item -LiteralPath $f.State.Repair.resultPath -Force;(Invoke-TestCanary -Fixture $f -Phase Continue).failureReason|Should Match 'repair_provenance_mismatch'}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '22. 손상된 repair result JSON을 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{[void](Invoke-TestCanary -Fixture $f);[IO.File]::WriteAllText($f.State.Repair.resultPath,'{bad');(Invoke-TestCanary -Fixture $f -Phase Continue).failureReason|Should Match 'repair_provenance_mismatch'}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '23. repair worker report provenance 불일치를 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{[void](Invoke-TestCanary -Fixture $f);$f.State.Repair.verificationProvenance='unknown';(Invoke-TestCanary -Fixture $f -Phase Continue).failureReason|Should Match 'repair_provenance_mismatch'}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '24. repair remaining problems가 있으면 final review 진입을 금지한다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $f.State.Repair.remainingProblems=@('still broken')
+            $f.State.Repair.workerRemainingProblems=@('still broken')
+            (Invoke-TestCanary -Fixture $f -Phase Continue).finalStatus|Should Be 'LIVE_CANARY_FAILED'
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '25. repair final HEAD 불일치는 evidence를 거부한다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{[void](Invoke-TestCanary -Fixture $f);$f.State.Repair.finalHead=$f.InitialHead;(Invoke-TestCanary -Fixture $f -Phase Continue).failureReason|Should Match 'repair_provenance_mismatch'}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '26. 정상 repair 최종 증거는 Opus evidence 대기 상태다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{$r=Invoke-TestCanary -Fixture $f;$r.repairEvidence.valid|Should Be $true;$r.finalStatus|Should Be 'LIVE_CANARY_FINAL_REVIEW_REQUIRED'}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '27. 정상 repair 증거와 valid Opus evidence는 finalize를 1회 호출한다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{
+            [void](Invoke-TestCanary -Fixture $f)
+            $e=Write-CanaryReviewEvidence -Fixture $f
+            $r=Invoke-TestCanary -Fixture $f -Phase Finalize -FinalReviewEvidencePath $e
+            $r.finalStatus|Should Be 'merge_ready';$f.State.FinalizeCalls|Should Be 1
+            $r.evidenceSources.resultEnvelope|Should Be $f.State.Repair.resultPath
+        }finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '28. repair 완료 재진입은 repair를 중복 호출하지 않는다' {
+        $f=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        try{[void](Invoke-TestCanary -Fixture $f);[void](Invoke-TestCanary -Fixture $f -Phase Continue);$f.State.RepairCalls|Should Be 1}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+
+    It '29. 현재 execution invocation receipt만 정확히 count한다' {
+        $ev=Get-CanaryPaidCallEvidence -ExecutionReceipt $script:V306Invocation.State.Execution `
+            -RepairReceipt $null -Operation 3 -IssueNumber $script:V306Invocation.IssueNumber -RouterCommands @('run','watch')
+        $ev.count|Should Be 0;$ev.verified|Should Be $true;$ev.byPhase.implementation|Should Be 0
+    }
+    It '30. 다른 executionId invocation 혼입은 verified=false다' {
+        $p=$script:V306Invocation.State.Execution.invocationPath;$before=[IO.File]::ReadAllBytes($p)
+        try{$v=Read-JsonFile $p;$v.executionId='other';Write-AtomicJsonFile $p $v;$ev=Get-CanaryPaidCallEvidence $script:V306Invocation.State.Execution $null 3 $script:V306Invocation.IssueNumber @('run');$ev.reason|Should Be 'invocation-execution-mismatch'}
+        finally{[IO.File]::WriteAllBytes($p,$before)}
+    }
+    It '31. 다른 generation invocation 혼입은 verified=false다' {
+        $p=$script:V306Invocation.State.Execution.invocationPath;$before=[IO.File]::ReadAllBytes($p)
+        try{$v=Read-JsonFile $p;$v.generation=2;Write-AtomicJsonFile $p $v;$ev=Get-CanaryPaidCallEvidence $script:V306Invocation.State.Execution $null 3 $script:V306Invocation.IssueNumber @('run');$ev.reason|Should Be 'invocation-generation-mismatch'}
+        finally{[IO.File]::WriteAllBytes($p,$before)}
+    }
+    It '32. operation 불일치 invocation을 거부한다' {
+        $p=$script:V306Invocation.State.Execution.invocationPath;$before=[IO.File]::ReadAllBytes($p)
+        try{$v=Read-JsonFile $p;$v.operation=2;Write-AtomicJsonFile $p $v;$ev=Get-CanaryPaidCallEvidence $script:V306Invocation.State.Execution $null 3 $script:V306Invocation.IssueNumber @('run');$ev.reason|Should Be 'invocation-operation-mismatch'}
+        finally{[IO.File]::WriteAllBytes($p,$before)}
+    }
+    It '33. issueNumber 불일치 invocation을 거부한다' {
+        $p=$script:V306Invocation.State.Execution.invocationPath;$before=[IO.File]::ReadAllBytes($p)
+        try{$v=Read-JsonFile $p;$v.issueNumber=1;Write-AtomicJsonFile $p $v;$ev=Get-CanaryPaidCallEvidence $script:V306Invocation.State.Execution $null 3 $script:V306Invocation.IssueNumber @('run');$ev.reason|Should Be 'invocation-issue-mismatch'}
+        finally{[IO.File]::WriteAllBytes($p,$before)}
+    }
+    It '34. malformed invocation receipt는 verified=false다' {
+        $p=$script:V306Invocation.State.Execution.invocationPath;$before=[IO.File]::ReadAllBytes($p)
+        try{[IO.File]::WriteAllText($p,'{bad');$ev=Get-CanaryPaidCallEvidence $script:V306Invocation.State.Execution $null 3 $script:V306Invocation.IssueNumber @('run');$ev.verified|Should Be $false}
+        finally{[IO.File]::WriteAllBytes($p,$before)}
+    }
+    It '35. review나 repair invocation receipt 부재 시 정수를 추정하지 않는다' {
+        $ev=Get-CanaryPaidCallEvidence $script:V306Invocation.State.Execution ([pscustomobject]@{}) 3 $script:V306Invocation.IssueNumber @('run','review','repair')
+        $ev.count|Should BeNullOrEmpty;$ev.verified|Should Be $false;$ev.byPhase.review|Should BeNullOrEmpty;$ev.byPhase.repair|Should BeNullOrEmpty
+    }
+    It '36. 실제 호출 여부 구분 필드가 없으면 verified=false다' {
+        $p=$script:V306Invocation.State.Execution.invocationPath;$before=[IO.File]::ReadAllBytes($p)
+        try{$v=Read-JsonFile $p;$v.PSObject.Properties.Remove('isPaidProviderInvocation');Write-AtomicJsonFile $p $v;$ev=Get-CanaryPaidCallEvidence $script:V306Invocation.State.Execution $null 3 $script:V306Invocation.IssueNumber @('run');$ev.verified|Should Be $false}
+        finally{[IO.File]::WriteAllBytes($p,$before)}
+    }
+
+    It '37. Draft와 미병합 상태만으로 automaticMergeCalled=false를 단정하지 않는다' {
+        $ev=Get-CanaryPrEvidence -RepoPath $script:V306Invocation.Fixture.Repo -Receipt $script:V306Invocation.State.Run `
+            -PrProbe $script:V306Invocation.PrProbe.Probe -CheckLister $script:V306Invocation.CheckLister
+        $ev.automaticMergeCalled|Should BeNullOrEmpty;$ev.automaticMergeVerification|Should Be 'not-directly-observable'
+    }
+    It '38. mutation probe merge 호출 0회일 때만 false로 검증한다' {
+        $probe={param($repo,$pr,$head)[pscustomobject]@{mergeCalls=0}}
+        $ev=Get-CanaryPrEvidence -RepoPath $script:V306Invocation.Fixture.Repo -Receipt $script:V306Invocation.State.Run `
+            -PrProbe $script:V306Invocation.PrProbe.Probe -CheckLister $script:V306Invocation.CheckLister -MergeMutationProbe $probe
+        $ev.automaticMergeCalled|Should Be $false;$ev.automaticMergeVerification|Should Be 'router-mutation-probe'
+    }
+    It '39. mutation probe가 merge 호출 1회를 관측하면 canary는 실패한다' {
+        $f=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        try{$f.MergeProbeState.Enabled=$true;$f.MergeProbeState.MergeCalls=1;$r=Invoke-TestCanary -Fixture $f -UseMergeMutationProbe;$r.failureReason|Should Be 'automatic_merge_invocation_observed'}
+        finally{Remove-PrFakeRepo -Fixture $f.Fixture}
+    }
+    It '40. 실제 PR Draft와 merged 상태를 별도 필드로 기록한다' {
+        $script:V306InvocationResult.prRemainsDraft|Should Be $true
+        $script:V306InvocationResult.prMerged|Should Be $false
     }
 }
 

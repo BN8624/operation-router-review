@@ -922,6 +922,10 @@ function Get-RepairReceiptPath {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
     return (Join-Path (Get-PendingNamespacePath -RepoPath $RepoPath) "op$Operation-issue$IssueNumber-repair.json")
 }
+function Get-RepairResultEnvelopePath {
+    param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
+    return (Join-Path (Get-PendingNamespacePath -RepoPath $RepoPath) "op$Operation-issue$IssueNumber-repair-result.json")
+}
 function Save-RepairReceipt {
     param(
         [Parameter(Mandatory)][int]$Operation,[Parameter(Mandatory)][int]$IssueNumber,
@@ -933,21 +937,50 @@ function Save-RepairReceipt {
     Initialize-PendingNamespace -RepoPath $RepoPath | Out-Null
     $id=Get-RepoIdentity -RepoPath $RepoPath
     $path=Get-RepairReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $resultPath=Get-RepairResultEnvelopePath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
     Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
-    $repairRemaining=if($null -ne $WorkerResult -and $WorkerResult.PSObject.Properties.Name -contains 'WorkerRemainingProblems'){@($WorkerResult.WorkerRemainingProblems)}else{@()}
+    Assert-PathWithinRoot -Path $resultPath -Root $Script:PendingDir | Out-Null
+    $previous=Get-RepairReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $generation=1
+    if($null -ne $previous -and $previous.PSObject.Properties.Name -contains 'generation'){
+        $generation=[int]$previous.generation+1
+    }
+    $executionId=[guid]::NewGuid().ToString('N')
+    $repairRemaining=@()
+    if($null -ne $WorkerResult -and $WorkerResult.PSObject.Properties.Name -contains 'WorkerRemainingProblems'){
+        $repairRemaining=@($WorkerResult.WorkerRemainingProblems)
+    }
+    $localVerificationComplete=($null -ne $WorkerResult -and $WorkerResult.PSObject.Properties.Name -contains 'LocalVerificationComplete' -and [bool]$WorkerResult.LocalVerificationComplete)
+    $workerReportedVerification=if($null -ne $WorkerResult -and $WorkerResult.PSObject.Properties.Name -contains 'WorkerReportedVerification'){
+        Protect-SecretText -Text ([string]$WorkerResult.WorkerReportedVerification)
+    }else{$null}
+    $exitCode=if($null -ne $WorkerResult -and $WorkerResult.PSObject.Properties.Name -contains 'ExitCode'){[int]$WorkerResult.ExitCode}else{0}
+    $success=($status -in @('repair_completed_review_pending','repair_pr_ci_pending','repair_pr_ci_failed','repair_pr_ci_unavailable'))
+    $workerReportValid=($localVerificationComplete -and -not [string]::IsNullOrWhiteSpace([string]$workerReportedVerification) -and $repairRemaining.Count -eq 0)
+    $completedAt=(Get-Date).ToUniversalTime().ToString('o')
+    $envelope=[pscustomobject]@{
+        schemaVersion=1;executionId=$executionId;generation=$generation;operation=$Operation;issueNumber=$IssueNumber
+        ownerRepo=$id.ownerRepo;repoRootHash=$id.repoRootHash;purpose='repair';worker=$Route.worker
+        exitCode=$exitCode;success=[bool]$success;finalHead=$Postflight.finalHead
+        workerReportedVerification=$workerReportedVerification;localVerificationComplete=[bool]$localVerificationComplete
+        workerRemainingProblems=@($repairRemaining);workerReportValid=[bool]$workerReportValid;completedAt=$completedAt
+    }
+    Write-AtomicJsonFile -Path $resultPath -Object $envelope
     $payload=[pscustomobject]@{
         schemaVersion=2;operation=$Operation;issueNumber=$IssueNumber;ownerRepo=$id.ownerRepo
         repoRoot=$id.repoRoot;canonicalRepoRoot=$id.canonicalRepoRoot;repoRootHash=$id.repoRootHash
         namespaceVersion=$id.namespaceVersion;startHead=$RunReceipt.startHead;repairStartHead=$Postflight.startHead
+        executionId=$executionId;generation=$generation;purpose='repair';resultPath=$resultPath;invocationReceiptPath=$null
         finalHead=$Postflight.finalHead;worker=$Route.worker;model=$Route.model;effort=$Route.effort
         status=$Status;postflight=$Postflight;workflow=(Copy-WorkflowContext -Workflow $Workflow)
         finalReviewRequired=$true;reviewVerdict=$null
         resultEnvelopePresent=$true;interrupted=$false
-        localVerificationComplete=($null -ne $WorkerResult -and $WorkerResult.PSObject.Properties.Name -contains 'LocalVerificationComplete' -and [bool]$WorkerResult.LocalVerificationComplete)
+        localVerificationComplete=[bool]$localVerificationComplete
+        workerReportedVerification=$workerReportedVerification;workerReportValid=[bool]$workerReportValid
         remainingProblems=@($repairRemaining);workerRemainingProblems=@($repairRemaining)
         verificationProvenance='valid_repair_worker_result'
         artifactSanitizationStatus='not-applicable';artifactRetentionStatus='not-applicable'
-        createdAt=(Get-Date).ToUniversalTime().ToString('o')
+        createdAt=$completedAt
     }
     Write-JsonFile -Path $path -Object $payload
     return $path

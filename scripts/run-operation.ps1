@@ -790,6 +790,9 @@ function Start-ExecutionWorkerHost {
     }
     $payload = [pscustomobject]@{
         schemaVersion = 1; executionId = $Receipt.executionId; generation = $Receipt.generation
+        operation = [int]$Receipt.operation; issueNumber = [int]$Receipt.issueNumber
+        provider = [string]$Route.worker; invocationKind = 'implementation'
+        isPaidProviderInvocation = $true; createdAt = (Get-Date).ToUniversalTime().ToString('o')
         filePath = $inv.filePath; argumentList = @($inv.argumentList); stdinMode = $inv.stdinMode; promptPath = $Receipt.promptPath
     }
     Write-AtomicJsonFile -Path ([string]$Receipt.invocationPath) -Object $payload
