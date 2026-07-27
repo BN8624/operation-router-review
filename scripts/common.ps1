@@ -82,6 +82,10 @@ function Write-AtomicJsonFile {
     [System.IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding($false)))
     $backup = Join-Path $parent ('.atomic-' + [guid]::NewGuid().ToString('N') + '.bak')
     try {
+        $failureInjector = Get-Variable -Name AtomicWriteFailureInjector -Scope Script -ErrorAction SilentlyContinue
+        if ($null -ne $failureInjector -and $null -ne $failureInjector.Value) {
+            & $failureInjector.Value $temp $Path
+        }
         if (Test-Path -LiteralPath $Path) {
             [System.IO.File]::Replace($temp, $Path, $backup, $true)
             if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
@@ -109,10 +113,81 @@ function Write-AtomicTextFile {
 function Get-Config { return Read-JsonFile -Path $Script:ConfigPath }
 function Get-UsageState { return Read-JsonFile -Path $Script:UsageStatePath }
 
-function Save-UsageState {
+function Get-UsageStateLockPath {
+    return (Join-Path (Split-Path -Parent $Script:UsageStatePath) 'usage-state.lock')
+}
+
+function Open-UsageStateLock {
+    param([int]$MaxAttempts = 20, [int]$DelayMilliseconds = 50)
+    $lockPath = Get-UsageStateLockPath
+    $parent = Split-Path -Parent $lockPath
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $lastError = $null
+    for ($attempt = 1; $attempt -le [Math]::Max(1, $MaxAttempts); $attempt++) {
+        try {
+            return [System.IO.File]::Open(
+                $lockPath,
+                [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None
+            )
+        } catch [System.IO.IOException] {
+            $lastError = $_
+            if ($attempt -lt $MaxAttempts) {
+                Start-Sleep -Milliseconds ([Math]::Max(1, $DelayMilliseconds))
+            }
+        }
+    }
+    $detail = if ($null -ne $lastError) { $lastError.Exception.Message } else { 'unknown lock error' }
+    throw [System.TimeoutException]::new("Unable to acquire usage-state lock after $MaxAttempts attempts: $detail")
+}
+
+function Write-UsageStateUnlocked {
     param([Parameter(Mandatory)]$State)
     $State.updatedAt = (Get-Date).ToUniversalTime().ToString('o')
-    Write-JsonFile -Path $Script:UsageStatePath -Object $State
+    Write-AtomicJsonFile -Path $Script:UsageStatePath -Object $State
+    return $State
+}
+
+function Invoke-UsageStateUpdate {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Update,
+        [int]$MaxLockAttempts = 20,
+        [int]$LockDelayMilliseconds = 50
+    )
+    $lock = Open-UsageStateLock -MaxAttempts $MaxLockAttempts -DelayMilliseconds $LockDelayMilliseconds
+    try {
+        $state = Read-JsonFileStable -Path $Script:UsageStatePath
+        $updated = & $Update $state
+        if ($null -eq $updated) { throw 'Usage-state update returned null.' }
+        return (Write-UsageStateUnlocked -State $updated)
+    } finally {
+        if ($null -ne $lock) { $lock.Dispose() }
+    }
+}
+
+function Save-UsageState {
+    param(
+        [Parameter(Mandatory)]$State,
+        [int]$MaxLockAttempts = 20,
+        [int]$LockDelayMilliseconds = 50
+    )
+    $lock = Open-UsageStateLock -MaxAttempts $MaxLockAttempts -DelayMilliseconds $LockDelayMilliseconds
+    try {
+        if (Test-Path -LiteralPath $Script:UsageStatePath) {
+            $current = Read-JsonFileStable -Path $Script:UsageStatePath
+            $incomingStamp = if ($State.PSObject.Properties.Name -contains 'updatedAt') { [string]$State.updatedAt } else { '' }
+            $currentStamp = if ($current.PSObject.Properties.Name -contains 'updatedAt') { [string]$current.updatedAt } else { '' }
+            if ($incomingStamp -cne $currentStamp) {
+                throw 'Refusing to overwrite usage-state with a stale state object.'
+            }
+        }
+        return (Write-UsageStateUnlocked -State $State)
+    } finally {
+        if ($null -ne $lock) { $lock.Dispose() }
+    }
 }
 
 # ---------- 입력 검증 (command injection 방지) ----------
@@ -459,10 +534,12 @@ function Set-ProviderExhausted {
         [Parameter(Mandatory)][ValidateSet('grok','gpt')][string]$Provider,
         [Parameter(Mandatory)]$State
     )
-    $State.$Provider.status = 'exhausted'
-    $State.$Provider.percent = 100
-    Save-UsageState -State $State
-    return $State
+    return (Invoke-UsageStateUpdate -Update {
+        param($current)
+        $current.$Provider.status = 'exhausted'
+        $current.$Provider.percent = 100
+        return $current
+    })
 }
 
 # 최초·fallback·review·repair 작업자가 공통으로 사용하는 단일 오류 정책이다.
@@ -515,7 +592,7 @@ function Invoke-WorkerWithErrorPolicy {
 
     $usageChanged = $false
     if ($errorClass -eq 'weekly_exhausted') {
-        Set-ProviderExhausted -Provider $Provider -State $State | Out-Null
+        $State = Set-ProviderExhausted -Provider $Provider -State $State
         $usageChanged = $true
         if ($null -ne $Log) { $Log.Add("$Provider marked exhausted/100 after explicit weekly exhaustion") }
     }

@@ -49,15 +49,18 @@ function Invoke-DoctorCommand {
 function Invoke-SetCommand {
     param([Parameter(Mandatory)][ValidateSet('grok','gpt')][string]$Target, [Parameter(Mandatory)][string]$Value)
     $cfg = Get-Config
-    $state = Get-UsageState
     if ($Target -eq 'grok') {
         $v = Assert-ValidGrokSetting -Value $Value
-        $state = Set-GrokState -State $state -Validated $v -Config $cfg
     } else {
         $v = Assert-ValidGptSetting -Value $Value
-        $state = Set-GptState -State $state -Validated $v
     }
-    Save-UsageState -State $state
+    $state = Invoke-UsageStateUpdate -Update {
+        param($current)
+        if ($Target -eq 'grok') {
+            return (Set-GrokState -State $current -Validated $v -Config $cfg)
+        }
+        return (Set-GptState -State $current -Validated $v)
+    }
     [pscustomobject]@{ command = 'set'; target = $Target; value = $Value; state = $state }
 }
 # reset은 런타임 상태만 초기화한다. Skill/스크립트/config는 건드리지 않는다.
@@ -67,7 +70,7 @@ function Invoke-ResetCommand {
         gpt  = [pscustomobject]@{ status = 'available'; percent = 0 }
         updatedAt = $null
     }
-    Save-UsageState -State $default
+    $default = Invoke-UsageStateUpdate -Update { param($current) return $default }
     [pscustomobject]@{ command = 'reset'; scope = 'runtime_state_only'; state = $default }
 }
 
@@ -1768,7 +1771,7 @@ function Invoke-RecoverCommand {
             $log.Add("recover policy: worker=$provider errorClass=$errorClass")
 
             if ($errorClass -eq 'weekly_exhausted' -and $provider -in @('grok','gpt')) {
-                Set-ProviderExhausted -Provider $provider -State $state | Out-Null
+                $state = Set-ProviderExhausted -Provider $provider -State $state
                 $usageStateChanged = $true
                 $log.Add("$provider marked exhausted/100 after detached weekly exhaustion")
                 $change = Test-WorkerChangedRepo -RepoPath $RepoPath -StartSnapshot $snapshot

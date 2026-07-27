@@ -4,6 +4,7 @@
 
 - verification metadata: `evidence/verification-summary.json`을 공식 검증 수치의 기계 판독 가능한 단일 원본으로 추가하고 README·REENTRY·VERIFICATION_MATRIX·evidence drift를 fail-closed로 검사한다.
 - CI: model contract 검사 뒤 verification metadata 검사를 실행하며 기존 source-tree·installed fixture·manifest 검사를 유지한다.
+- usage-state: 같은 디렉터리 임시 파일과 원자 교체를 사용하고 `usage-state.lock`의 배타 file handle로 읽기-수정-쓰기 전체를 직렬화한다. lock timeout은 명시적으로 실패하며 stale 객체 저장을 거부한다.
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 

@@ -5238,4 +5238,171 @@ Describe 'v3.0.3. abandon-claude mutation lock 안전 해제 (F4)' {
     }
 }
 
+Describe 'v3.0.4 usage-state 원자 저장과 직렬화' {
+    It '1. Save-UsageState는 BOM 없는 유효 JSON을 원자적으로 저장한다' {
+        Invoke-ResetCommand | Out-Null
+        $state = Get-UsageState
+        $state.gpt.status = 'reserved'
+        Save-UsageState -State $state | Out-Null
+        $bytes = [System.IO.File]::ReadAllBytes($Script:UsageStatePath)
+        (($bytes[0] -eq 0xEF) -and ($bytes[1] -eq 0xBB) -and ($bytes[2] -eq 0xBF)) | Should Be $false
+        (Read-JsonFile -Path $Script:UsageStatePath).gpt.status | Should Be 'reserved'
+    }
+
+    It '2. 임시 파일 쓰기 뒤 교체 실패 시 기존 JSON을 보존한다' {
+        Invoke-ResetCommand | Out-Null
+        $before = Get-Content -LiteralPath $Script:UsageStatePath -Raw -Encoding UTF8
+        $state = Get-UsageState
+        $state.grok.status = 'exhausted'
+        $state.grok.percent = 100
+        try {
+            $Script:AtomicWriteFailureInjector = { param($tempPath,$targetPath) throw 'injected atomic replace failure' }
+            { Save-UsageState -State $state | Out-Null } | Should Throw
+        } finally {
+            $Script:AtomicWriteFailureInjector = $null
+        }
+        (Get-Content -LiteralPath $Script:UsageStatePath -Raw -Encoding UTF8) | Should Be $before
+        (Read-JsonFile -Path $Script:UsageStatePath).grok.status | Should Be 'available'
+    }
+
+    It '3. 동시에 두 writer가 다른 provider를 갱신해도 JSON과 두 변경을 모두 보존한다' {
+        Invoke-ResetCommand | Out-Null
+        $commonPath = Join-Path $ScriptsDir 'common.ps1'
+        $jobScript = {
+            param($common,$statePath,$provider,$status,$percent)
+            . $common
+            $Script:UsageStatePath = $statePath
+            Invoke-UsageStateUpdate -Update {
+                param($current)
+                $current.$provider.status = $status
+                $current.$provider.percent = $percent
+                Start-Sleep -Milliseconds 100
+                return $current
+            } | Out-Null
+        }
+        $jobs = @(
+            Start-Job -ScriptBlock $jobScript -ArgumentList $commonPath,$Script:UsageStatePath,'grok','exhausted',100
+            Start-Job -ScriptBlock $jobScript -ArgumentList $commonPath,$Script:UsageStatePath,'gpt','reserved',0
+        )
+        try {
+            $jobs | Wait-Job | Out-Null
+            $jobErrors = @($jobs | Receive-Job -ErrorAction SilentlyContinue)
+            @($jobs | Where-Object { $_.State -ne 'Completed' }).Count | Should Be 0
+            $state = Read-JsonFile -Path $Script:UsageStatePath
+            $state.grok.status | Should Be 'exhausted'
+            $state.gpt.status | Should Be 'reserved'
+        } finally {
+            $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It '4. 오래된 state 객체가 최신 변경을 덮어쓰지 못한다' {
+        Invoke-ResetCommand | Out-Null
+        $stale = Get-UsageState
+        Invoke-SetCommand -Target gpt -Value reserved | Out-Null
+        $stale.grok.status = 'exhausted'
+        $stale.grok.percent = 100
+        { Save-UsageState -State $stale | Out-Null } | Should Throw
+        $state = Get-UsageState
+        $state.gpt.status | Should Be 'reserved'
+        $state.grok.status | Should Be 'available'
+    }
+
+    It '5. weekly exhaustion과 사용자 set 경쟁 결과는 직렬화된 완전한 상태다' {
+        Invoke-ResetCommand | Out-Null
+        $commonPath = Join-Path $ScriptsDir 'common.ps1'
+        $jobScript = {
+            param($common,$statePath,$mode)
+            . $common
+            $Script:UsageStatePath = $statePath
+            if ($mode -eq 'weekly') {
+                Set-ProviderExhausted -Provider grok -State (Get-UsageState) | Out-Null
+            } else {
+                Invoke-UsageStateUpdate -Update {
+                    param($current)
+                    $current.grok.status = 'available'
+                    $current.grok.percent = 10
+                    return $current
+                } | Out-Null
+            }
+        }
+        $jobs = @(
+            Start-Job -ScriptBlock $jobScript -ArgumentList $commonPath,$Script:UsageStatePath,'weekly'
+            Start-Job -ScriptBlock $jobScript -ArgumentList $commonPath,$Script:UsageStatePath,'set'
+        )
+        try {
+            $jobs | Wait-Job | Out-Null
+            $jobs | Receive-Job -ErrorAction Stop | Out-Null
+            $state = Read-JsonFile -Path $Script:UsageStatePath
+            (@('available','exhausted') -contains [string]$state.grok.status) | Should Be $true
+            if ($state.grok.status -eq 'available') { $state.grok.percent | Should Be 10 }
+            else { $state.grok.percent | Should Be 100 }
+        } finally {
+            $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It '6. reset과 worker 상태 변경 경쟁 결과는 손상되지 않은 완전한 상태다' {
+        Invoke-ResetCommand | Out-Null
+        $commonPath = Join-Path $ScriptsDir 'common.ps1'
+        $jobScript = {
+            param($common,$statePath,$mode)
+            . $common
+            $Script:UsageStatePath = $statePath
+            if ($mode -eq 'worker') {
+                Set-ProviderExhausted -Provider gpt -State (Get-UsageState) | Out-Null
+            } else {
+                Invoke-UsageStateUpdate -Update {
+                    param($current)
+                    $current.grok.status = 'available'; $current.grok.percent = 0
+                    $current.gpt.status = 'available'; $current.gpt.percent = 0
+                    return $current
+                } | Out-Null
+            }
+        }
+        $jobs = @(
+            Start-Job -ScriptBlock $jobScript -ArgumentList $commonPath,$Script:UsageStatePath,'worker'
+            Start-Job -ScriptBlock $jobScript -ArgumentList $commonPath,$Script:UsageStatePath,'reset'
+        )
+        try {
+            $jobs | Wait-Job | Out-Null
+            $jobs | Receive-Job -ErrorAction Stop | Out-Null
+            $state = Read-JsonFile -Path $Script:UsageStatePath
+            $state.grok.status | Should Be 'available'
+            (@('available','exhausted') -contains [string]$state.gpt.status) | Should Be $true
+            if ($state.gpt.status -eq 'available') { $state.gpt.percent | Should Be 0 }
+            else { $state.gpt.percent | Should Be 100 }
+        } finally {
+            $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It '7. transient provider quota_unknown 경로는 usage-state를 바꾸지 않는다' {
+        foreach ($output in @('HTTP 429 retry later','authentication failed','quota exceeded')) {
+            Invoke-ResetCommand | Out-Null
+            $before = Get-Content -LiteralPath $Script:UsageStatePath -Raw -Encoding UTF8
+            Invoke-WorkerWithErrorPolicy -Provider grok -State (Get-UsageState) -Config $cfg -InvokeWorker {
+                [pscustomobject]@{ ExitCode=1; Success=$false; Output=$output }
+            } | Out-Null
+            $after = Get-Content -LiteralPath $Script:UsageStatePath -Raw -Encoding UTF8
+            $after | Should Be $before
+        }
+    }
+
+    It '8. lock 획득 timeout을 성공으로 위장하지 않고 기존 파일을 보존한다' {
+        Invoke-ResetCommand | Out-Null
+        $before = Get-Content -LiteralPath $Script:UsageStatePath -Raw -Encoding UTF8
+        $lockPath = Get-UsageStateLockPath
+        $held = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try {
+            $state = Get-UsageState
+            $state.gpt.status = 'reserved'
+            { Save-UsageState -State $state -MaxLockAttempts 2 -LockDelayMilliseconds 1 | Out-Null } | Should Throw
+        } finally {
+            $held.Dispose()
+        }
+        (Get-Content -LiteralPath $Script:UsageStatePath -Raw -Encoding UTF8) | Should Be $before
+    }
+}
+
 Write-Host "`nsourceTreeTests complete; isolated usage-state retained only for runner cleanup."
