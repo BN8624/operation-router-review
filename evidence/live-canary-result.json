@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "routerVersion": "3.0.5",
-  "routerHead": "dbefc22edb672bf38b1271af076b474e63232658",
+  "routerHead": "1cdc678ae5f13a2a0768a9cfc0cc2cadba7deeda",
   "targetRepositoryIdentity": null,
   "phase": null,
   "operation": null,
@@ -44,7 +44,7 @@
   "paidProviderCalls": 0,
   "paidProviderCallsVerified": true,
   "startedAtUtc": null,
-  "finishedAtUtc": "2026-07-27T03:12:14Z",
+  "finishedAtUtc": "2026-07-27T04:00:05.6606190Z",
   "notExecutedReason": "A separately provisioned disposable canary repository and verified paid-provider authentication were not supplied for this task.",
   "evidenceSources": {
     "executionReceipt": null,

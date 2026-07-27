@@ -1,8 +1,8 @@
 # REENTRY — operation-router v3.0.5 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=390 sourceTreeFailed=0 installedFixturePassed=390 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=428 sourceTreeFailed=0 installedFixturePassed=428 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 390 passed, 0 failed; installed fixture 390 passed, 0 failed.
+Official verification: source-tree 428 passed, 0 failed; installed fixture 428 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
 

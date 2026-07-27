@@ -1,6 +1,6 @@
 # VERIFICATION_MATRIX — operation-router v3.0.5
 
-<!-- verification-summary sourceTreePassed=390 sourceTreeFailed=0 installedFixturePassed=390 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=428 sourceTreeFailed=0 installedFixturePassed=428 installedFixtureFailed=0 -->
 
 현재 실행 계약은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` → final review → `finalize` 순서다. recover는 watch가 없는 새 세션 재진입에만 사용한다.
 
@@ -58,8 +58,8 @@ PR CI 기대 여부는 receipt에 고정된 base/head commit workflow 스냅샷�
 ## 실행 결과
 
 <!-- verification-visible:start -->
-- source-tree 390 passed, 0 failed
-- installed fixture 390 passed, 0 failed
+- source-tree 428 passed, 0 failed
+- installed fixture 428 passed, 0 failed
 - installed integration failures 0
 - PowerShell parser files 23, manifest entries 46
 - paid model calls 0
