@@ -1,10 +1,18 @@
-# operation-router (v3.0.8)
+# operation-router (v3.0.9)
 
-<!-- verification-summary sourceTreePassed=560 sourceTreeFailed=0 installedFixturePassed=560 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=608 sourceTreeFailed=0 installedFixturePassed=608 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 560 passed, 0 failed; installed fixture 560 passed, 0 failed.
+Official verification: source-tree 608 passed, 0 failed; installed fixture 608 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.9 schema v4 result contract and direct-main evidence
+
+`Continue` and `Finalize` without a `ResultPath` now return `LIVE_CANARY_CHECKPOINT_REQUIRED` with `checkpoint_path_missing`; an explicit path whose file is absent remains `checkpoint_file_missing`. Both checkpoint failures leave complete-execution `paidProviderCalls` unknown while proving that the current invocation started zero router commands. `LIVE_CANARY_NOT_EXECUTED` remains reserved for a canary that never started.
+
+Every schema 4 result, including usage and checkpoint early returns, exposes the same typed evidence fields. `resultEnvelopeValid` now means only that the envelope file, JSON, execution identity, worker identity, success, and exit code are valid. `authoritativeEvidenceValid` additionally requires phase receipt context, a valid worker report, completed local verification, allowed provenance, reported verification, no remaining problems, and the expected HEAD. Nested implementation and repair `valid` fields remain aliases for authoritative validity.
+
+Legacy direct-main Operation 3 remains supported, but COMPLETE now requires an authoritative run receipt whose current and postflight branches are `main`, whose authoritative/run/postflight/current HEADs match, whose push and clean-worktree evidence are Boolean true, whose status is `completed`, and whose CI is `success` or `not-requested` only when no workflow exists. CI pending, unavailable, failure, required workflow removal, dirty state, incomplete push, or mismatched branch/HEAD fail closed. The v3.0.8 pull-request gates remain unchanged.
 
 ## v3.0.8 canary schema v4 and Operation 3 evidence gates
 

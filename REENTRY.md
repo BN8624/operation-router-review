@@ -1,10 +1,18 @@
-# REENTRY — operation-router v3.0.8 pull-request workflow
+# REENTRY — operation-router v3.0.9 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=560 sourceTreeFailed=0 installedFixturePassed=560 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=608 sourceTreeFailed=0 installedFixturePassed=608 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 560 passed, 0 failed; installed fixture 560 passed, 0 failed.
+Official verification: source-tree 608 passed, 0 failed; installed fixture 608 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.9 schema 4 반환과 direct-main 증거
+
+`Continue`·`Finalize`에서 `ResultPath` 인수 자체가 없으면 `LIVE_CANARY_CHECKPOINT_REQUIRED`와 `checkpoint_path_missing`을 반환한다. 경로는 명시됐지만 파일이 없으면 `checkpoint_file_missing`을 유지한다. 두 경로 모두 전체 execution의 `paidProviderCalls`는 unknown이고 현재 invocation의 router 명령과 신규 provider 호출이 0회라는 사실만 별도 증명한다.
+
+모든 schema 4 반환에는 file present·parsed·context valid·worker valid·execution successful·envelope valid·authoritative evidence valid 필드가 Boolean으로 존재한다. `resultEnvelopeValid`는 envelope 자체만 판정하고 `authoritativeEvidenceValid`는 phase receipt, worker report, local verification, provenance, reported verification, remaining problems, HEAD까지 판정한다. 따라서 정상 envelope와 invalid worker report는 각각 true와 false로 분리된다. 중첩 implementation·repair의 기존 `valid`는 authoritative validity alias다.
+
+Direct-main Operation 3 재진입은 PR을 요구하지 않지만 현재·postflight branch `main`, authoritative/run/postflight/current HEAD 일치, Boolean pushComplete·worktreeClean true, 현재 clean worktree, run status `completed`, CI `success`를 요구한다. 실제 workflow가 없을 때만 `not-requested`를 허용한다. pending·unavailable·failure·required workflow 제거는 COMPLETE가 아니다. Pull-request mode의 OPEN Draft·미병합·PR head·remote head·CI gate는 그대로 유지한다.
 
 ## v3.0.8 checkpoint와 Operation 3 재진입
 

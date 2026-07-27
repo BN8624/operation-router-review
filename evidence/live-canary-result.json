@@ -1,8 +1,8 @@
 {
   "schemaVersion": 4,
   "checkpointSchemaVersion": 3,
-  "routerVersion": "3.0.8",
-  "routerHead": "4006eead2a8cc89abac486e65b43681ad2e81d0e",
+  "routerVersion": "3.0.9",
+  "routerHead": "aafcde4ef1c2db57c332ffcf6c4da921d5d36e6b",
   "targetRepositoryIdentity": null,
   "phase": null,
   "operation": null,
@@ -27,6 +27,7 @@
   "resultEnvelopeWorkerValid": false,
   "resultExecutionSuccessful": false,
   "resultEnvelopeValid": false,
+  "authoritativeEvidenceValid": false,
   "resultEnvelopeReason": "not-executed",
   "workerReportValid": false,
   "localVerificationComplete": false,
@@ -70,7 +71,7 @@
     "finalReview": 0
   },
   "startedAtUtc": null,
-  "finishedAtUtc": "2026-07-27T11:46:29.3840643Z",
+  "finishedAtUtc": "2026-07-27T13:26:44.9437027Z",
   "notExecutedReason": "A disposable canary repository and verified provider authentication were not supplied.",
   "evidenceSources": {
     "executionReceipt": null,

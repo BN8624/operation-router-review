@@ -1,5 +1,13 @@
 # CHANGELOG — operation-router
 
+## v3.0.9 (2026-07-27)
+
+- re-entry: `Continue`·`Finalize`의 ResultPath 인수 생략을 `LIVE_CANARY_CHECKPOINT_REQUIRED`와 `checkpoint_path_missing`으로 처리하고 명시 경로의 파일 누락 `checkpoint_file_missing`과 분리했다.
+- schema 4: usage·checkpoint 조기 반환을 포함한 모든 결과에 동일한 typed evidence 필드를 제공한다.
+- evidence semantics: `resultEnvelopeValid`를 envelope 자체 유효성으로 고정하고 전체 phase·worker report·verification·HEAD 유효성은 `authoritativeEvidenceValid`로 분리했다. 중첩 evidence의 기존 `valid`는 authoritative alias다.
+- direct-main: Operation 3 COMPLETE에 main branch, authoritative/run/postflight/current HEAD 일치, clean worktree, pushComplete, completed receipt, CI success 또는 실제 workflow 없음의 not-requested를 요구한다.
+- tests: ResultPath 누락, 공통 schema 필드, validity 분리, direct-main branch·HEAD·push·worktree·CI·status와 pull-request·Operation 1·2 회귀 48개를 추가했다. 실제 live E2E는 실행하지 않았다.
+
 ## v3.0.8 (2026-07-27)
 
 - checkpoint root: non-null JSON 객체만 checkpoint로 허용하고 손상 JSON, `null`, scalar, 배열, 빈 파일은 원본 bytes와 파일 상태를 보존한 채 router 명령 0회로 거부한다.
