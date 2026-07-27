@@ -191,12 +191,16 @@ function Set-ProviderExhausted {
         [Parameter(Mandatory)][ValidateSet('grok','gpt')][string]$Provider,
         [Parameter(Mandatory)]$State
     )
-    return (Invoke-UsageStateUpdate -Update {
+    $fresh = Invoke-UsageStateUpdate -Update {
         param($current)
         $current.$Provider.status = 'exhausted'
         $current.$Provider.percent = 100
         return $current
-    })
+    }
+    $State.grok = $fresh.grok
+    $State.gpt = $fresh.gpt
+    $State.updatedAt = $fresh.updatedAt
+    return $State
 }
 
 # 최초·fallback·review·repair 작업자가 공통으로 사용하는 단일 오류 정책이다.
