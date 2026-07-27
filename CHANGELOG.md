@@ -1,5 +1,13 @@
 # CHANGELOG — operation-router
 
+## v3.0.10 (2026-07-27)
+
+- direct-main workflow evidence: Operation 3의 branch·HEAD 일치 게이트 뒤 정확한 final HEAD에서 commit-bound workflow snapshot을 읽는다.
+- CI status binding: workflow가 존재하면 `success`만 허용하고 `not-requested`는 `operation3_direct_main_ci_not_requested_with_workflow`로 차단한다. 실제 workflow가 없을 때만 `not-requested`를 허용한다.
+- fail-closed snapshot: ref 확인, Git tree 조회, snapshot 형식, snapshot HEAD 확인 중 하나라도 실패하면 `operation3_direct_main_workflow_snapshot_unavailable`로 중단한다.
+- tests: workflow 있음+success, workflow 있음+not-requested, 실제 workflow 삭제 commit·push 후 없음+not-requested, 없음+success, snapshot unavailable, unknown CI와 final-HEAD binding의 합성 회귀 11개를 추가했다. v3.0.9 회귀 48개와 전체 619개가 통과했다.
+- scope: pull-request mode 계약은 변경하지 않았고 실제 유료 provider·disposable GitHub 저장소 live E2E는 실행하지 않았다.
+
 ## v3.0.9 (2026-07-27)
 
 - re-entry: `Continue`·`Finalize`의 ResultPath 인수 생략을 `LIVE_CANARY_CHECKPOINT_REQUIRED`와 `checkpoint_path_missing`으로 처리하고 명시 경로의 파일 누락 `checkpoint_file_missing`과 분리했다.

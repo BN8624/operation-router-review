@@ -1,10 +1,18 @@
-# operation-router (v3.0.9)
+# operation-router (v3.0.10)
 
-<!-- verification-summary sourceTreePassed=608 sourceTreeFailed=0 installedFixturePassed=608 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=619 sourceTreeFailed=0 installedFixturePassed=619 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 608 passed, 0 failed; installed fixture 608 passed, 0 failed.
+Official verification: source-tree 619 passed, 0 failed; installed fixture 619 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.10 commit-bound direct-main workflow evidence
+
+Direct-main Operation 3 no longer accepts `ciStatus=not-requested` from the postflight receipt alone. After the existing branch and authoritative/run/postflight/current HEAD equality gates pass, the canary reads `.github/workflows/*.yml` and `.github/workflows/*.yaml` from that exact final commit with `Get-GitWorkflowSnapshot -Ref <finalHead>`.
+
+If the commit-bound workflow snapshot is unavailable, malformed, or bound to a different HEAD, completion fails closed with `operation3_direct_main_workflow_snapshot_unavailable`. When the final HEAD contains a workflow, `success` is the only accepted CI status and `not-requested` fails with `operation3_direct_main_ci_not_requested_with_workflow`. When the final HEAD contains no workflow, `not-requested` is accepted and the legacy `success` case remains accepted.
+
+Pull-request mode and its workflow/CI gates are unchanged. The workflow matrix is covered by isolated Git fixtures, including a separate fixture that deletes the tracked workflow, commits the deletion, and pushes the new `main` HEAD. This is synthetic verification, not a paid-provider or disposable-repository live E2E run.
 
 ## v3.0.9 schema v4 result contract and direct-main evidence
 

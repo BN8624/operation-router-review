@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "version": "3.0.9",
-  "sourceTreePassed": 608,
+  "version": "3.0.10",
+  "sourceTreePassed": 619,
   "sourceTreeFailed": 0,
-  "installedFixturePassed": 608,
+  "installedFixturePassed": 619,
   "installedFixtureFailed": 0,
   "installedIntegrationFailures": 0,
   "powerShellParserFiles": 23,
@@ -11,8 +11,8 @@
   "modelContract": "passed",
   "gitDiffCheck": "passed",
   "paidModelCalls": 0,
-  "verifiedHead": "aafcde4ef1c2db57c332ffcf6c4da921d5d36e6b",
-  "verifiedAtUtc": "2026-07-27T13:26:44.9437027Z",
+  "verifiedHead": "a18a042dc456d4a3565b9d9c286a303efe5627e5",
+  "verifiedAtUtc": "2026-07-27T15:02:18.6829893Z",
   "refactorMetrics": {
     "baselineHead": "4ef0c56ff0e8ce24fccdaf161835635e8e29feb5",
     "commonBefore": 1671,

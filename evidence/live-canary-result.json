@@ -1,8 +1,8 @@
 {
   "schemaVersion": 4,
   "checkpointSchemaVersion": 3,
-  "routerVersion": "3.0.9",
-  "routerHead": "aafcde4ef1c2db57c332ffcf6c4da921d5d36e6b",
+  "routerVersion": "3.0.10",
+  "routerHead": "a18a042dc456d4a3565b9d9c286a303efe5627e5",
   "targetRepositoryIdentity": null,
   "phase": null,
   "operation": null,
@@ -71,7 +71,7 @@
     "finalReview": 0
   },
   "startedAtUtc": null,
-  "finishedAtUtc": "2026-07-27T13:26:44.9437027Z",
+  "finishedAtUtc": "2026-07-27T15:02:18.6829893Z",
   "notExecutedReason": "A disposable canary repository and verified provider authentication were not supplied.",
   "evidenceSources": {
     "executionReceipt": null,

@@ -1,10 +1,18 @@
-# REENTRY — operation-router v3.0.9 pull-request workflow
+# REENTRY — operation-router v3.0.10 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=608 sourceTreeFailed=0 installedFixturePassed=608 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=619 sourceTreeFailed=0 installedFixturePassed=619 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 608 passed, 0 failed; installed fixture 608 passed, 0 failed.
+Official verification: source-tree 619 passed, 0 failed; installed fixture 619 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.10 commit-bound direct-main workflow evidence
+
+Direct-main Operation 3 validates workflow presence from the exact final commit after authoritative evidence, run receipt, postflight, and current Git HEAD all match. The snapshot uses `Get-GitWorkflowSnapshot -RepoPath <repo> -Ref <finalHead>` and reads only tracked `.github/workflows/*.yml` and `.github/workflows/*.yaml` entries from that commit.
+
+`ciStatus=not-requested` is accepted only when the final-HEAD snapshot proves that no workflow exists. A present workflow requires `ciStatus=success`; present plus `not-requested` fails with `operation3_direct_main_ci_not_requested_with_workflow`. Any unresolved ref, failed Git tree read, invalid snapshot shape, or snapshot HEAD mismatch fails with `operation3_direct_main_workflow_snapshot_unavailable`.
+
+Pull-request mode is unchanged. The no-workflow positive path uses an isolated fixture with a real workflow deletion commit pushed to its bare `origin/main`. All reported coverage is synthetic harness verification; no paid-provider or disposable GitHub live E2E canary was run.
 
 ## v3.0.9 schema 4 반환과 direct-main 증거
 
