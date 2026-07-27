@@ -5448,6 +5448,29 @@ function New-CanaryHarnessFixture {
     }
 }
 
+function Set-CanaryHarnessDirectMain {
+    param(
+        [Parameter(Mandatory)]$Fixture,
+        [string]$CiStatus='success',
+        [string]$ReceiptStatus='completed'
+    )
+    Push-Location $Fixture.Fixture.Repo
+    try {
+        git switch -q main
+        git merge -q --ff-only $Fixture.WorkBranch
+        git push -q origin main
+        $head=(git rev-parse HEAD).Trim()
+    } finally { Pop-Location }
+    $Fixture.State.Run.workflow=[pscustomobject]@{mode='direct-main';baseBranch='main'}
+    $Fixture.State.Run.status=$ReceiptStatus
+    $Fixture.State.Run.finalHead=$head
+    Add-Member -InputObject $Fixture.State.Run -NotePropertyName postflight -NotePropertyValue ([pscustomobject]@{
+        status=$ReceiptStatus;branch='main';finalHead=$head;worktreeClean=$true
+        pushComplete=$true;ciStatus=$CiStatus
+    }) -Force
+    return $Fixture
+}
+
 function Invoke-TestCanary {
     param(
         [Parameter(Mandatory)]$Fixture,
@@ -6485,7 +6508,7 @@ Describe 'v3.0.8 schema v4와 Operation 3 증거 게이트' {
 
         $script:V308Direct=New-CanaryHarnessFixture -Operation 3 -NextAction report
         [void]$script:V308Cleanup.Add($script:V308Direct)
-        $script:V308Direct.State.Run.workflow.mode='direct-main'
+        [void](Set-CanaryHarnessDirectMain -Fixture $script:V308Direct)
         $script:V308DirectResult=Invoke-TestCanary -Fixture $script:V308Direct
 
         $script:V308Op2=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review
@@ -6567,6 +6590,190 @@ Describe 'v3.0.8 schema v4와 Operation 3 증거 게이트' {
     It '58. 정상 envelope의 신규 세부 필드는 모두 true다' {foreach($n in @('resultEnvelopeFilePresent','resultEnvelopeParsed','resultEnvelopeContextValid','resultEnvelopeWorkerValid','resultExecutionSuccessful','resultEnvelopeValid')){[bool]$script:V308Op3NormalResult.$n|Should Be $true}}
     It '59. 공식 미실행 결과도 schema 4다' {(New-CanaryUsageResult).schemaVersion|Should Be 4}
     It '60. source는 checkpoint와 result schema 상수를 분리한다' {$s=Get-Content -Raw -Encoding UTF8 (Join-Path $ScriptsDir 'run-live-canary.ps1');$s|Should Match 'CanaryCheckpointSchemaVersion = 3';$s|Should Match 'CanaryResultSchemaVersion = 4'}
+}
+
+Describe 'v3.0.9 schema v4 반환 계약과 direct-main 증거' {
+    BeforeAll {
+        $script:V309Cleanup=New-Object Collections.ArrayList
+        $script:V309Missing=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V309Cleanup.Add($script:V309Missing)
+        $script:V309PathMissingContinue=Invoke-LiveCanary -ConfirmPaidProviderCall `
+            -RepoPath $script:V309Missing.Fixture.Repo -Operation 3 `
+            -IssueNumber $script:V309Missing.IssueNumber -Phase Continue
+        $script:V309PathMissingFinalize=Invoke-LiveCanary -ConfirmPaidProviderCall `
+            -RepoPath $script:V309Missing.Fixture.Repo -Operation 3 `
+            -IssueNumber $script:V309Missing.IssueNumber -Phase Finalize
+        $script:V309FileMissing=Invoke-LiveCanary -ConfirmPaidProviderCall `
+            -RepoPath $script:V309Missing.Fixture.Repo -Operation 3 `
+            -IssueNumber $script:V309Missing.IssueNumber -Phase Continue `
+            -ResultPath (Join-Path $script:V309Missing.Fixture.Root 'missing-checkpoint.json')
+        $script:V309Usage=New-CanaryUsageResult
+        $script:V309CheckpointFailure=New-CanaryCheckpointFailure `
+            -Status LIVE_CANARY_CHECKPOINT_REQUIRED -Reason checkpoint_path_missing `
+            -Checkpoint $null -CurrentExecution $null -CheckpointPath $null
+
+        $script:V309Invalid=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V309Cleanup.Add($script:V309Invalid)
+        [IO.File]::WriteAllText($script:V309Invalid.ResultPath,'{')
+        $script:V309InvalidResult=Invoke-TestCanary -Fixture $script:V309Invalid
+
+        $script:V309Evidence=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V309Cleanup.Add($script:V309Evidence)
+        $script:V309EvidenceNormal=Invoke-TestCanary -Fixture $script:V309Evidence
+        $originalReported=$script:V309Evidence.State.Run.workerReportedVerification
+        $script:V309Evidence.State.Run.workerReportedVerification=$null
+        $script:V309ReportMissing=Invoke-TestCanary -Fixture $script:V309Evidence -Phase Continue
+        $script:V309Evidence.State.Run.workerReportedVerification=$originalReported
+        $script:V309Evidence.State.Run.localVerificationComplete=$false
+        $script:V309LocalFalse=Invoke-TestCanary -Fixture $script:V309Evidence -Phase Continue
+        $script:V309Evidence.State.Run.localVerificationComplete=$true
+        $script:V309Evidence.State.Run.remainingProblems=@('remaining')
+        $script:V309Remaining=Invoke-TestCanary -Fixture $script:V309Evidence -Phase Continue
+        $script:V309Evidence.State.Run.remainingProblems=@()
+
+        $script:V309Envelope=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V309Cleanup.Add($script:V309Envelope)
+        [void](Invoke-TestCanary -Fixture $script:V309Envelope)
+        $envelope=Read-JsonFile $script:V309Envelope.State.Execution.resultPath
+        $envelope.worker='other-worker'
+        Write-AtomicJsonFile $script:V309Envelope.State.Execution.resultPath $envelope
+        $script:V309WorkerMismatch=Invoke-TestCanary -Fixture $script:V309Envelope -Phase Continue
+        $envelope.worker='gpt';$envelope.success=$false;$envelope.exitCode=1
+        Write-AtomicJsonFile $script:V309Envelope.State.Execution.resultPath $envelope
+        $script:V309SuccessFalse=Invoke-TestCanary -Fixture $script:V309Envelope -Phase Continue
+        $envelope.success=$true;$envelope.exitCode=1
+        Write-AtomicJsonFile $script:V309Envelope.State.Execution.resultPath $envelope
+        $script:V309ExitNonzero=Invoke-TestCanary -Fixture $script:V309Envelope -Phase Continue
+
+        $script:V309Direct=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V309Cleanup.Add($script:V309Direct)
+        [void](Set-CanaryHarnessDirectMain -Fixture $script:V309Direct)
+        $script:V309DirectNormal=Invoke-TestCanary -Fixture $script:V309Direct
+        $directHead=$script:V309Direct.State.Run.finalHead
+
+        Push-Location $script:V309Direct.Fixture.Repo
+        try { git switch -q $script:V309Direct.WorkBranch } finally { Pop-Location }
+        $script:V309DirectCurrentBranch=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        Push-Location $script:V309Direct.Fixture.Repo
+        try { git switch -q main } finally { Pop-Location }
+
+        $script:V309Direct.State.Run.postflight.branch='other'
+        $script:V309DirectReceiptBranch=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        $script:V309Direct.State.Run.postflight.branch='main'
+
+        Push-Location $script:V309Direct.Fixture.Repo
+        try {
+            git commit -q --allow-empty -m 'direct-main current head mismatch'
+        } finally { Pop-Location }
+        $script:V309DirectCurrentHead=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        Push-Location $script:V309Direct.Fixture.Repo
+        try { git reset -q --hard $directHead } finally { Pop-Location }
+
+        $script:V309Direct.State.Run.finalHead=('f'*40)
+        $script:V309DirectReceiptHead=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        $script:V309Direct.State.Run.finalHead=$directHead
+        $script:V309Direct.State.Run.postflight.finalHead=('e'*40)
+        $script:V309DirectPostflightHead=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        $script:V309Direct.State.Run.postflight.finalHead=$directHead
+
+        $script:V309Direct.State.Run.postflight.pushComplete=$false
+        $script:V309DirectPushFalse=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        $script:V309Direct.State.Run.postflight.PSObject.Properties.Remove('pushComplete')
+        $script:V309DirectPushMissing=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        Add-Member -InputObject $script:V309Direct.State.Run.postflight `
+            -NotePropertyName pushComplete -NotePropertyValue $true
+
+        'dirty'|Set-Content -LiteralPath (Join-Path $script:V309Direct.Fixture.Repo 'dirty.txt')
+        $script:V309DirectCurrentDirty=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        Remove-Item -LiteralPath (Join-Path $script:V309Direct.Fixture.Repo 'dirty.txt') -Force
+        $script:V309Direct.State.Run.postflight.worktreeClean=$false
+        $script:V309DirectReceiptDirty=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        $script:V309Direct.State.Run.postflight.worktreeClean=$true
+
+        $script:V309DirectCi=@{}
+        foreach($ci in @('pending','unavailable','failure','required_workflow_removed')){
+            $script:V309Direct.State.Run.postflight.ciStatus=$ci
+            $script:V309DirectCi[$ci]=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        }
+        $script:V309Direct.State.Run.postflight.ciStatus='not-requested'
+        $script:V309DirectNoWorkflow=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        $script:V309Direct.State.Run.postflight.ciStatus='success'
+
+        $script:V309DirectStatus=@{}
+        foreach($status in @('completed_ci_pending','completed_ci_unavailable','ci_failed')){
+            $script:V309Direct.State.Run.status=$status
+            $script:V309DirectStatus[$status]=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        }
+        $script:V309Direct.State.Run.status='completed'
+
+        $script:V309Op1=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        [void]$script:V309Cleanup.Add($script:V309Op1)
+        [void](Invoke-TestCanary -Fixture $script:V309Op1)
+        $op1Review=Write-CanaryReviewEvidence -Fixture $script:V309Op1
+        $script:V309Op1Result=Invoke-TestCanary -Fixture $script:V309Op1 -Phase Finalize -FinalReviewEvidencePath $op1Review
+        $script:V309Op2=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review
+        [void]$script:V309Cleanup.Add($script:V309Op2)
+        [void](Invoke-TestCanary -Fixture $script:V309Op2)
+        $op2Review=Write-CanaryReviewEvidence -Fixture $script:V309Op2
+        $script:V309Op2Result=Invoke-TestCanary -Fixture $script:V309Op2 -Phase Finalize -FinalReviewEvidencePath $op2Review
+    }
+    AfterAll {
+        foreach($fixture in @($script:V309Cleanup)){
+            if($null -ne $fixture){Remove-PrFakeRepo -Fixture $fixture.Fixture}
+        }
+    }
+
+    It '1. Continue ResultPath 생략은 CHECKPOINT_REQUIRED다' {$script:V309PathMissingContinue.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_REQUIRED'}
+    It '2. Finalize ResultPath 생략도 CHECKPOINT_REQUIRED다' {$script:V309PathMissingFinalize.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_REQUIRED'}
+    It '3. ResultPath 생략 reason은 checkpoint_path_missing이다' {$script:V309PathMissingContinue.failureReason|Should Be 'checkpoint_path_missing'}
+    It '4. path 누락 전체 provider 호출 수는 null이다' {$script:V309PathMissingContinue.paidProviderCalls|Should BeNullOrEmpty}
+    It '5. path 누락 전체 호출은 unverified다' {$script:V309PathMissingContinue.paidProviderCallsVerified|Should Be $false}
+    It '6. path 누락 현재 invocation 호출은 0이다' {$script:V309PathMissingContinue.providerCallsThisInvocation|Should Be 0}
+    It '7. path 누락 현재 invocation 호출은 verified다' {$script:V309PathMissingContinue.providerCallsThisInvocationVerified|Should Be $true}
+    It '8. path 누락 router 명령은 0회다' {@($script:V309PathMissingContinue.routerCommands).Count|Should Be 0}
+    It '9. 실제 미실행 usage는 전체 호출 0 verified를 유지한다' {$script:V309Usage.paidProviderCalls|Should Be 0;$script:V309Usage.paidProviderCallsVerified|Should Be $true}
+    It '10. 명시 경로 파일 누락 reason은 checkpoint_file_missing이다' {$script:V309FileMissing.failureReason|Should Be 'checkpoint_file_missing'}
+
+    It '11. Usage 결과에 schema 4 공통 필드가 모두 존재한다' {foreach($n in @('schemaVersion','checkpointSchemaVersion','resultEnvelopePresent','resultEnvelopeFilePresent','resultEnvelopeParsed','resultEnvelopeContextValid','resultEnvelopeWorkerValid','resultExecutionSuccessful','resultEnvelopeValid','authoritativeEvidenceValid')){($script:V309Usage.PSObject.Properties.Name -contains $n)|Should Be $true}}
+    It '12. Checkpoint failure에 schema 4 공통 필드가 모두 존재한다' {foreach($n in @('schemaVersion','checkpointSchemaVersion','resultEnvelopePresent','resultEnvelopeFilePresent','resultEnvelopeParsed','resultEnvelopeContextValid','resultEnvelopeWorkerValid','resultExecutionSuccessful','resultEnvelopeValid','authoritativeEvidenceValid')){($script:V309CheckpointFailure.PSObject.Properties.Name -contains $n)|Should Be $true}}
+    It '13. 정상 결과에도 schema 4 공통 필드가 모두 존재한다' {foreach($n in @('resultEnvelopeFilePresent','resultEnvelopeParsed','resultEnvelopeContextValid','resultEnvelopeWorkerValid','resultExecutionSuccessful','resultEnvelopeValid','authoritativeEvidenceValid')){($script:V309EvidenceNormal.PSObject.Properties.Name -contains $n)|Should Be $true}}
+    It '14. 조기 반환 evidence Boolean 타입은 Boolean이다' {foreach($n in @('resultEnvelopePresent','resultEnvelopeFilePresent','resultEnvelopeParsed','resultEnvelopeContextValid','resultEnvelopeWorkerValid','resultExecutionSuccessful','resultEnvelopeValid','authoritativeEvidenceValid','workerReportValid','localVerificationComplete','mergeReady')){($script:V309Usage.$n -is [bool])|Should Be $true}}
+    It '15. 조기 반환 remainingProblems는 배열이다' {($script:V309Usage.remainingProblems -is [array])|Should Be $true}
+    It '16. 조기 반환 unknown evidence는 null이다' {$script:V309Usage.implementationEvidence|Should BeNullOrEmpty;$script:V309Usage.repairEvidence|Should BeNullOrEmpty;$script:V309Usage.verificationProvenance|Should BeNullOrEmpty}
+    It '17. checkpoint invalid도 schema 4다' {$script:V309InvalidResult.schemaVersion|Should Be 4}
+    It '18. checkpoint required도 schema 4다' {$script:V309PathMissingContinue.schemaVersion|Should Be 4}
+    It '19. result schema 4와 checkpoint schema 3을 유지한다' {$script:V309Usage.schemaVersion|Should Be 4;$script:V309Usage.checkpointSchemaVersion|Should Be 3}
+
+    It '20. 정상 envelope와 report는 두 validity가 true다' {$script:V309EvidenceNormal.resultEnvelopeValid|Should Be $true;$script:V309EvidenceNormal.authoritativeEvidenceValid|Should Be $true}
+    It '21. report 누락은 envelope true authoritative false다' {$script:V309ReportMissing.resultEnvelopeValid|Should Be $true;$script:V309ReportMissing.authoritativeEvidenceValid|Should Be $false}
+    It '22. local verification false도 envelope true authoritative false다' {$script:V309LocalFalse.resultEnvelopeValid|Should Be $true;$script:V309LocalFalse.authoritativeEvidenceValid|Should Be $false}
+    It '23. remaining problems도 envelope true authoritative false다' {$script:V309Remaining.resultEnvelopeValid|Should Be $true;$script:V309Remaining.authoritativeEvidenceValid|Should Be $false}
+    It '24. worker mismatch는 두 validity가 false다' {$script:V309WorkerMismatch.resultEnvelopeValid|Should Be $false;$script:V309WorkerMismatch.authoritativeEvidenceValid|Should Be $false}
+    It '25. success false는 두 validity가 false다' {$script:V309SuccessFalse.resultEnvelopeValid|Should Be $false;$script:V309SuccessFalse.authoritativeEvidenceValid|Should Be $false}
+    It '26. exitCode nonzero는 두 validity가 false다' {$script:V309ExitNonzero.resultEnvelopeValid|Should Be $false;$script:V309ExitNonzero.authoritativeEvidenceValid|Should Be $false}
+    It '27. implementation evidence valid는 authoritative alias다' {$script:V309ReportMissing.implementationEvidence.valid|Should Be $script:V309ReportMissing.implementationEvidence.authoritativeEvidenceValid}
+    It '28. repair evidence valid도 authoritative alias다' {$script:V309Op1Result.repairEvidence.valid|Should Be $script:V309Op1Result.repairEvidence.authoritativeEvidenceValid}
+
+    It '29. 정상 direct-main evidence는 COMPLETE다' {$script:V309DirectNormal.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '30. 현재 branch가 main이 아니면 COMPLETE 금지다' {$script:V309DirectCurrentBranch.failureReason|Should Be 'operation3_direct_main_branch_mismatch'}
+    It '31. postflight branch가 main이 아니면 COMPLETE 금지다' {$script:V309DirectReceiptBranch.failureReason|Should Be 'operation3_direct_main_branch_mismatch'}
+    It '32. 현재 HEAD mismatch는 COMPLETE 금지다' {$script:V309DirectCurrentHead.failureReason|Should Be 'operation3_direct_main_head_mismatch'}
+    It '33. run receipt HEAD mismatch는 COMPLETE 금지다' {$script:V309DirectReceiptHead.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '34. postflight HEAD mismatch는 COMPLETE 금지다' {$script:V309DirectPostflightHead.failureReason|Should Be 'operation3_direct_main_head_mismatch'}
+    It '35. pushComplete false는 COMPLETE 금지다' {$script:V309DirectPushFalse.failureReason|Should Be 'operation3_direct_main_push_incomplete'}
+    It '36. pushComplete 누락도 COMPLETE 금지다' {$script:V309DirectPushMissing.failureReason|Should Be 'operation3_direct_main_push_incomplete'}
+    It '37. 현재 worktree dirty는 COMPLETE 금지다' {$script:V309DirectCurrentDirty.failureReason|Should Be 'operation3_direct_main_worktree_dirty'}
+    It '38. postflight worktreeClean false도 COMPLETE 금지다' {$script:V309DirectReceiptDirty.failureReason|Should Be 'operation3_direct_main_worktree_dirty'}
+    It '39. direct-main CI pending은 COMPLETE 금지다' {$script:V309DirectCi.pending.failureReason|Should Be 'operation3_direct_main_ci_pending'}
+    It '40. direct-main CI unavailable은 COMPLETE 금지다' {$script:V309DirectCi.unavailable.failureReason|Should Be 'operation3_direct_main_ci_unavailable'}
+    It '41. direct-main CI failure는 COMPLETE 금지다' {$script:V309DirectCi.failure.failureReason|Should Be 'operation3_direct_main_ci_failure'}
+    It '42. required workflow removed는 COMPLETE 금지다' {$script:V309DirectCi.required_workflow_removed.failureReason|Should Be 'operation3_direct_main_required_workflow_removed'}
+    It '43. workflow 없음과 not-requested는 COMPLETE를 유지한다' {$script:V309DirectNoWorkflow.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '44. pending receipt status는 COMPLETE 금지다' {$script:V309DirectStatus.completed_ci_pending.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '45. unavailable receipt status는 COMPLETE 금지다' {$script:V309DirectStatus.completed_ci_unavailable.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '46. failed receipt status는 COMPLETE 금지다' {$script:V309DirectStatus.ci_failed.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '47. pull-request mode Operation 3 정상 경로를 유지한다' {$script:V309EvidenceNormal.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '48. Operation 1과 2 정상 finalize를 유지한다' {$script:V309Op1Result.finalStatus|Should Be 'merge_ready';$script:V309Op2Result.finalStatus|Should Be 'merge_ready'}
 }
 
 Describe 'v3.0.4 핵심 모듈 1차 분해' {
