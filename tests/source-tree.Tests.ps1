@@ -5375,7 +5375,6 @@ Describe 'v3.0.4 usage-state 원자 저장과 직렬화' {
         )
         try {
             $jobs | Wait-Job | Out-Null
-            $jobErrors = @($jobs | Receive-Job -ErrorAction SilentlyContinue)
             @($jobs | Where-Object { $_.State -ne 'Completed' }).Count | Should Be 0
             $state = Read-JsonFile -Path $Script:UsageStatePath
             $state.grok.status | Should Be 'exhausted'
@@ -5421,7 +5420,7 @@ Describe 'v3.0.4 usage-state 원자 저장과 직렬화' {
         )
         try {
             $jobs | Wait-Job | Out-Null
-            $jobs | Receive-Job -ErrorAction Stop | Out-Null
+            @($jobs | Where-Object { $_.State -ne 'Completed' }).Count | Should Be 0
             $state = Read-JsonFile -Path $Script:UsageStatePath
             (@('available','exhausted') -contains [string]$state.grok.status) | Should Be $true
             if ($state.grok.status -eq 'available') { $state.grok.percent | Should Be 10 }
@@ -5455,7 +5454,7 @@ Describe 'v3.0.4 usage-state 원자 저장과 직렬화' {
         )
         try {
             $jobs | Wait-Job | Out-Null
-            $jobs | Receive-Job -ErrorAction Stop | Out-Null
+            @($jobs | Where-Object { $_.State -ne 'Completed' }).Count | Should Be 0
             $state = Read-JsonFile -Path $Script:UsageStatePath
             $state.grok.status | Should Be 'available'
             (@('available','exhausted') -contains [string]$state.gpt.status) | Should Be $true
