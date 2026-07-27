@@ -1,6 +1,6 @@
 # REENTRY — operation-router v3.0.4 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=375 sourceTreeFailed=0 installedFixturePassed=375 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=390 sourceTreeFailed=0 installedFixturePassed=390 installedFixtureFailed=0 -->
 
 ## Live E2E canary 정본 절차
 
@@ -19,7 +19,7 @@
 
 ## 최근 검증
 
-Grok 전수검사와 수정 후 재검토 지적 사항까지 수리한 뒤 정식 source-tree 375개와 고유 임시 USERPROFILE installed fixture 375개가 모두 통과했다. installed integration failure는 0개이며, 저장소의 PowerShell 18개 구문 검사, config JSON 파싱, model contract, manifest 39개 SHA-256, `git diff --check`도 통과했다. 테스트 중 유료 모델 호출과 실제 사용자 홈 변경은 없었다.
+이슈 #6의 v3.0.4 수리 뒤 정식 source-tree 390개와 고유 임시 USERPROFILE installed fixture 390개가 모두 통과했다. installed integration failure는 0개이며, 저장소의 PowerShell 22개 구문 검사, config JSON 파싱, model contract, manifest 45개 SHA-256, `git diff --check`도 통과했다. 테스트 중 유료 모델 호출과 실제 사용자 홈 변경은 없었다.
 
 ## 현재 계약
 

@@ -1,7 +1,7 @@
 # operation-router (v3.0.4)
 
-<!-- verification-summary sourceTreePassed=375 sourceTreeFailed=0 installedFixturePassed=375 installedFixtureFailed=0 -->
-공식 검증 기준은 source-tree 375개 통과·0개 실패, installed fixture 375개 통과·0개 실패다. 기계 판독 가능한 정본은 `evidence/verification-summary.json`이며 `scripts/check-verification-metadata.ps1`가 문서 drift를 차단한다.
+<!-- verification-summary sourceTreePassed=390 sourceTreeFailed=0 installedFixturePassed=390 installedFixtureFailed=0 -->
+공식 검증 기준은 source-tree 390개 통과·0개 실패, installed fixture 390개 통과·0개 실패다. 기계 판독 가능한 정본은 `evidence/verification-summary.json`이며 `scripts/check-verification-metadata.ps1`가 문서 drift를 차단한다.
 
 ## v3.0.0 기본 Git workflow
 
