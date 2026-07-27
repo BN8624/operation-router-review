@@ -330,7 +330,8 @@ function Test-CanaryDirectMainOperation3Evidence {
         [Parameter(Mandatory)]$AuthoritativeEvidence,
         [Parameter(Mandatory)][int]$Operation,
         [Parameter(Mandatory)][int]$IssueNumber,
-        [Parameter(Mandatory)]$RepositoryIdentity
+        [Parameter(Mandatory)]$RepositoryIdentity,
+        [scriptblock]$WorkflowSnapshotProbe
     )
     $fail = {
         param([Parameter(Mandatory)][string]$Reason)
@@ -375,7 +376,22 @@ function Test-CanaryDirectMainOperation3Evidence {
         -not [bool]$postflight.worktreeClean -or -not [bool]$worktree.Clean) {
         return (& $fail 'operation3_direct_main_worktree_dirty')
     }
+    $workflowSnapshot = if ($null -ne $WorkflowSnapshotProbe) {
+        & $WorkflowSnapshotProbe $RepoPath $currentHead
+    } else {
+        Get-GitWorkflowSnapshot -RepoPath $RepoPath -Ref $currentHead
+    }
+    $snapshotOk = Get-CanaryProperty -Object $workflowSnapshot -Name 'ok'
+    $snapshotHead = [string](Get-CanaryProperty -Object $workflowSnapshot -Name 'head')
+    $workflowExists = Get-CanaryProperty -Object $workflowSnapshot -Name 'exists'
+    if ($snapshotOk -isnot [bool] -or -not [bool]$snapshotOk -or
+        $snapshotHead -cne $currentHead -or $workflowExists -isnot [bool]) {
+        return (& $fail 'operation3_direct_main_workflow_snapshot_unavailable')
+    }
     $ciStatus = [string](Get-CanaryProperty -Object $postflight -Name 'ciStatus')
+    if ([bool]$workflowExists -and $ciStatus -ceq 'not-requested') {
+        return (& $fail 'operation3_direct_main_ci_not_requested_with_workflow')
+    }
     switch ($ciStatus) {
         'pending' { return (& $fail 'operation3_direct_main_ci_pending') }
         'unavailable' { return (& $fail 'operation3_direct_main_ci_unavailable') }
@@ -689,7 +705,8 @@ function Invoke-LiveCanary {
         [scriptblock]$PrProbe,
         [scriptblock]$CheckLister,
         [scriptblock]$RemoteHeadProbe,
-        [scriptblock]$MergeMutationProbe
+        [scriptblock]$MergeMutationProbe,
+        [scriptblock]$WorkflowSnapshotProbe
     )
     if (-not $ConfirmPaidProviderCall -or [string]::IsNullOrWhiteSpace($RepoPath) -or
         $Operation -notin @(1,2,3) -or $IssueNumber -lt 1) {
@@ -1054,7 +1071,8 @@ function Invoke-LiveCanary {
         } else {
             $directMainEvidence = Test-CanaryDirectMainOperation3Evidence -RepoPath $resolvedRepo `
                 -RunReceipt $runReceipt -AuthoritativeEvidence $authoritativeEvidence `
-                -Operation $Operation -IssueNumber $IssueNumber -RepositoryIdentity $repoIdentity
+                -Operation $Operation -IssueNumber $IssueNumber -RepositoryIdentity $repoIdentity `
+                -WorkflowSnapshotProbe $WorkflowSnapshotProbe
             if (-not [bool]$directMainEvidence.valid) {
                 $routerFailure = [string]$directMainEvidence.reason
             }

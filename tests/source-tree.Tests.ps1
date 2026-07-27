@@ -5452,12 +5452,24 @@ function Set-CanaryHarnessDirectMain {
     param(
         [Parameter(Mandatory)]$Fixture,
         [string]$CiStatus='success',
-        [string]$ReceiptStatus='completed'
+        [string]$ReceiptStatus='completed',
+        [switch]$RemoveWorkflow
     )
     Push-Location $Fixture.Fixture.Repo
     try {
         git switch -q main
         git merge -q --ff-only $Fixture.WorkBranch
+        if($RemoveWorkflow){
+            $workflowFiles=@(git ls-files -- '.github/workflows/*.yml' '.github/workflows/*.yaml')
+            if($LASTEXITCODE -ne 0 -or $workflowFiles.Count -eq 0){
+                throw 'direct-main no-workflow fixture requires a tracked workflow'
+            }
+            foreach($relative in $workflowFiles){
+                Remove-Item -LiteralPath (Join-Path $Fixture.Fixture.Repo ([string]$relative)) -Force
+            }
+            git add -A
+            git commit -q -m 'remove workflow for direct-main fixture'
+        }
         git push -q origin main
         $head=(git rev-parse HEAD).Trim()
     } finally { Pop-Location }
@@ -5476,7 +5488,8 @@ function Invoke-TestCanary {
         [Parameter(Mandatory)]$Fixture,
         [ValidateSet('Start','Continue','Finalize')][string]$Phase='Start',
         [string]$FinalReviewEvidencePath,
-        [switch]$UseMergeMutationProbe
+        [switch]$UseMergeMutationProbe,
+        [scriptblock]$WorkflowSnapshotProbe
     )
     $invokeArgs=@{
         ConfirmPaidProviderCall=$true;RepoPath=$Fixture.Fixture.Repo;Operation=$Fixture.Operation
@@ -5486,6 +5499,7 @@ function Invoke-TestCanary {
         RepairReceiptReader=$Fixture.RepairReader;PrProbe=$Fixture.PrProbe.Probe;CheckLister=$Fixture.CheckLister
     }
     if($UseMergeMutationProbe){$invokeArgs.MergeMutationProbe=$Fixture.MergeProbe}
+    if($null -ne $WorkflowSnapshotProbe){$invokeArgs.WorkflowSnapshotProbe=$WorkflowSnapshotProbe}
     return Invoke-LiveCanary @invokeArgs
 }
 
@@ -6696,7 +6710,7 @@ Describe 'v3.0.9 schema v4 반환 계약과 direct-main 증거' {
             $script:V309DirectCi[$ci]=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
         }
         $script:V309Direct.State.Run.postflight.ciStatus='not-requested'
-        $script:V309DirectNoWorkflow=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
+        $script:V309DirectWorkflowNotRequested=Invoke-TestCanary -Fixture $script:V309Direct -Phase Continue
         $script:V309Direct.State.Run.postflight.ciStatus='success'
 
         $script:V309DirectStatus=@{}
@@ -6768,12 +6782,112 @@ Describe 'v3.0.9 schema v4 반환 계약과 direct-main 증거' {
     It '40. direct-main CI unavailable은 COMPLETE 금지다' {$script:V309DirectCi.unavailable.failureReason|Should Be 'operation3_direct_main_ci_unavailable'}
     It '41. direct-main CI failure는 COMPLETE 금지다' {$script:V309DirectCi.failure.failureReason|Should Be 'operation3_direct_main_ci_failure'}
     It '42. required workflow removed는 COMPLETE 금지다' {$script:V309DirectCi.required_workflow_removed.failureReason|Should Be 'operation3_direct_main_required_workflow_removed'}
-    It '43. workflow 없음과 not-requested는 COMPLETE를 유지한다' {$script:V309DirectNoWorkflow.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '43. workflow가 있는데 not-requested면 COMPLETE를 금지한다' {$script:V309DirectWorkflowNotRequested.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
     It '44. pending receipt status는 COMPLETE 금지다' {$script:V309DirectStatus.completed_ci_pending.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
     It '45. unavailable receipt status는 COMPLETE 금지다' {$script:V309DirectStatus.completed_ci_unavailable.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
     It '46. failed receipt status는 COMPLETE 금지다' {$script:V309DirectStatus.ci_failed.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
     It '47. pull-request mode Operation 3 정상 경로를 유지한다' {$script:V309EvidenceNormal.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
     It '48. Operation 1과 2 정상 finalize를 유지한다' {$script:V309Op1Result.finalStatus|Should Be 'merge_ready';$script:V309Op2Result.finalStatus|Should Be 'merge_ready'}
+}
+
+Describe 'v3.0.10 direct-main not-requested workflow snapshot' {
+    BeforeAll {
+        $script:V310Cleanup=New-Object Collections.ArrayList
+
+        $script:V310WithWorkflow=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V310Cleanup.Add($script:V310WithWorkflow)
+        [void](Set-CanaryHarnessDirectMain -Fixture $script:V310WithWorkflow)
+        $script:V310WithWorkflowSnapshot=Get-GitWorkflowSnapshot `
+            -RepoPath $script:V310WithWorkflow.Fixture.Repo -Ref $script:V310WithWorkflow.State.Run.finalHead
+        $script:V310WithWorkflowSuccess=Invoke-TestCanary -Fixture $script:V310WithWorkflow
+        $script:V310WithWorkflow.State.Run.postflight.ciStatus='not-requested'
+        $script:V310WithWorkflowNotRequested=Invoke-TestCanary -Fixture $script:V310WithWorkflow -Phase Continue
+        $script:V310WithWorkflow.State.Run.postflight.ciStatus='unknown'
+        $script:V310WithWorkflowUnknown=Invoke-TestCanary -Fixture $script:V310WithWorkflow -Phase Continue
+        $script:V310WithWorkflow.State.Run.postflight.ciStatus='success'
+
+        $script:V310WithoutWorkflow=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V310Cleanup.Add($script:V310WithoutWorkflow)
+        [void](Set-CanaryHarnessDirectMain -Fixture $script:V310WithoutWorkflow `
+            -CiStatus not-requested -RemoveWorkflow)
+        $withoutHead=$script:V310WithoutWorkflow.State.Run.finalHead
+        $script:V310WithoutWorkflowSnapshot=Get-GitWorkflowSnapshot `
+            -RepoPath $script:V310WithoutWorkflow.Fixture.Repo -Ref $withoutHead
+        $script:V310WithoutWorkflowParentSnapshot=Get-GitWorkflowSnapshot `
+            -RepoPath $script:V310WithoutWorkflow.Fixture.Repo -Ref ($withoutHead + '^')
+        $script:V310WithoutWorkflowNotRequested=Invoke-TestCanary -Fixture $script:V310WithoutWorkflow
+        $script:V310WithoutWorkflow.State.Run.postflight.ciStatus='success'
+        $script:V310WithoutWorkflowSuccess=Invoke-TestCanary -Fixture $script:V310WithoutWorkflow -Phase Continue
+
+        $script:V310Unavailable=@{}
+        $snapshotFailure={
+            param($repo,$ref)
+            return [pscustomobject]@{ok=$false;ref=$ref;head=$null;exists=$false;files=@();digest=$null}
+        }
+        foreach($ci in @('success','not-requested')){
+            $script:V310WithWorkflow.State.Run.postflight.ciStatus=$ci
+            $script:V310Unavailable[$ci]=Invoke-TestCanary -Fixture $script:V310WithWorkflow `
+                -Phase Continue -WorkflowSnapshotProbe $snapshotFailure
+        }
+        $script:V310WithWorkflow.State.Run.postflight.ciStatus='success'
+
+        $snapshotProbe={
+            param($repo,$ref)
+            $script:V310CommitBoundRef=$ref
+            return Get-GitWorkflowSnapshot -RepoPath $repo -Ref $ref
+        }
+        $script:V310CommitBoundResult=Invoke-TestCanary -Fixture $script:V310WithWorkflow `
+            -Phase Continue -WorkflowSnapshotProbe $snapshotProbe
+    }
+    AfterAll {
+        foreach($fixture in @($script:V310Cleanup)){
+            if($null -ne $fixture){Remove-PrFakeRepo -Fixture $fixture.Fixture}
+        }
+    }
+
+    It '1. workflow snapshot은 final HEAD에 고정되고 workflow 존재를 확인한다' {
+        $script:V310WithWorkflowSnapshot.ok|Should Be $true
+        $script:V310WithWorkflowSnapshot.head|Should Be $script:V310WithWorkflow.State.Run.finalHead
+        $script:V310WithWorkflowSnapshot.exists|Should Be $true
+    }
+    It '2. workflow가 있고 CI success면 COMPLETE다' {
+        $script:V310WithWorkflowSuccess.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'
+    }
+    It '3. workflow가 있는데 not-requested면 COMPLETE가 아니다' {
+        $script:V310WithWorkflowNotRequested.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'
+    }
+    It '4. workflow가 있는데 not-requested면 전용 reason으로 실패한다' {
+        $script:V310WithWorkflowNotRequested.failureReason|Should Be 'operation3_direct_main_ci_not_requested_with_workflow'
+    }
+    It '5. workflow가 있는데 알 수 없는 CI 상태면 fail-closed한다' {
+        $script:V310WithWorkflowUnknown.failureReason|Should Be 'operation3_direct_main_ci_invalid:unknown'
+    }
+    It '6. workflow 없음 fixture는 추적 workflow 삭제 commit 전후 snapshot이 다르다' {
+        $script:V310WithoutWorkflowParentSnapshot.ok|Should Be $true
+        $script:V310WithoutWorkflowParentSnapshot.exists|Should Be $true
+        $script:V310WithoutWorkflowSnapshot.ok|Should Be $true
+        $script:V310WithoutWorkflowSnapshot.exists|Should Be $false
+    }
+    It '7. 실제 workflow가 없고 not-requested면 COMPLETE다' {
+        $script:V310WithoutWorkflowNotRequested.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'
+    }
+    It '8. 실제 workflow가 없고 success여도 COMPLETE를 유지한다' {
+        $script:V310WithoutWorkflowSuccess.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'
+    }
+    It '9. workflow snapshot 확인 불가는 모든 CI 상태에서 FAILED다' {
+        foreach($ci in @('success','not-requested')){
+            $script:V310Unavailable[$ci].finalStatus|Should Be 'LIVE_CANARY_FAILED'
+        }
+    }
+    It '10. workflow snapshot 확인 불가는 전용 reason을 반환한다' {
+        foreach($ci in @('success','not-requested')){
+            $script:V310Unavailable[$ci].failureReason|Should Be 'operation3_direct_main_workflow_snapshot_unavailable'
+        }
+    }
+    It '11. snapshot probe는 권위 증거와 일치한 현재 HEAD를 받는다' {
+        $script:V310CommitBoundRef|Should Be $script:V310WithWorkflow.State.Run.finalHead
+        $script:V310CommitBoundResult.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'
+    }
 }
 
 Describe 'v3.0.4 핵심 모듈 1차 분해' {
