@@ -1,5 +1,12 @@
 # CHANGELOG — operation-router
 
+## v3.0.7 (2026-07-27)
+
+- corrupt checkpoint: 기존 `ResultPath`의 JSON이 손상되면 `LIVE_CANARY_CHECKPOINT_INVALID`로 중단하고 bytes, 파일, 경로를 수정하지 않는다. 별도 실행은 새 경로를 요구한다.
+- provider evidence: checkpoint 조기 실패에서 전체 `paidProviderCalls`를 unknown으로 유지하고, 현재 재진입 프로세스의 신규 호출 0회는 별도 필드로 기록한다.
+- successful envelope: authoritative implementation·repair evidence에 Boolean `success=true`와 integer `exitCode=0`을 요구하고 실패 envelope의 finalize와 `merge_ready`를 차단한다.
+- tests: 손상 checkpoint, 호출 증거 분리, 실패 envelope와 정상 Operation 1·2 회귀 32개를 추가했다.
+
 ## v3.0.6 (2026-07-27)
 
 - canary checkpoint: repository identity, execution ID, generation을 고정하고 Continue·Finalize 전에 현재 receipt와 다시 비교한다. 불일치 시 router 명령과 checkpoint 수정은 0회다.

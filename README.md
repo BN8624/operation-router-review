@@ -1,10 +1,18 @@
-# operation-router (v3.0.6)
+# operation-router (v3.0.7)
 
-<!-- verification-summary sourceTreePassed=468 sourceTreeFailed=0 installedFixturePassed=468 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=500 sourceTreeFailed=0 installedFixturePassed=500 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 468 passed, 0 failed; installed fixture 468 passed, 0 failed.
+Official verification: source-tree 500 passed, 0 failed; installed fixture 500 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.7 corrupt checkpoint and successful envelope evidence
+
+An existing canary checkpoint is treated separately from a missing checkpoint. If its JSON cannot be parsed, `Start`, `Continue`, and `Finalize` return `LIVE_CANARY_CHECKPOINT_INVALID` without deleting, replacing, renaming, or rewriting the file. Starting a distinct canary requires a new `ResultPath`.
+
+Checkpoint failures do not claim that the complete canary made zero provider calls. `paidProviderCalls` remains `null` and unverified until execution receipts can be reconciled, while `providerCallsThisInvocation=0` records only that the rejected re-entry process started no new router command.
+
+Successful implementation and repair evidence requires a parsed, context-matched result envelope with Boolean `success=true` and integer `exitCode=0`. A failed or type-invalid envelope cannot authorize final review, `finalize`, or `merge_ready`.
 
 ## v3.0.6 execution-bound canary evidence
 

@@ -1,10 +1,18 @@
-# REENTRY — operation-router v3.0.6 pull-request workflow
+# REENTRY — operation-router v3.0.7 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=468 sourceTreeFailed=0 installedFixturePassed=468 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=500 sourceTreeFailed=0 installedFixturePassed=500 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 468 passed, 0 failed; installed fixture 468 passed, 0 failed.
+Official verification: source-tree 500 passed, 0 failed; installed fixture 500 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.7 손상 checkpoint와 성공 증거
+
+명시된 `ResultPath`가 이미 존재하면 파일 존재 여부와 JSON 유효성을 별도로 판정한다. JSON이 손상됐으면 모든 phase가 `LIVE_CANARY_CHECKPOINT_INVALID`로 중단하고 원본 bytes를 그대로 보존한다. 자동 복구나 덮어쓰기는 없으며 별도 canary는 새로운 `ResultPath`를 사용해야 한다.
+
+checkpoint 실패의 `paidProviderCalls`는 전체 canary 호출 수를 재구성하기 전이므로 `null`과 `verified=false`다. 같은 실패 결과의 `providerCallsThisInvocation=0`과 `verified=true`는 현재 재진입 프로세스에서 새 router 명령이 없었다는 사실만 나타낸다. Canary 자체가 시작되지 않은 `LIVE_CANARY_NOT_EXECUTED`만 전체 호출 0회를 계속 증명한다.
+
+Implementation과 repair의 성공 envelope는 `success`가 Boolean `true`이고 `exitCode`가 integer `0`이어야 한다. 실패 또는 타입이 잘못된 authoritative envelope가 있으면 유효한 final review와 PR context가 있더라도 `finalize`와 `merge_ready`를 차단한다.
 
 ## v3.0.6 canary 재진입과 provenance
 

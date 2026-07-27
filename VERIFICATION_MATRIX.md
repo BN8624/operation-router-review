@@ -1,6 +1,6 @@
-# VERIFICATION_MATRIX — operation-router v3.0.6
+# VERIFICATION_MATRIX — operation-router v3.0.7
 
-<!-- verification-summary sourceTreePassed=468 sourceTreeFailed=0 installedFixturePassed=468 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=500 sourceTreeFailed=0 installedFixturePassed=500 installedFixtureFailed=0 -->
 
 현재 실행 계약은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` → final review → `finalize` 순서다. recover는 watch가 없는 새 세션 재진입에만 사용한다.
 
@@ -34,6 +34,7 @@
 | v3.0.5 live canary 정본 | 단계·provenance·외부 final review | run/watch terminal 고정, Operation 1 review·repair, Operation 2·1 구조화 evidence gate, actual result envelope·worker report·Draft PR head·PR-linked CI, merge·provider 호출 unknown 정직성, 재진입 중복 구현 0 |
 | v3.0.5 visible verification | 사람이 읽는 수치와 버전 | summary 생성 block, README·REENTRY·VERIFICATION_MATRIX·CHANGELOG 버전, 실행 결과·parser·manifest·evidence·refactor metrics drift, Write rollback |
 | v3.0.6 canary identity | checkpoint·nextAction·repair·invocation·merge 증거 | execution ID/generation/repo root 고정, Operation별 nextAction fail-closed, implementation/repair envelope 분리, 현재 execution invocation만 count, 직접 probe 없는 merge 호출 여부 unknown |
+| v3.0.7 canary 마감 | 손상 checkpoint·호출 수·성공 envelope | 손상 JSON bytes 보존과 router 0회, 전체 canary/provider 현재 invocation 분리, success=true와 exitCode=0이 아닌 authoritative evidence의 finalize·merge_ready 차단 |
 
 ## 상태별 기대 판정
 
@@ -59,8 +60,8 @@ PR CI 기대 여부는 receipt에 고정된 base/head commit workflow 스냅샷�
 ## 실행 결과
 
 <!-- verification-visible:start -->
-- source-tree 468 passed, 0 failed
-- installed fixture 468 passed, 0 failed
+- source-tree 500 passed, 0 failed
+- installed fixture 500 passed, 0 failed
 - installed integration failures 0
 - PowerShell parser files 23, manifest entries 46
 - paid model calls 0
