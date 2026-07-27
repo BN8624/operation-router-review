@@ -6,6 +6,7 @@
 - CI: model contract 검사 뒤 verification metadata 검사를 실행하며 기존 source-tree·installed fixture·manifest 검사를 유지한다.
 - usage-state: 같은 디렉터리 임시 파일과 원자 교체를 사용하고 `usage-state.lock`의 배타 file handle로 읽기-수정-쓰기 전체를 직렬화한다. lock timeout은 명시적으로 실패하며 stale 객체 저장을 거부한다.
 - refactor: JSON·usage-state·상태 경로 책임을 `scripts/state-store.ps1`로, worker 오류 분류·완료 보고서 파싱·공통 정책을 `scripts/worker-contract.ps1`로 옮겼다. `common.ps1`은 1691줄에서 1167줄로 줄고 새 모듈 로딩 순서를 고정했다.
+- live canary: 명시적 유료 호출 승인과 별도 저장소·작전·이슈 인수가 있어야 실행되는 `scripts/run-live-canary.ps1`, 비밀값 없는 결과 스키마, 8개 운영 시나리오를 추가했다. 이번 검증의 실제 결과는 `LIVE_CANARY_NOT_EXECUTED`다.
 
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 

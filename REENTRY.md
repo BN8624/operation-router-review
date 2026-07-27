@@ -2,6 +2,21 @@
 
 <!-- verification-summary sourceTreePassed=375 sourceTreeFailed=0 installedFixturePassed=375 installedFixtureFailed=0 -->
 
+## Live E2E canary 정본 절차
+
+`scripts/run-live-canary.ps1`는 `-ConfirmPaidProviderCall`, 별도 `-RepoPath`, `-Operation`, `-IssueNumber`를 모두 명시한 경우에만 router를 실행한다. 인수가 없으면 `LIVE_CANARY_NOT_EXECUTED`와 사용법을 반환한다. 결과 JSON에는 prompt, secret, raw stdout/stderr, 환경 전체를 넣지 않는다. 각 시나리오는 disposable canary 저장소와 전용 이슈에서 실행하고 Draft를 유지하며 자동 merge를 호출하지 않는다.
+
+1. Operation 3 소규모 성공은 작은 기계적 변경 한 건을 커밋·push하고 result envelope, worker report, local verification, Draft PR head SHA와 CI를 대조한다.
+2. Operation 2 성공은 구현 완료 뒤 Sonnet 종료 검토를 수행하고 `finalize`에서 PASS, CI success, Draft 유지, `merge_ready=true`를 확인한다.
+3. Operation 1 성공은 Grok 구현, Sol review PASS, Opus 종료 검토, `finalize` 순서로 같은 branch와 Draft PR을 유지한다.
+4. Operation 1 수리는 Sol review `REPAIR_REQUIRED`, 원 worker repair 1회, Opus 종료 검토, `finalize` 순서와 findings 소거를 확인한다.
+5. worker 중단 복구는 실행 세대와 receipt를 보존한 채 새 세션 `recover`가 동일 execution을 이어받고 중복 worker를 시작하지 않는지 확인한다.
+6. weekly exhaustion Plan B는 명시적 weekly 분류, usage exhausted/100, clean worktree에서만 다음 provider 전환, 실제 provider 호출 횟수를 확인한다.
+7. partial changes 후 fallback 차단은 HEAD 또는 worktree 변경을 남긴 weekly 실패에서 `partial_worker_changes`와 fallback 미호출을 확인한다.
+8. CI pending, failure, unavailable 각각에서 `merge_ready=false`, Draft 유지, 자동 merge 미호출을 확인한다.
+
+현재 정본 결과는 `evidence/live-canary-result.json`이다. 별도 canary 저장소와 검증된 provider 인증이 제공되지 않아 이번 작업에서는 실제 유료 canary를 실행하지 않았으며 합성 테스트를 live E2E 통과로 간주하지 않는다.
+
 ## 최근 검증
 
 Grok 전수검사와 수정 후 재검토 지적 사항까지 수리한 뒤 정식 source-tree 375개와 고유 임시 USERPROFILE installed fixture 375개가 모두 통과했다. installed integration failure는 0개이며, 저장소의 PowerShell 18개 구문 검사, config JSON 파싱, model contract, manifest 39개 SHA-256, `git diff --check`도 통과했다. 테스트 중 유료 모델 호출과 실제 사용자 홈 변경은 없었다.

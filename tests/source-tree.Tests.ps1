@@ -5238,6 +5238,47 @@ Describe 'v3.0.3. abandon-claude mutation lock 안전 해제 (F4)' {
     }
 }
 
+Describe 'v3.0.4 live canary 안전 절차' {
+    It '1. 명시적 유료 호출 승인이나 필수 인수가 없으면 실행하지 않고 사용법만 반환한다' {
+        $resultPath = Join-Path $TestWorkRoot 'forbidden-live-canary-result.json'
+        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptsDir 'run-live-canary.ps1') `
+            -RepoPath $RouterRoot -Operation 3 -IssueNumber 6 -ResultPath $resultPath 2>&1 | Out-String
+        $LASTEXITCODE | Should Be 2
+        $output | Should Match 'LIVE_CANARY_NOT_EXECUTED'
+        $output | Should Match 'ConfirmPaidProviderCall'
+        (Test-Path -LiteralPath $resultPath) | Should Be $false
+    }
+
+    It '2. 미실행 정본 결과는 필수 스키마와 정확한 미실행 이유를 기록한다' {
+        $path = Join-Path $RouterRoot 'evidence\live-canary-result.json'
+        $result = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $required = @(
+            'schemaVersion','routerVersion','routerHead','targetRepositoryIdentity','operation','issueNumber',
+            'worker','model','effort','startHead','finalHead','executionId','generation',
+            'resultEnvelopePresent','workerReportValid','localVerification','branch','draftPrNumber',
+            'draftPrUrl','prHeadSha','ciStatus','finalStatus','mergeReady','draftRetained',
+            'automaticMergeCalled','paidProviderCalls','startedAtUtc','finishedAtUtc'
+        )
+        foreach ($field in $required) { ($result.PSObject.Properties.Name -contains $field) | Should Be $true }
+        $result.finalStatus | Should Be 'LIVE_CANARY_NOT_EXECUTED'
+        $result.paidProviderCalls | Should Be 0
+        [string]::IsNullOrWhiteSpace([string]$result.notExecutedReason) | Should Be $false
+    }
+
+    It '3. 결과 스키마는 prompt secret raw stdout stderr 환경 전체를 저장하지 않는다' {
+        $result = Get-Content -LiteralPath (Join-Path $RouterRoot 'evidence\live-canary-result.json') -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        foreach ($forbidden in @('prompt','secret','rawStdout','rawStderr','environment')) {
+            ($result.PSObject.Properties.Name -contains $forbidden) | Should Be $false
+        }
+        $source = Get-Content -LiteralPath (Join-Path $ScriptsDir 'run-live-canary.ps1') -Raw -Encoding UTF8
+        $guardIndex = $source.IndexOf('if (-not $ConfirmPaidProviderCall')
+        $invokeIndex = $source.IndexOf('& powershell.exe')
+        ($guardIndex -ge 0) | Should Be $true
+        ($invokeIndex -gt $guardIndex) | Should Be $true
+    }
+}
+
 Describe 'v3.0.4 핵심 모듈 1차 분해' {
     It '1. common은 state-store와 worker-contract를 고정 순서로 로드한다' {
         $common = Get-Content -LiteralPath (Join-Path $ScriptsDir 'common.ps1') -Raw -Encoding UTF8
