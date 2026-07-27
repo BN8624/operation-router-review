@@ -1,4 +1,6 @@
-# REENTRY — operation-router v3.0.3 pull-request workflow
+# REENTRY — operation-router v3.0.4 pull-request workflow
+
+<!-- verification-summary sourceTreePassed=375 sourceTreeFailed=0 installedFixturePassed=375 installedFixtureFailed=0 -->
 
 ## 최근 검증
 

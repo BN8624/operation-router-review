@@ -1,4 +1,6 @@
-# VERIFICATION_MATRIX — operation-router v3.0.3
+# VERIFICATION_MATRIX — operation-router v3.0.4
+
+<!-- verification-summary sourceTreePassed=375 sourceTreeFailed=0 installedFixturePassed=375 installedFixtureFailed=0 -->
 
 현재 실행 계약은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` → final review → `finalize` 순서다. recover는 watch가 없는 새 세션 재진입에만 사용한다.
 
@@ -55,10 +57,10 @@ PR CI 기대 여부는 receipt에 고정된 base/head commit workflow 스냅샷�
 
 - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1`
   - 종료 코드 0, 1117.52초
-  - 354 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  - 375 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
 - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-installed-fixture.ps1`
   - 종료 코드 0, 1118.37초
-  - source tree 354 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
+  - source tree 375 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
   - installed integration 실행, Skill 6종 byte-equivalence 실패 0
 - 최종 집중 검증
   - model contract `-Check`, PowerShell 18개 파일 구문 검사, config JSON 파싱, manifest 39개 SHA-256, `git diff --check` 통과

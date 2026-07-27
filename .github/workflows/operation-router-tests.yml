@@ -65,6 +65,12 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-model-contract.ps1 -Check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Check verification metadata
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-verification-metadata.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Expose isolated provider CLI fixtures
         shell: powershell
         run: |

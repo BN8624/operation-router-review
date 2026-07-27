@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "3.0.4",
+  "sourceTreePassed": 375,
+  "sourceTreeFailed": 0,
+  "installedFixturePassed": 375,
+  "installedFixtureFailed": 0,
+  "installedIntegrationFailures": 0,
+  "powerShellParserFiles": 19,
+  "manifestEntries": 41,
+  "modelContract": "passed",
+  "gitDiffCheck": "passed",
+  "paidModelCalls": 0,
+  "verifiedHead": "4ef0c56ff0e8ce24fccdaf161835635e8e29feb5",
+  "verifiedAtUtc": "2026-07-26T14:39:01.4086120Z"
+}

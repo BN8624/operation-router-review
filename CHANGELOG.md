@@ -1,5 +1,10 @@
 # CHANGELOG — operation-router
 
+## v3.0.4 (2026-07-27)
+
+- verification metadata: `evidence/verification-summary.json`을 공식 검증 수치의 기계 판독 가능한 단일 원본으로 추가하고 README·REENTRY·VERIFICATION_MATRIX·evidence drift를 fail-closed로 검사한다.
+- CI: model contract 검사 뒤 verification metadata 검사를 실행하며 기존 source-tree·installed fixture·manifest 검사를 유지한다.
+
 버전별 실제 변경 사항만 기록한다. 라우팅·모델·effort·권한·fallback의 기본 뼈대는 v2.3에서 확립됐고 이후는 결함 수리와 보안·정책 보강이다.
 
 ## v3.0.3 (2026-07-26)
