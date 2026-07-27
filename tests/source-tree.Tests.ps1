@@ -6053,6 +6053,246 @@ Describe 'v3.0.6 canary execution identity와 repair provenance' {
     }
 }
 
+function New-V307EnvelopeEvidence {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Success,
+        [Parameter(Mandatory)]$ExitCode
+    )
+    $receipt=[pscustomobject]@{
+        executionId='v307-envelope';generation=1;worker='gpt';resultPath=$Path
+    }
+    Write-AtomicJsonFile -Path $Path -Object ([pscustomobject]@{
+        schemaVersion=1;executionId=$receipt.executionId;generation=1;worker='gpt'
+        success=$Success;exitCode=$ExitCode
+    })
+    return (Test-CanaryResultEnvelope -ExecutionReceipt $receipt)
+}
+
+Describe 'v3.0.7 손상 checkpoint와 성공 envelope 증거' {
+    BeforeAll {
+        $script:V307Cleanup=New-Object System.Collections.ArrayList
+
+        $script:V307Corrupt=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V307Cleanup.Add($script:V307Corrupt)
+        [IO.File]::WriteAllText($script:V307Corrupt.ResultPath,'{"broken":')
+        $script:V307CorruptBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($script:V307Corrupt.ResultPath))
+        $script:V307CorruptFilesBefore=@([IO.Directory]::GetFiles($script:V307Corrupt.Fixture.Root))
+        $script:V307CorruptStart=Invoke-TestCanary -Fixture $script:V307Corrupt -Phase Start
+        $script:V307CorruptContinue=Invoke-TestCanary -Fixture $script:V307Corrupt -Phase Continue
+        $script:V307CorruptFinalize=Invoke-TestCanary -Fixture $script:V307Corrupt -Phase Finalize
+
+        $script:V307Normal=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V307Cleanup.Add($script:V307Normal)
+        $script:V307NormalStart=Invoke-TestCanary -Fixture $script:V307Normal
+        $script:V307NormalContinue=Invoke-TestCanary -Fixture $script:V307Normal -Phase Continue
+
+        $script:V307ExecutionMismatch=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V307Cleanup.Add($script:V307ExecutionMismatch)
+        [void](Invoke-TestCanary -Fixture $script:V307ExecutionMismatch)
+        $script:V307ExecutionMismatch.State.Execution.executionId='v307-other-execution'
+        $script:V307ExecutionMismatchResult=Invoke-TestCanary -Fixture $script:V307ExecutionMismatch -Phase Continue
+
+        $script:V307GenerationMismatch=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V307Cleanup.Add($script:V307GenerationMismatch)
+        [void](Invoke-TestCanary -Fixture $script:V307GenerationMismatch)
+        $script:V307GenerationMismatch.State.Execution.generation=7
+        $script:V307GenerationMismatchResult=Invoke-TestCanary -Fixture $script:V307GenerationMismatch -Phase Continue
+
+        $script:V307ContextMismatch=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V307Cleanup.Add($script:V307ContextMismatch)
+        [void](Invoke-TestCanary -Fixture $script:V307ContextMismatch)
+        $contextCheckpoint=Read-JsonFile -Path $script:V307ContextMismatch.ResultPath
+        $contextCheckpoint.targetRepositoryIdentity.repoRootHash='v307-other-root'
+        Write-AtomicJsonFile -Path $script:V307ContextMismatch.ResultPath -Object $contextCheckpoint -Depth 30
+        $script:V307ContextMismatchResult=Invoke-TestCanary -Fixture $script:V307ContextMismatch -Phase Continue
+
+        $script:V307IdentityMissing=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V307Cleanup.Add($script:V307IdentityMissing)
+        [void](Invoke-TestCanary -Fixture $script:V307IdentityMissing)
+        $identityCheckpoint=Read-JsonFile -Path $script:V307IdentityMissing.ResultPath
+        $identityCheckpoint.PSObject.Properties.Remove('executionId')
+        Write-AtomicJsonFile -Path $script:V307IdentityMissing.ResultPath -Object $identityCheckpoint -Depth 30
+        $script:V307IdentityMissingResult=Invoke-TestCanary -Fixture $script:V307IdentityMissing -Phase Continue
+
+        $script:V307ImplementationFailure=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review
+        [void]$script:V307Cleanup.Add($script:V307ImplementationFailure)
+        [void](Invoke-TestCanary -Fixture $script:V307ImplementationFailure)
+        $implementationEnvelope=Read-JsonFile -Path $script:V307ImplementationFailure.State.Execution.resultPath
+        $implementationEnvelope.success=$false
+        $implementationEnvelope.exitCode=1
+        Write-AtomicJsonFile -Path $script:V307ImplementationFailure.State.Execution.resultPath -Object $implementationEnvelope
+        $script:V307ImplementationEvidence=Write-CanaryReviewEvidence -Fixture $script:V307ImplementationFailure
+        $script:V307ImplementationFailureResult=Invoke-TestCanary -Fixture $script:V307ImplementationFailure `
+            -Phase Finalize -FinalReviewEvidencePath $script:V307ImplementationEvidence
+
+        $script:V307RepairFailure=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        [void]$script:V307Cleanup.Add($script:V307RepairFailure)
+        [void](Invoke-TestCanary -Fixture $script:V307RepairFailure)
+        $repairEnvelope=Read-JsonFile -Path $script:V307RepairFailure.State.Repair.resultPath
+        $repairEnvelope.success=$false
+        $repairEnvelope.exitCode=1
+        Write-AtomicJsonFile -Path $script:V307RepairFailure.State.Repair.resultPath -Object $repairEnvelope
+        $script:V307RepairEvidence=Write-CanaryReviewEvidence -Fixture $script:V307RepairFailure
+        $script:V307RepairFailureResult=Invoke-TestCanary -Fixture $script:V307RepairFailure `
+            -Phase Finalize -FinalReviewEvidencePath $script:V307RepairEvidence
+
+        $script:V307Operation2Success=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review
+        [void]$script:V307Cleanup.Add($script:V307Operation2Success)
+        [void](Invoke-TestCanary -Fixture $script:V307Operation2Success)
+        $operation2Evidence=Write-CanaryReviewEvidence -Fixture $script:V307Operation2Success
+        $script:V307Operation2SuccessResult=Invoke-TestCanary -Fixture $script:V307Operation2Success `
+            -Phase Finalize -FinalReviewEvidencePath $operation2Evidence
+
+        $script:V307Operation1Success=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        [void]$script:V307Cleanup.Add($script:V307Operation1Success)
+        [void](Invoke-TestCanary -Fixture $script:V307Operation1Success)
+        $operation1Evidence=Write-CanaryReviewEvidence -Fixture $script:V307Operation1Success
+        $script:V307Operation1SuccessResult=Invoke-TestCanary -Fixture $script:V307Operation1Success `
+            -Phase Finalize -FinalReviewEvidencePath $operation1Evidence
+    }
+    AfterAll {
+        foreach($fixture in @($script:V307Cleanup)){
+            if($null -ne $fixture){Remove-PrFakeRepo -Fixture $fixture.Fixture}
+        }
+        Get-ChildItem -LiteralPath $TestWorkRoot -File -Filter 'v307-envelope-*.json' -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+    }
+
+    It '1. 손상 checkpoint Start는 LIVE_CANARY_CHECKPOINT_INVALID다' {
+        $script:V307CorruptStart.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_INVALID'
+        $script:V307CorruptStart.failureReason|Should Be 'checkpoint_json_invalid'
+    }
+    It '2. 손상 checkpoint Continue도 같은 실패다' {
+        $script:V307CorruptContinue.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_INVALID'
+    }
+    It '3. 손상 checkpoint Finalize도 같은 실패다' {
+        $script:V307CorruptFinalize.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_INVALID'
+    }
+    It '4. 손상 checkpoint에서는 router 명령 호출이 0회다' {
+        @($script:V307CorruptStart.routerCommands).Count|Should Be 0
+        @($script:V307Corrupt.State.RunCalls,$script:V307Corrupt.State.WatchCalls,
+            $script:V307Corrupt.State.ReviewCalls,$script:V307Corrupt.State.RepairCalls,
+            $script:V307Corrupt.State.FinalizeCalls)|Should Be @(0,0,0,0,0)
+    }
+    It '5. 손상 checkpoint 원본 bytes는 불변이다' {
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:V307Corrupt.ResultPath))|Should Be $script:V307CorruptBytes
+    }
+    It '6. 손상 checkpoint 파일을 삭제하지 않는다' {
+        (Test-Path -LiteralPath $script:V307Corrupt.ResultPath -PathType Leaf)|Should Be $true
+    }
+    It '7. 손상 checkpoint 경로에 새 결과 파일을 쓰지 않는다' {
+        @([IO.Directory]::GetFiles($script:V307Corrupt.Fixture.Root))|Should Be $script:V307CorruptFilesBefore
+    }
+    It '8. 손상 checkpoint 전체 provider 호출 수는 unknown이다' {
+        $script:V307CorruptStart.paidProviderCalls|Should BeNullOrEmpty
+        $script:V307CorruptStart.paidProviderCallsVerified|Should Be $false
+    }
+    It '9. 새 ResultPath에서는 정상 Start가 가능하다' {
+        $script:V307NormalStart.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'
+    }
+    It '10. 정상 기존 checkpoint는 기존 execution으로 재진입한다' {
+        $script:V307NormalContinue.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'
+        @($script:V307NormalContinue.routerCommands).Count|Should Be 0
+    }
+
+    It '11. execution mismatch의 전체 provider 호출 수는 null이다' {
+        $script:V307ExecutionMismatchResult.paidProviderCalls|Should BeNullOrEmpty
+    }
+    It '12. generation mismatch의 전체 provider 호출 수는 null이다' {
+        $script:V307GenerationMismatchResult.paidProviderCalls|Should BeNullOrEmpty
+    }
+    It '13. context mismatch의 전체 provider 호출 수는 null이다' {
+        $script:V307ContextMismatchResult.paidProviderCalls|Should BeNullOrEmpty
+    }
+    It '14. execution identity missing의 전체 provider 호출 수는 null이다' {
+        $script:V307IdentityMissingResult.paidProviderCalls|Should BeNullOrEmpty
+    }
+    It '15. checkpoint 실패 네 경로는 전체 호출 수를 verified로 표시하지 않는다' {
+        foreach($result in @($script:V307ExecutionMismatchResult,$script:V307GenerationMismatchResult,
+            $script:V307ContextMismatchResult,$script:V307IdentityMissingResult)){
+            $result.paidProviderCallsVerified|Should Be $false
+            $result.paidProviderCallsReason|Should Be 'checkpoint-failure-before-provider-call-reconciliation'
+        }
+    }
+    It '16. checkpoint 실패 네 경로의 현재 invocation 신규 호출은 0회다' {
+        foreach($result in @($script:V307ExecutionMismatchResult,$script:V307GenerationMismatchResult,
+            $script:V307ContextMismatchResult,$script:V307IdentityMissingResult)){
+            $result.providerCallsThisInvocation|Should Be 0
+        }
+    }
+    It '17. checkpoint 실패 네 경로의 현재 invocation 0회는 verified다' {
+        foreach($result in @($script:V307ExecutionMismatchResult,$script:V307GenerationMismatchResult,
+            $script:V307ContextMismatchResult,$script:V307IdentityMissingResult)){
+            $result.providerCallsThisInvocationVerified|Should Be $true
+        }
+    }
+    It '18. LIVE_CANARY_NOT_EXECUTED는 전체 호출 0회 verified를 유지한다' {
+        $result=New-CanaryUsageResult
+        $result.paidProviderCalls|Should Be 0
+        $result.paidProviderCallsVerified|Should Be $true
+    }
+    It '19. 정상 execution invocation receipt 증명 방식은 유지된다' {
+        $script:V307NormalStart.paidProviderCalls|Should Be 0
+        $script:V307NormalStart.paidProviderCallsVerified|Should Be $true
+    }
+
+    It '20. success true와 exitCode 0 envelope는 valid다' {
+        $path=Join-Path $TestWorkRoot 'v307-envelope-20.json'
+        $result=New-V307EnvelopeEvidence -Path $path -Success $true -ExitCode 0
+        $result.valid|Should Be $true
+        $result.executionSuccessful|Should Be $true
+    }
+    It '21. success false와 exitCode 1 envelope는 invalid다' {
+        $path=Join-Path $TestWorkRoot 'v307-envelope-21.json'
+        (New-V307EnvelopeEvidence -Path $path -Success $false -ExitCode 1).reason|Should Be 'result_execution_unsuccessful'
+    }
+    It '22. success false와 exitCode 0 envelope는 invalid다' {
+        $path=Join-Path $TestWorkRoot 'v307-envelope-22.json'
+        (New-V307EnvelopeEvidence -Path $path -Success $false -ExitCode 0).reason|Should Be 'result_success_exit_mismatch'
+    }
+    It '23. success true와 exitCode 1 envelope는 invalid다' {
+        $path=Join-Path $TestWorkRoot 'v307-envelope-23.json'
+        (New-V307EnvelopeEvidence -Path $path -Success $true -ExitCode 1).reason|Should Be 'result_exit_code_nonzero'
+    }
+    It '24. 문자열 exitCode envelope는 invalid다' {
+        $path=Join-Path $TestWorkRoot 'v307-envelope-24.json'
+        (New-V307EnvelopeEvidence -Path $path -Success $true -ExitCode '0').reason|Should Be 'result_field_type_invalid'
+    }
+    It '25. 문자열 success envelope는 invalid다' {
+        $path=Join-Path $TestWorkRoot 'v307-envelope-25.json'
+        (New-V307EnvelopeEvidence -Path $path -Success 'true' -ExitCode 0).reason|Should Be 'result_field_type_invalid'
+    }
+    It '26. implementation 실패 envelope는 valid worker report가 있어도 invalid다' {
+        $script:V307ImplementationFailureResult.implementationEvidence.valid|Should Be $false
+        $script:V307ImplementationFailureResult.implementationEvidence.reason|Should Be 'result_execution_unsuccessful'
+    }
+    It '27. repair 실패 envelope는 valid repair receipt가 있어도 invalid다' {
+        $script:V307RepairFailureResult.repairEvidence.valid|Should Be $false
+        $script:V307RepairFailureResult.repairEvidence.reason|Should Be 'result_execution_unsuccessful'
+    }
+    It '28. repair 실패 evidence와 valid Opus evidence도 finalize를 호출하지 않는다' {
+        $script:V307RepairFailure.State.FinalizeCalls|Should Be 0
+        $script:V307RepairFailureResult.finalStatus|Should Be 'LIVE_CANARY_FAILED'
+    }
+    It '29. implementation 실패 evidence와 valid Sonnet evidence도 finalize를 호출하지 않는다' {
+        $script:V307ImplementationFailure.State.FinalizeCalls|Should Be 0
+        $script:V307ImplementationFailureResult.failureReason|Should Match '^authoritative_worker_evidence_invalid:'
+    }
+    It '30. authoritative evidence가 invalid면 mergeReady는 false다' {
+        $script:V307ImplementationFailureResult.mergeReady|Should Be $false
+        $script:V307RepairFailureResult.mergeReady|Should Be $false
+    }
+    It '31. 정상 implementation evidence의 Operation 2 finalize 성공은 유지된다' {
+        $script:V307Operation2SuccessResult.finalStatus|Should Be 'merge_ready'
+        $script:V307Operation2Success.State.FinalizeCalls|Should Be 1
+    }
+    It '32. 정상 repair evidence의 Operation 1 finalize 성공은 유지된다' {
+        $script:V307Operation1SuccessResult.finalStatus|Should Be 'merge_ready'
+        $script:V307Operation1Success.State.FinalizeCalls|Should Be 1
+    }
+}
+
 Describe 'v3.0.4 핵심 모듈 1차 분해' {
     It '1. common은 state-store와 worker-contract를 고정 순서로 로드한다' {
         $common = Get-Content -LiteralPath (Join-Path $ScriptsDir 'common.ps1') -Raw -Encoding UTF8

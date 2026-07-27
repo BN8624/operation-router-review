@@ -42,6 +42,9 @@ function New-CanaryUsageResult {
         usage = 'run-live-canary.ps1 -ConfirmPaidProviderCall -RepoPath <path> -Operation <1|2|3> -IssueNumber <number> [-Phase Start|Continue|Finalize] [-FinalReviewEvidencePath <path>] [-ResultPath <path>]'
         paidProviderCalls = 0
         paidProviderCallsVerified = $true
+        paidProviderCallsReason = 'canary-not-executed'
+        providerCallsThisInvocation = 0
+        providerCallsThisInvocationVerified = $true
         notExecutedReason = $Reason
     }
 }
@@ -51,19 +54,24 @@ function New-CanaryCheckpointFailure {
         [Parameter(Mandatory)][string]$Status,
         [Parameter(Mandatory)][string]$Reason,
         [AllowNull()]$Checkpoint,
-        [AllowNull()]$CurrentExecution
+        [AllowNull()]$CurrentExecution,
+        [AllowNull()][string]$CheckpointPath
     )
     return [pscustomobject][ordered]@{
         schemaVersion = 3
         finalStatus = $Status
         failureReason = $Reason
+        checkpointPath = $CheckpointPath
         executionId = Get-CanaryProperty -Object $Checkpoint -Name 'executionId'
         generation = Get-CanaryProperty -Object $Checkpoint -Name 'generation'
         currentExecutionId = Get-CanaryProperty -Object $CurrentExecution -Name 'executionId'
         currentGeneration = Get-CanaryProperty -Object $CurrentExecution -Name 'generation'
         routerCommands = @()
-        paidProviderCalls = 0
-        paidProviderCallsVerified = $true
+        paidProviderCalls = $null
+        paidProviderCallsVerified = $false
+        paidProviderCallsReason = 'checkpoint-failure-before-provider-call-reconciliation'
+        providerCallsThisInvocation = 0
+        providerCallsThisInvocationVerified = $true
     }
 }
 
@@ -72,6 +80,8 @@ function Test-CanaryResultEnvelope {
     $result = [pscustomobject][ordered]@{
         present = $false
         parsed = $false
+        contextValid = $false
+        executionSuccessful = $false
         valid = $false
         path = $null
         envelope = $null
@@ -120,6 +130,20 @@ function Test-CanaryResultEnvelope {
         $result.reason = 'result_field_type_invalid'
         return $result
     }
+    $result.contextValid = $true
+    if (-not [bool]$result.envelope.success -and [int]$result.envelope.exitCode -eq 0) {
+        $result.reason = 'result_success_exit_mismatch'
+        return $result
+    }
+    if (-not [bool]$result.envelope.success) {
+        $result.reason = 'result_execution_unsuccessful'
+        return $result
+    }
+    if ([int]$result.envelope.exitCode -ne 0) {
+        $result.reason = 'result_exit_code_nonzero'
+        return $result
+    }
+    $result.executionSuccessful = $true
     $result.valid = $true
     $result.reason = $null
     return $result
@@ -245,7 +269,10 @@ function Get-CanaryPhaseEvidence {
         executionId = Get-CanaryProperty -Object $ExecutionReceipt -Name 'executionId'
         generation = Get-CanaryProperty -Object $ExecutionReceipt -Name 'generation'
         resultEnvelope = $envelope.path
-        resultEnvelopePresent = [bool]$envelope.valid
+        resultEnvelopePresent = [bool]$envelope.present
+        resultEnvelopeParsed = [bool]$envelope.parsed
+        resultEnvelopeContextValid = [bool]$envelope.contextValid
+        executionSuccessful = [bool]$envelope.executionSuccessful
         resultEnvelopeReason = $envelope.reason
         worker = Get-CanaryProperty -Object $ExecutionReceipt -Name 'worker'
         workerReportValid = [bool]$worker.valid
@@ -584,8 +611,19 @@ function Invoke-LiveCanary {
     $currentHead = Get-CanaryGitValue -Path $resolvedRepo -Arguments @('rev-parse','HEAD')
     $startedAt = (Get-Date).ToUniversalTime().ToString('o')
     $checkpoint = $null
-    if (Test-Path -LiteralPath $ResultPath -PathType Leaf) {
-        try { $checkpoint = Read-JsonFile -Path $ResultPath } catch { $checkpoint = $null }
+    $checkpointExists = Test-Path -LiteralPath $ResultPath -PathType Leaf
+    $checkpointJsonInvalid = $false
+    if ($checkpointExists) {
+        try {
+            $checkpoint = Read-JsonFile -Path $ResultPath
+        } catch {
+            $checkpointJsonInvalid = $true
+        }
+    }
+    if ($checkpointJsonInvalid) {
+        return (New-CanaryCheckpointFailure -Status 'LIVE_CANARY_CHECKPOINT_INVALID' `
+            -Reason 'checkpoint_json_invalid' -Checkpoint $null -CurrentExecution $null `
+            -CheckpointPath $ResultPath)
     }
     if ($Phase -ne 'Start' -or $null -ne $checkpoint) {
         if ($null -eq $checkpoint) {
@@ -599,12 +637,14 @@ function Invoke-LiveCanary {
             [string](Get-CanaryProperty -Object $checkpointIdentity -Name 'ownerRepo') -cne [string]$repoIdentity.ownerRepo -or
             [string](Get-CanaryProperty -Object $checkpointIdentity -Name 'repoRootHash') -cne [string]$repoIdentity.repoRootHash) {
             return (New-CanaryCheckpointFailure -Status 'LIVE_CANARY_CHECKPOINT_CONTEXT_MISMATCH' `
-                -Reason 'checkpoint_schema_or_repository_context_mismatch' -Checkpoint $checkpoint -CurrentExecution $null)
+                -Reason 'checkpoint_schema_or_repository_context_mismatch' -Checkpoint $checkpoint `
+                -CurrentExecution $null -CheckpointPath $ResultPath)
         }
         if ([string]::IsNullOrWhiteSpace([string](Get-CanaryProperty -Object $checkpoint -Name 'executionId')) -or
             (Get-CanaryProperty -Object $checkpoint -Name 'generation') -isnot [int]) {
             return (New-CanaryCheckpointFailure -Status 'LIVE_CANARY_CHECKPOINT_EXECUTION_MISMATCH' `
-                -Reason 'checkpoint_execution_identity_missing' -Checkpoint $checkpoint -CurrentExecution $null)
+                -Reason 'checkpoint_execution_identity_missing' -Checkpoint $checkpoint `
+                -CurrentExecution $null -CheckpointPath $ResultPath)
         }
         $startedAt = [string](Get-CanaryProperty -Object $checkpoint -Name 'startedAtUtc' -Default $startedAt)
     }
@@ -689,7 +729,8 @@ function Invoke-LiveCanary {
     $execution = & $ExecutionReader $resolvedRepo $Operation $IssueNumber
     if ($Phase -eq 'Start' -and $null -eq $checkpoint -and $null -ne $execution -and -not $resultPathWasExplicit) {
         return (New-CanaryCheckpointFailure -Status 'LIVE_CANARY_CHECKPOINT_REQUIRED' `
-            -Reason 'existing_execution_requires_explicit_new_result_path' -Checkpoint $null -CurrentExecution $execution)
+            -Reason 'existing_execution_requires_explicit_new_result_path' -Checkpoint $null `
+            -CurrentExecution $execution -CheckpointPath $ResultPath)
     }
     if ($null -ne $checkpoint) {
         if ($null -eq $execution -or
@@ -700,7 +741,8 @@ function Invoke-LiveCanary {
             [string](Get-CanaryProperty -Object $execution -Name 'executionId') -cne [string]$checkpoint.executionId -or
             [int](Get-CanaryProperty -Object $execution -Name 'generation' -Default 0) -ne [int]$checkpoint.generation) {
             return (New-CanaryCheckpointFailure -Status 'LIVE_CANARY_CHECKPOINT_EXECUTION_MISMATCH' `
-                -Reason 'checkpoint_does_not_match_current_execution_receipt' -Checkpoint $checkpoint -CurrentExecution $execution)
+                -Reason 'checkpoint_does_not_match_current_execution_receipt' -Checkpoint $checkpoint `
+                -CurrentExecution $execution -CheckpointPath $ResultPath)
         }
     }
     $anchorExecutionId = if ($null -ne $execution) { [string]$execution.executionId } else { $null }
@@ -836,6 +878,9 @@ function Invoke-LiveCanary {
 
     $authoritativeReceipt = if ($null -ne $repairReceipt) { $repairReceipt } else { $runReceipt }
     $authoritativeEvidence = if ($null -ne $repairReceipt) { $repairEvidence } else { $implementationEvidence }
+    if ($null -eq $routerFailure -and $Operation -in @(1,2) -and -not [bool]$authoritativeEvidence.valid) {
+        $routerFailure = 'authoritative_worker_evidence_invalid:' + [string]$authoritativeEvidence.reason
+    }
     $workBranch = $null
     if ($null -ne $authoritativeReceipt) {
         $workflow = Get-ReceiptWorkflowContext -Receipt $authoritativeReceipt
@@ -974,6 +1019,8 @@ function Invoke-LiveCanary {
         paidProviderCallsVerified = [bool]$paidEvidence.verified
         paidProviderCallsReason = $paidEvidence.reason
         paidProviderCallsByPhase = $paidEvidence.byPhase
+        providerCallsThisInvocation = if ($commands.Count -eq 0) { 0 } else { $null }
+        providerCallsThisInvocationVerified = ($commands.Count -eq 0)
         startedAtUtc = $startedAt
         finishedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
         evidenceSources = [pscustomobject][ordered]@{
