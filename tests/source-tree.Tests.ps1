@@ -5418,12 +5418,21 @@ function New-CanaryHarnessFixture {
     $runReader = { param($repo,$op,$issue) return $state.Run }.GetNewClosure()
     $reviewReader = { param($repo,$op,$issue) return $state.Review }.GetNewClosure()
     $repairReader = { param($repo,$op,$issue) return $state.Repair }.GetNewClosure()
+    $ciProbeState = [pscustomobject]@{Status='success'}
     $checkLister = {
         param($repo,$prNumber,$headSha)
+        if($ciProbeState.Status -eq 'unavailable'){
+            return [pscustomobject]@{ok=$false;checks=@()}
+        }
+        $status=if($ciProbeState.Status -eq 'pending'){'in_progress'}else{'completed'}
+        $conclusion=if($ciProbeState.Status -eq 'failure'){'failure'}elseif($ciProbeState.Status -eq 'success'){'success'}else{$null}
         return [pscustomobject]@{ok=$true;checks=@(
-            (New-PrCiCheck -PrNumber $prNumber -HeadSha $headSha -Status completed -Conclusion success)
+            [pscustomobject]@{
+                event='pull_request';prNumber=$prNumber;headSha=$headSha;context='windows/source-tree'
+                status=$status;conclusion=$conclusion;id=1;updatedAt='2026-07-23T00:00:00Z'
+            }
         )}
-    }
+    }.GetNewClosure()
     $mergeProbeState=[pscustomobject]@{Enabled=$false;MergeCalls=0}
     $mergeProbe={
         param($repo,$prNumber,$headSha)
@@ -5435,7 +5444,7 @@ function New-CanaryHarnessFixture {
         WorkBranch=$workBranch;InitialHead=$head;ResultPath=(Join-Path $fixture.Root 'canary-result.json')
         RouterInvoker=$routerInvoker;ExecutionReader=$executionReader;RunReader=$runReader
         ReviewReader=$reviewReader;RepairReader=$repairReader;PrProbe=$probe;CheckLister=$checkLister
-        MergeProbe=$mergeProbe;MergeProbeState=$mergeProbeState
+        MergeProbe=$mergeProbe;MergeProbeState=$mergeProbeState;CiProbeState=$ciProbeState
     }
 }
 
@@ -6291,6 +6300,273 @@ Describe 'v3.0.7 손상 checkpoint와 성공 envelope 증거' {
         $script:V307Operation1SuccessResult.finalStatus|Should Be 'merge_ready'
         $script:V307Operation1Success.State.FinalizeCalls|Should Be 1
     }
+}
+
+function New-V308EnvelopeEvidence {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        $EnvelopeWorker='gpt',
+        $ReceiptWorker='gpt',
+        $Success=$true,
+        $ExitCode=0
+    )
+    $receipt=[pscustomobject]@{
+        executionId='v308-envelope';generation=1;worker=$ReceiptWorker;resultPath=$Path
+    }
+    Write-AtomicJsonFile -Path $Path -Object ([pscustomobject]@{
+        schemaVersion=1;executionId=$receipt.executionId;generation=1;worker=$EnvelopeWorker
+        success=$Success;exitCode=$ExitCode
+    })
+    return (Test-CanaryResultEnvelope -ExecutionReceipt $receipt)
+}
+
+Describe 'v3.0.8 schema v4와 Operation 3 증거 게이트' {
+    BeforeAll {
+        $script:V308Cleanup=New-Object System.Collections.ArrayList
+        $script:V308InvalidCases=@()
+        foreach($case in @(
+            @{Name='malformed';Raw='{"broken":'},
+            @{Name='null';Raw='null'},
+            @{Name='string';Raw='"checkpoint"'},
+            @{Name='number';Raw='123'},
+            @{Name='boolean';Raw='true'},
+            @{Name='empty-array';Raw='[]'},
+            @{Name='object-array';Raw='[{"schemaVersion":3}]'},
+            @{Name='empty';Raw=''}
+        )){
+            $fixture=New-CanaryHarnessFixture -Operation 3 -NextAction report
+            [void]$script:V308Cleanup.Add($fixture)
+            [IO.File]::WriteAllText($fixture.ResultPath,[string]$case.Raw)
+            $before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture.ResultPath))
+            $files=@([IO.Directory]::GetFiles($fixture.Fixture.Root))
+            $result=Invoke-TestCanary -Fixture $fixture -Phase Start
+            $script:V308InvalidCases+=,[pscustomobject]@{
+                Name=$case.Name;Fixture=$fixture;Before=$before;Files=$files;Result=$result
+            }
+        }
+        $script:V308MalformedContinue=Invoke-TestCanary -Fixture $script:V308InvalidCases[0].Fixture -Phase Continue
+        $script:V308MalformedFinalize=Invoke-TestCanary -Fixture $script:V308InvalidCases[0].Fixture -Phase Finalize
+
+        $script:V308Normal=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Normal)
+        $script:V308NormalStart=Invoke-TestCanary -Fixture $script:V308Normal
+        $script:V308NormalContinue=Invoke-TestCanary -Fixture $script:V308Normal -Phase Continue
+
+        $script:V308Missing=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Missing)
+        $script:V308MissingContinue=Invoke-LiveCanary -ConfirmPaidProviderCall -RepoPath $script:V308Missing.Fixture.Repo `
+            -Operation 3 -IssueNumber $script:V308Missing.IssueNumber -Phase Continue `
+            -ResultPath $script:V308Missing.ResultPath
+        $script:V308MissingFinalize=Invoke-LiveCanary -ConfirmPaidProviderCall -RepoPath $script:V308Missing.Fixture.Repo `
+            -Operation 3 -IssueNumber $script:V308Missing.IssueNumber -Phase Finalize `
+            -ResultPath $script:V308Missing.ResultPath
+
+        $script:V308ImplementationWorker=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308ImplementationWorker)
+        [void](Invoke-TestCanary -Fixture $script:V308ImplementationWorker)
+        $implementationEnvelope=Read-JsonFile $script:V308ImplementationWorker.State.Execution.resultPath
+        $implementationEnvelope.worker='other-worker'
+        Write-AtomicJsonFile $script:V308ImplementationWorker.State.Execution.resultPath $implementationEnvelope
+        $script:V308ImplementationWorkerResult=Invoke-TestCanary -Fixture $script:V308ImplementationWorker -Phase Continue
+
+        $script:V308RepairWorker=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        [void]$script:V308Cleanup.Add($script:V308RepairWorker)
+        [void](Invoke-TestCanary -Fixture $script:V308RepairWorker)
+        $repairEnvelope=Read-JsonFile $script:V308RepairWorker.State.Repair.resultPath
+        $repairEnvelope.worker='other-worker'
+        Write-AtomicJsonFile $script:V308RepairWorker.State.Repair.resultPath $repairEnvelope
+        $script:V308RepairWorkerResult=Invoke-TestCanary -Fixture $script:V308RepairWorker -Phase Continue
+
+        $script:V308Op3Normal=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3Normal)
+        $script:V308Op3NormalResult=Invoke-TestCanary -Fixture $script:V308Op3Normal
+
+        $script:V308Op3FailureEnvelope=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3FailureEnvelope)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3FailureEnvelope)
+        $failureEnvelope=Read-JsonFile $script:V308Op3FailureEnvelope.State.Execution.resultPath
+        $failureEnvelope.success=$false;$failureEnvelope.exitCode=1
+        Write-AtomicJsonFile $script:V308Op3FailureEnvelope.State.Execution.resultPath $failureEnvelope
+        $script:V308Op3FailureEnvelopeResult=Invoke-TestCanary -Fixture $script:V308Op3FailureEnvelope -Phase Continue
+
+        $script:V308Op3WorkerReport=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3WorkerReport)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3WorkerReport)
+        $script:V308Op3WorkerReport.State.Run.workerReportedVerification=$null
+        $script:V308Op3WorkerReportResult=Invoke-TestCanary -Fixture $script:V308Op3WorkerReport -Phase Continue
+
+        $script:V308Op3Local=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3Local)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3Local)
+        $script:V308Op3Local.State.Run.localVerificationComplete=$false
+        $script:V308Op3LocalResult=Invoke-TestCanary -Fixture $script:V308Op3Local -Phase Continue
+
+        $script:V308Op3Remaining=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3Remaining)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3Remaining)
+        $script:V308Op3Remaining.State.Run.remainingProblems=@('remaining')
+        $script:V308Op3RemainingResult=Invoke-TestCanary -Fixture $script:V308Op3Remaining -Phase Continue
+
+        $script:V308Op3Head=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3Head)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3Head)
+        $script:V308Op3Head.State.Run.finalHead=('f'*40)
+        $script:V308Op3HeadResult=Invoke-TestCanary -Fixture $script:V308Op3Head -Phase Continue
+
+        $script:V308Op3Pr=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3Pr)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3Pr)
+        $script:V308Op3Pr.PrProbe.State.Items[0].baseBranch='other'
+        $script:V308Op3PrResult=Invoke-TestCanary -Fixture $script:V308Op3Pr -Phase Continue
+
+        $script:V308Op3PrHead=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3PrHead)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3PrHead)
+        $script:V308Op3PrHead.PrProbe.State.AutoAdvanceHead=$false
+        $script:V308Op3PrHead.PrProbe.State.Items[0].headSha=('e'*40)
+        $script:V308Op3PrHeadResult=Invoke-TestCanary -Fixture $script:V308Op3PrHead -Phase Continue
+
+        $script:V308Op3Remote=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3Remote)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3Remote)
+        Push-Location $script:V308Op3Remote.Fixture.Repo
+        try{
+            'local-only'|Set-Content local-only.txt;git add .;git commit -q -m 'local only'
+            $localHead=(git rev-parse HEAD).Trim()
+        }finally{Pop-Location}
+        $script:V308Op3Remote.State.Execution.finalHead=$localHead
+        $script:V308Op3Remote.State.Run.finalHead=$localHead
+        $script:V308Op3Remote.State.Run.workflow.finalHead=$localHead
+        $script:V308Op3Remote.PrProbe.State.AutoAdvanceHead=$false
+        $script:V308Op3Remote.PrProbe.State.Items[0].headSha=$localHead
+        $script:V308Op3RemoteResult=Invoke-TestCanary -Fixture $script:V308Op3Remote -Phase Continue
+
+        $script:V308Op3Draft=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3Draft)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3Draft)
+        $script:V308Op3Draft.PrProbe.State.Items[0].draft=$false
+        $script:V308Op3DraftResult=Invoke-TestCanary -Fixture $script:V308Op3Draft -Phase Continue
+
+        $script:V308Op3Merged=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Op3Merged)
+        [void](Invoke-TestCanary -Fixture $script:V308Op3Merged)
+        $script:V308Op3Merged.PrProbe.State.Items[0].merged=$true
+        $script:V308Op3MergedResult=Invoke-TestCanary -Fixture $script:V308Op3Merged -Phase Continue
+
+        $script:V308CiResults=@{}
+        foreach($ci in @('pending','unavailable','failure')){
+            $fixture=New-CanaryHarnessFixture -Operation 3 -NextAction report
+            [void]$script:V308Cleanup.Add($fixture)
+            $fixture.CiProbeState.Status=$ci
+            $script:V308CiResults[$ci]=Invoke-TestCanary -Fixture $fixture
+        }
+
+        $script:V308WorkflowRemoved=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308WorkflowRemoved)
+        [void](Invoke-TestCanary -Fixture $script:V308WorkflowRemoved)
+        Push-Location $script:V308WorkflowRemoved.Fixture.Repo
+        try{
+            git rm -q '.github/workflows/ci.yml'
+            git commit -q -m 'remove required workflow'
+            git push -q
+            $workflowRemovedHead=(git rev-parse HEAD).Trim()
+        }finally{Pop-Location}
+        $script:V308WorkflowRemoved.State.Execution.finalHead=$workflowRemovedHead
+        $script:V308WorkflowRemoved.State.Run.finalHead=$workflowRemovedHead
+        $script:V308WorkflowRemoved.State.Run.workflow.finalHead=$workflowRemovedHead
+        $script:V308WorkflowRemoved.PrProbe.State.AutoAdvanceHead=$false
+        $script:V308WorkflowRemoved.PrProbe.State.Items[0].headSha=$workflowRemovedHead
+        $script:V308WorkflowRemovedResult=Invoke-TestCanary -Fixture $script:V308WorkflowRemoved -Phase Continue
+
+        $script:V308Merge=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Merge)
+        $script:V308Merge.MergeProbeState.Enabled=$true;$script:V308Merge.MergeProbeState.MergeCalls=1
+        $script:V308MergeResult=Invoke-TestCanary -Fixture $script:V308Merge -UseMergeMutationProbe
+
+        $script:V308Direct=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        [void]$script:V308Cleanup.Add($script:V308Direct)
+        $script:V308Direct.State.Run.workflow.mode='direct-main'
+        $script:V308DirectResult=Invoke-TestCanary -Fixture $script:V308Direct
+
+        $script:V308Op2=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review
+        [void]$script:V308Cleanup.Add($script:V308Op2)
+        [void](Invoke-TestCanary -Fixture $script:V308Op2)
+        $op2Review=Write-CanaryReviewEvidence -Fixture $script:V308Op2
+        $script:V308Op2Result=Invoke-TestCanary -Fixture $script:V308Op2 -Phase Finalize -FinalReviewEvidencePath $op2Review
+        $script:V308Op1=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        [void]$script:V308Cleanup.Add($script:V308Op1)
+        [void](Invoke-TestCanary -Fixture $script:V308Op1)
+        $op1Review=Write-CanaryReviewEvidence -Fixture $script:V308Op1
+        $script:V308Op1Result=Invoke-TestCanary -Fixture $script:V308Op1 -Phase Finalize -FinalReviewEvidencePath $op1Review
+    }
+    AfterAll {
+        foreach($fixture in @($script:V308Cleanup)){if($null -ne $fixture){Remove-PrFakeRepo -Fixture $fixture.Fixture}}
+        Get-ChildItem -LiteralPath $TestWorkRoot -File -Filter 'v308-envelope-*.json' -ErrorAction SilentlyContinue|Remove-Item -Force
+    }
+
+    It '1. malformed JSON Start를 거부한다' {$script:V308InvalidCases[0].Result.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_INVALID'}
+    It '2. malformed JSON Continue를 거부한다' {$script:V308MalformedContinue.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_INVALID'}
+    It '3. malformed JSON Finalize를 거부한다' {$script:V308MalformedFinalize.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_INVALID'}
+    It '4. JSON null Start를 거부한다' {$script:V308InvalidCases[1].Result.failureReason|Should Be 'checkpoint_json_null'}
+    It '5. JSON null Continue를 거부한다' {(Invoke-TestCanary -Fixture $script:V308InvalidCases[1].Fixture -Phase Continue).failureReason|Should Be 'checkpoint_json_null'}
+    It '6. JSON 문자열 Start를 거부한다' {$script:V308InvalidCases[2].Result.failureReason|Should Be 'checkpoint_json_root_not_object'}
+    It '7. JSON 숫자 Start를 거부한다' {$script:V308InvalidCases[3].Result.failureReason|Should Be 'checkpoint_json_root_not_object'}
+    It '8. JSON Boolean Start를 거부한다' {$script:V308InvalidCases[4].Result.failureReason|Should Be 'checkpoint_json_root_not_object'}
+    It '9. JSON 빈 배열 Start를 거부한다' {$script:V308InvalidCases[5].Result.failureReason|Should Be 'checkpoint_json_root_not_object'}
+    It '10. JSON 객체 배열 Start를 거부한다' {$script:V308InvalidCases[6].Result.failureReason|Should Be 'checkpoint_json_root_not_object'}
+    It '11. 빈 파일 Start를 거부한다' {$script:V308InvalidCases[7].Result.failureReason|Should Be 'checkpoint_json_invalid'}
+    It '12. invalid checkpoint bytes는 모두 불변이다' {foreach($c in $script:V308InvalidCases){[Convert]::ToBase64String([IO.File]::ReadAllBytes($c.Fixture.ResultPath))|Should Be $c.Before}}
+    It '13. invalid checkpoint 파일은 모두 존재한다' {foreach($c in $script:V308InvalidCases){Test-Path -LiteralPath $c.Fixture.ResultPath|Should Be $true}}
+    It '14. invalid checkpoint router 명령은 모두 0회다' {foreach($c in $script:V308InvalidCases){@($c.Result.routerCommands).Count|Should Be 0}}
+    It '15. invalid checkpoint 경로에 신규 파일이 없다' {foreach($c in $script:V308InvalidCases){@([IO.Directory]::GetFiles($c.Fixture.Fixture.Root))|Should Be $c.Files}}
+    It '16. 정상 object checkpoint 재진입을 유지한다' {$script:V308NormalContinue.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '17. Continue checkpoint 누락은 CHECKPOINT_REQUIRED다' {$script:V308MissingContinue.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_REQUIRED'}
+    It '18. Finalize checkpoint 누락도 CHECKPOINT_REQUIRED다' {$script:V308MissingFinalize.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_REQUIRED'}
+    It '19. 누락 checkpoint 전체 provider 호출 수는 null이다' {$script:V308MissingContinue.paidProviderCalls|Should BeNullOrEmpty}
+    It '20. 누락 checkpoint 전체 호출은 unverified다' {$script:V308MissingContinue.paidProviderCallsVerified|Should Be $false}
+    It '21. 누락 checkpoint 현재 invocation 호출은 0이다' {$script:V308MissingContinue.providerCallsThisInvocation|Should Be 0}
+    It '22. 누락 checkpoint 현재 invocation 호출은 verified다' {$script:V308MissingContinue.providerCallsThisInvocationVerified|Should Be $true}
+    It '23. 모든 invalid root는 동일 호출 증거 계약이다' {foreach($c in $script:V308InvalidCases){$c.Result.paidProviderCalls|Should BeNullOrEmpty;$c.Result.providerCallsThisInvocation|Should Be 0}}
+    It '24. 실제 미실행 usage는 전체 호출 0 verified다' {$r=New-CanaryUsageResult;$r.paidProviderCalls|Should Be 0;$r.paidProviderCallsVerified|Should Be $true}
+
+    It '25. implementation envelope worker 일치는 valid다' {$p=Join-Path $TestWorkRoot 'v308-envelope-25.json';(New-V308EnvelopeEvidence $p).valid|Should Be $true}
+    It '26. implementation envelope worker 불일치는 invalid다' {$p=Join-Path $TestWorkRoot 'v308-envelope-26.json';(New-V308EnvelopeEvidence $p other gpt).reason|Should Be 'result_worker_mismatch'}
+    It '27. repair envelope worker 일치는 valid다' {$script:V308Op1Result.repairEvidence.resultEnvelopeWorkerValid|Should Be $true}
+    It '28. repair envelope worker 불일치는 invalid다' {$script:V308RepairWorkerResult.repairEvidence.reason|Should Be 'result_worker_mismatch'}
+    It '29. worker 대소문자 불일치는 invalid다' {$p=Join-Path $TestWorkRoot 'v308-envelope-29.json';(New-V308EnvelopeEvidence $p GPT gpt).reason|Should Be 'result_worker_mismatch'}
+    It '30. worker 빈 문자열은 invalid다' {$p=Join-Path $TestWorkRoot 'v308-envelope-30.json';(New-V308EnvelopeEvidence $p '').valid|Should Be $false}
+    It '31. worker 숫자나 Boolean은 invalid다' {foreach($w in @(7,$true)){$p=Join-Path $TestWorkRoot ('v308-envelope-31-'+[guid]::NewGuid().ToString('N')+'.json');(New-V308EnvelopeEvidence $p $w).reason|Should Be 'result_field_type_invalid'}}
+    It '32. worker mismatch는 valid report로 우회되지 않는다' {$script:V308ImplementationWorkerResult.implementationEvidence.workerReportValid|Should Be $false}
+
+    It '33. 정상 evidence PR CI success는 Operation 3 COMPLETE다' {$script:V308Op3NormalResult.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '34. 실패 envelope는 Operation 3 COMPLETE가 아니다' {$script:V308Op3FailureEnvelopeResult.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '35. invalid worker report는 Operation 3 COMPLETE가 아니다' {$script:V308Op3WorkerReportResult.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '36. local verification false는 Operation 3 COMPLETE가 아니다' {$script:V308Op3LocalResult.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '37. remaining problems는 Operation 3 COMPLETE가 아니다' {$script:V308Op3RemainingResult.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '38. final HEAD mismatch는 Operation 3 COMPLETE가 아니다' {$script:V308Op3HeadResult.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '39. PR context mismatch는 Operation 3 COMPLETE가 아니다' {$script:V308Op3PrResult.failureReason|Should Be 'operation3_pr_context_invalid'}
+    It '40. PR head mismatch는 Operation 3 COMPLETE가 아니다' {$script:V308Op3PrHeadResult.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '41. remote branch head mismatch는 Operation 3 COMPLETE가 아니다' {$script:V308Op3RemoteResult.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '42. non-Draft PR은 Operation 3 COMPLETE가 아니다' {$script:V308Op3DraftResult.failureReason|Should Be 'operation3_pr_not_draft'}
+    It '43. merged PR은 Operation 3 COMPLETE가 아니다' {$script:V308Op3MergedResult.failureReason|Should Be 'operation3_pr_merged'}
+    It '44. CI pending은 Operation 3 COMPLETE가 아니다' {$script:V308CiResults.pending.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '45. CI unavailable은 Operation 3 COMPLETE가 아니다' {$script:V308CiResults.unavailable.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '46. CI failure는 Operation 3 COMPLETE가 아니다' {$script:V308CiResults.failure.finalStatus|Should Not Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '47. required workflow removed는 Operation 3 COMPLETE가 아니다' {$script:V308WorkflowRemovedResult.finalStatus|Should Be 'LIVE_CANARY_FAILED';$script:V308WorkflowRemovedResult.failureReason|Should Be 'operation3_pr_ci_required_workflow_removed'}
+    It '48. automatic merge 호출 관측은 실패다' {$script:V308MergeResult.failureReason|Should Be 'automatic_merge_invocation_observed'}
+    It '49. direct-main 정상 evidence 성공 경로는 유지된다' {$script:V308DirectResult.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'}
+    It '50. Operation 1과 2 정상 finalize 회귀를 유지한다' {$script:V308Op1Result.finalStatus|Should Be 'merge_ready';$script:V308Op2Result.finalStatus|Should Be 'merge_ready'}
+
+    It '51. 신규 canary 결과 schemaVersion은 4다' {$script:V308Op3NormalResult.schemaVersion|Should Be 4}
+    It '52. checkpoint schemaVersion 3 재진입을 유지한다' {$script:V308NormalContinue.checkpointSchemaVersion|Should Be 3}
+    It '53. file present와 valid를 분리한다' {$script:V308Op3FailureEnvelopeResult.resultEnvelopeFilePresent|Should Be $true;$script:V308Op3FailureEnvelopeResult.resultEnvelopeValid|Should Be $false}
+    It '54. parsed와 valid를 분리한다' {$script:V308Op3FailureEnvelopeResult.resultEnvelopeParsed|Should Be $true;$script:V308Op3FailureEnvelopeResult.resultEnvelopeValid|Should Be $false}
+    It '55. context valid와 execution success를 분리한다' {$script:V308Op3FailureEnvelopeResult.resultEnvelopeContextValid|Should Be $true;$script:V308Op3FailureEnvelopeResult.resultExecutionSuccessful|Should Be $false}
+    It '56. worker valid 필드는 worker identity를 정확히 반영한다' {$script:V308Op3NormalResult.resultEnvelopeWorkerValid|Should Be $true;$script:V308ImplementationWorkerResult.resultEnvelopeWorkerValid|Should Be $false}
+    It '57. invalid envelope의 resultEnvelopeValid는 false다' {$script:V308ImplementationWorkerResult.resultEnvelopeValid|Should Be $false}
+    It '58. 정상 envelope의 신규 세부 필드는 모두 true다' {foreach($n in @('resultEnvelopeFilePresent','resultEnvelopeParsed','resultEnvelopeContextValid','resultEnvelopeWorkerValid','resultExecutionSuccessful','resultEnvelopeValid')){[bool]$script:V308Op3NormalResult.$n|Should Be $true}}
+    It '59. 공식 미실행 결과도 schema 4다' {(New-CanaryUsageResult).schemaVersion|Should Be 4}
+    It '60. source는 checkpoint와 result schema 상수를 분리한다' {$s=Get-Content -Raw -Encoding UTF8 (Join-Path $ScriptsDir 'run-live-canary.ps1');$s|Should Match 'CanaryCheckpointSchemaVersion = 3';$s|Should Match 'CanaryResultSchemaVersion = 4'}
 }
 
 Describe 'v3.0.4 핵심 모듈 1차 분해' {
