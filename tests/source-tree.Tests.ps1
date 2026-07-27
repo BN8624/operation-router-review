@@ -31,6 +31,8 @@ $SkillsRoot = [System.IO.Path]::GetFullPath($RequestedSkillsPath).TrimEnd('\','/
 . (Join-Path $ScriptsDir 'invoke-gpt.ps1')
 . (Join-Path $ScriptsDir 'postflight.ps1')
 . (Join-Path $ScriptsDir 'run-operation.ps1')
+. (Join-Path $ScriptsDir 'run-live-canary.ps1')
+. (Join-Path $ScriptsDir 'sync-verification-metadata.ps1')
 
 $actualUsagePath = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.claude\operation-router\state\usage-state.json'))
 $actualLogRoot = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.claude\operation-router\logs')).TrimEnd('\','/')
@@ -3434,9 +3436,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v3.0.4를 현재 버전으로 기록한다' {
+    It '12. README는 v3.0.5를 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v3\.0\.4\)'
+        $readme | Should Match '^# operation-router \(v3\.0\.5\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {
@@ -5238,44 +5240,492 @@ Describe 'v3.0.3. abandon-claude mutation lock 안전 해제 (F4)' {
     }
 }
 
-Describe 'v3.0.4 live canary 안전 절차' {
-    It '1. 명시적 유료 호출 승인이나 필수 인수가 없으면 실행하지 않고 사용법만 반환한다' {
-        $resultPath = Join-Path $TestWorkRoot 'forbidden-live-canary-result.json'
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptsDir 'run-live-canary.ps1') `
-            -RepoPath $RouterRoot -Operation 3 -IssueNumber 6 -ResultPath $resultPath 2>&1 | Out-String
-        $LASTEXITCODE | Should Be 2
-        $output | Should Match 'LIVE_CANARY_NOT_EXECUTED'
-        $output | Should Match 'ConfirmPaidProviderCall'
-        (Test-Path -LiteralPath $resultPath) | Should Be $false
+function New-CanaryHarnessFixture {
+    param(
+        [Parameter(Mandatory)][ValidateSet(1,2,3)][int]$Operation,
+        [Parameter(Mandatory)][string]$NextAction,
+        [ValidateSet('PASS','REPAIR_REQUIRED')][string]$ReviewVerdict = 'PASS',
+        [string]$FinalizeStatus = 'merge_ready'
+    )
+    Set-TestGitWorkflow -Mode pull-request
+    $fixture = New-PrFakeRepo -WithWorkflow
+    $issueNumber = 900 + $Operation + (Get-Random -Minimum 10 -Maximum 80)
+    $workBranch = "operation-router/issue-$issueNumber"
+    Push-Location $fixture.Repo
+    try {
+        git switch -q -c $workBranch
+        "canary-$Operation" | Set-Content -LiteralPath "canary-$Operation.txt" -Encoding UTF8
+        git add .
+        git commit -q -m "canary op$Operation"
+        git push -q -u origin HEAD
+        $head = (git rev-parse HEAD).Trim()
+        $baseHead = (git rev-parse refs/heads/main).Trim()
+    } finally { Pop-Location }
+    $identity = Get-RepoIdentity -RepoPath $fixture.Repo
+    $executionId = [guid]::NewGuid().ToString('N')
+    $artifactRoot = Join-Path $fixture.Root 'artifacts'
+    $artifactPath = Join-Path $artifactRoot ("op$Operation-issue$issueNumber-g1-$executionId")
+    New-Item -ItemType Directory -Path $artifactPath -Force | Out-Null
+    $resultPath = Join-Path $artifactPath 'result.json'
+    $invocationPath = Join-Path $artifactPath 'invocation.json'
+    Write-AtomicJsonFile -Path $invocationPath -Object ([pscustomobject]@{
+        schemaVersion=1;executionId=$executionId;generation=1;filePath='provider-cli'
+        argumentList=@('fixture');stdinMode='file';promptPath=(Join-Path $artifactPath 'prompt.txt')
+    })
+    $workflow = [pscustomobject]@{
+        mode='pull-request';baseBranch='main';baseHead=$baseHead;baseLocalHead=$baseHead;baseRemoteHead=$baseHead
+        workBranch=$workBranch;remoteWorkBranch="origin/$workBranch";workStartHead=$baseHead;workRemoteHeadAtStart=$null
+        finalHead=$head;initialUpstream="origin/$workBranch";baseAdvanced=$false
+        createDraftPullRequest=$true;autoMerge=$false;requireCiWhenWorkflowPresent=$true
+        baseWorkflow=(Get-GitWorkflowSnapshot -RepoPath $fixture.Repo -Ref $baseHead)
+        headWorkflow=(Get-GitWorkflowSnapshot -RepoPath $fixture.Repo -Ref $head)
+        pr=$null
     }
-
-    It '2. 미실행 정본 결과는 필수 스키마와 정확한 미실행 이유를 기록한다' {
-        $path = Join-Path $RouterRoot 'evidence\live-canary-result.json'
-        $result = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-        $required = @(
-            'schemaVersion','routerVersion','routerHead','targetRepositoryIdentity','operation','issueNumber',
-            'worker','model','effort','startHead','finalHead','executionId','generation',
-            'resultEnvelopePresent','workerReportValid','localVerification','branch','draftPrNumber',
-            'draftPrUrl','prHeadSha','ciStatus','finalStatus','mergeReady','draftRetained',
-            'automaticMergeCalled','paidProviderCalls','startedAtUtc','finishedAtUtc'
-        )
-        foreach ($field in $required) { ($result.PSObject.Properties.Name -contains $field) | Should Be $true }
-        $result.finalStatus | Should Be 'LIVE_CANARY_NOT_EXECUTED'
-        $result.paidProviderCalls | Should Be 0
-        [string]::IsNullOrWhiteSpace([string]$result.notExecutedReason) | Should Be $false
+    $runReceipt = [pscustomobject]@{
+        schemaVersion=2;operation=$Operation;issueNumber=$issueNumber
+        ownerRepo=$identity.ownerRepo;repoRoot=$identity.repoRoot;canonicalRepoRoot=$identity.canonicalRepoRoot
+        repoRootHash=$identity.repoRootHash;namespaceVersion=$identity.namespaceVersion
+        startHead=$baseHead;finalHead=$head;worker='gpt';model='fixture-model';effort='low';status='pr_opened'
+        resultEnvelopePresent=$true;interrupted=$false;localVerificationComplete=$true
+        verificationProvenance='valid_worker_result_envelope';workerReportedVerification='fixture verification passed'
+        workerRemainingProblems=@();remainingProblems=@();artifactSanitizationStatus='completed';artifactRetentionStatus='completed'
+        workflow=$workflow
     }
-
-    It '3. 결과 스키마는 prompt secret raw stdout stderr 환경 전체를 저장하지 않는다' {
-        $result = Get-Content -LiteralPath (Join-Path $RouterRoot 'evidence\live-canary-result.json') -Raw -Encoding UTF8 |
-            ConvertFrom-Json
-        foreach ($forbidden in @('prompt','secret','rawStdout','rawStderr','environment')) {
-            ($result.PSObject.Properties.Name -contains $forbidden) | Should Be $false
+    $executionTemplate = [pscustomobject]@{
+        schemaVersion=2;operation=$Operation;issueNumber=$issueNumber
+        ownerRepo=$identity.ownerRepo;repoRoot=$identity.repoRoot;canonicalRepoRoot=$identity.canonicalRepoRoot
+        repoRootHash=$identity.repoRootHash;namespaceVersion=$identity.namespaceVersion
+        executionId=$executionId;generation=1;worker='gpt';model='fixture-model';effort='low'
+        status='worker_running';resultPath=$resultPath;artifactRoot=$artifactRoot;invocationPath=$invocationPath
+        finalHead=$null;localVerificationComplete=$false;verificationProvenance='worker_result_pending'
+        workerReportedVerification=$null;remainingProblems=@()
+    }
+    $probe = New-TestPullRequestProbe
+    $probe.State.Items = @([pscustomobject]@{
+        number=42;url='https://example.invalid/pr/42';state='OPEN';draft=$true
+        baseBranch='main';headBranch=$workBranch;headSha=$head;headRepository=$identity.ownerRepo;merged=$false
+    })
+    $state = [pscustomobject]@{
+        Execution=$null;Run=$runReceipt;Review=$null;Repair=$null
+        RunCalls=0;WatchCalls=0;ReviewCalls=0;RepairCalls=0;FinalizeCalls=0
+        NextAction=$NextAction;ReviewVerdict=$ReviewVerdict;FinalizeStatus=$FinalizeStatus
+    }
+    $routerInvoker = {
+        param($command,$context)
+        switch ($command) {
+            'run' {
+                $state.RunCalls++
+                $state.Execution = $executionTemplate
+                return [pscustomobject]@{status='worker_running';executionId=$executionId;generation=1}
+            }
+            'watch' {
+                $state.WatchCalls++
+                $envelope=[pscustomobject]@{
+                    schemaVersion=1;executionId=$executionId;generation=1;worker='gpt'
+                    exitCode=0;success=$true
+                }
+                [System.IO.File]::WriteAllText(
+                    $resultPath,
+                    ($envelope|ConvertTo-Json -Depth 8),
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+                $state.Execution.status='pr_opened'
+                $state.Execution.finalHead=$state.Run.finalHead
+                $state.Execution.localVerificationComplete=$true
+                $state.Execution.verificationProvenance='valid_worker_result_envelope'
+                $state.Execution.workerReportedVerification='fixture verification passed'
+                Add-Member -InputObject $state.Execution -NotePropertyName nextAction -NotePropertyValue $state.NextAction -Force
+                return [pscustomobject]@{
+                    status='pr_opened';terminal=$true;nextAction=$state.NextAction
+                    executionId=$executionId;generation=1
+                }
+            }
+            'review' {
+                $state.ReviewCalls++
+                $state.Review = [pscustomobject]@{
+                    schemaVersion=2;operation=1;issueNumber=$issueNumber;verdict=$state.ReviewVerdict
+                    postReviewHead=$state.Run.finalHead;originalWorker='gpt';changedFiles=@('canary-1.txt')
+                    reviewedFiles=@('canary-1.txt');truncatedFiles=@();coverageComplete=$true;workflow=$state.Run.workflow
+                }
+                return [pscustomobject]@{status='review_completed';verdict=$state.ReviewVerdict}
+            }
+            'repair' {
+                $state.RepairCalls++
+                if ($null -eq $state.Repair) {
+                    Push-Location $fixture.Repo
+                    try {
+                        "repair" | Set-Content -LiteralPath "repair-$issueNumber.txt" -Encoding UTF8
+                        git add .
+                        git commit -q -m 'canary repair'
+                        git push -q
+                        $repairHead=(git rev-parse HEAD).Trim()
+                    } finally { Pop-Location }
+                    $repairWorkflow = ($state.Run.workflow|ConvertTo-Json -Depth 20|ConvertFrom-Json)
+                    $repairWorkflow.finalHead=$repairHead
+                    $state.Repair = [pscustomobject]@{
+                        schemaVersion=2;operation=1;issueNumber=$issueNumber;startHead=$state.Run.finalHead
+                        finalHead=$repairHead;worker='gpt';model='fixture-model';effort='high'
+                        status='repair_completed_review_pending';resultEnvelopePresent=$true;interrupted=$false
+                        localVerificationComplete=$true;verificationProvenance='valid_repair_worker_result'
+                        workerReportedVerification='repair fixture verification passed';workerRemainingProblems=@()
+                        remainingProblems=@();artifactSanitizationStatus='completed';artifactRetentionStatus='completed'
+                        workflow=$repairWorkflow
+                    }
+                }
+                return [pscustomobject]@{status='repair_completed_review_pending';finalHead=$state.Repair.finalHead}
+            }
+            'finalize' {
+                $state.FinalizeCalls++
+                return [pscustomobject]@{
+                    status=$state.FinalizeStatus;mergeReady=($state.FinalizeStatus -eq 'merge_ready')
+                    prNumber=42;prUrl='https://example.invalid/pr/42';prDraft=$true
+                }
+            }
         }
-        $source = Get-Content -LiteralPath (Join-Path $ScriptsDir 'run-live-canary.ps1') -Raw -Encoding UTF8
-        $guardIndex = $source.IndexOf('if (-not $ConfirmPaidProviderCall')
-        $invokeIndex = $source.IndexOf('& powershell.exe')
-        ($guardIndex -ge 0) | Should Be $true
-        ($invokeIndex -gt $guardIndex) | Should Be $true
+    }.GetNewClosure()
+    $executionReader = { param($repo,$op,$issue) return $state.Execution }.GetNewClosure()
+    $runReader = { param($repo,$op,$issue) return $state.Run }.GetNewClosure()
+    $reviewReader = { param($repo,$op,$issue) return $state.Review }.GetNewClosure()
+    $repairReader = { param($repo,$op,$issue) return $state.Repair }.GetNewClosure()
+    $checkLister = {
+        param($repo,$prNumber,$headSha)
+        return [pscustomobject]@{ok=$true;checks=@(
+            (New-PrCiCheck -PrNumber $prNumber -HeadSha $headSha -Status completed -Conclusion success)
+        )}
+    }
+    return [pscustomobject]@{
+        Fixture=$fixture;State=$state;Operation=$Operation;IssueNumber=$issueNumber
+        WorkBranch=$workBranch;InitialHead=$head;ResultPath=(Join-Path $fixture.Root 'canary-result.json')
+        RouterInvoker=$routerInvoker;ExecutionReader=$executionReader;RunReader=$runReader
+        ReviewReader=$reviewReader;RepairReader=$repairReader;PrProbe=$probe;CheckLister=$checkLister
+    }
+}
+
+function Invoke-TestCanary {
+    param(
+        [Parameter(Mandatory)]$Fixture,
+        [ValidateSet('Start','Continue','Finalize')][string]$Phase='Start',
+        [string]$FinalReviewEvidencePath
+    )
+    return Invoke-LiveCanary -ConfirmPaidProviderCall -RepoPath $Fixture.Fixture.Repo `
+        -Operation $Fixture.Operation -IssueNumber $Fixture.IssueNumber -Phase $Phase `
+        -FinalReviewEvidencePath $FinalReviewEvidencePath -ResultPath $Fixture.ResultPath `
+        -RouterInvoker $Fixture.RouterInvoker -ExecutionReader $Fixture.ExecutionReader `
+        -RunReceiptReader $Fixture.RunReader -ReviewReceiptReader $Fixture.ReviewReader `
+        -RepairReceiptReader $Fixture.RepairReader -PrProbe $Fixture.PrProbe.Probe `
+        -CheckLister $Fixture.CheckLister
+}
+
+function Write-CanaryReviewEvidence {
+    param(
+        [Parameter(Mandatory)]$Fixture,
+        [string]$Head,
+        [string]$Reviewer,
+        [string]$Summary='Reviewed the complete diff, receipts, local tests, Draft PR context, and PR-linked CI results.',
+        [string]$Verdict='PASS',
+        $RemainingProblems=@()
+    )
+    if ([string]::IsNullOrWhiteSpace($Head)) { $Head=Get-GitHead -Path $Fixture.Fixture.Repo }
+    if ([string]::IsNullOrWhiteSpace($Reviewer)) {
+        $Reviewer = if ($Fixture.Operation -eq 1) { 'claude-opus-5' } else { 'claude-sonnet-5' }
+    }
+    $path=Join-Path $Fixture.Fixture.Root ('final-review-' + [guid]::NewGuid().ToString('N') + '.json')
+    Write-AtomicJsonFile -Path $path -Object ([pscustomobject]@{
+        schemaVersion=1;operation=$Fixture.Operation;issueNumber=$Fixture.IssueNumber
+        head=$Head;workBranch=$Fixture.WorkBranch;verdict=$Verdict;reviewer=$Reviewer
+        reviewSummary=$Summary;remainingProblems=@($RemainingProblems)
+    })
+    return $path
+}
+
+function New-VerificationMetadataFixture {
+    $root=Join-Path $TestWorkRoot ('verification-metadata-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    foreach($name in @('README.md','REENTRY.md','VERIFICATION_MATRIX.md','CHANGELOG.md','manifest-sha256.txt')){
+        Copy-Item -LiteralPath (Join-Path $RouterRoot $name) -Destination (Join-Path $root $name)
+    }
+    foreach($line in Get-Content -LiteralPath (Join-Path $RouterRoot 'manifest-sha256.txt') -Encoding UTF8){
+        if([string]::IsNullOrWhiteSpace($line)){continue}
+        $relative=($line -split '  ',2)[1]
+        $source=Join-Path $RouterRoot $relative
+        $target=Join-Path $root $relative
+        $parent=Split-Path -Parent $target
+        if(-not(Test-Path -LiteralPath $parent)){New-Item -ItemType Directory -Path $parent -Force|Out-Null}
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+    return $root
+}
+
+function Invoke-VerificationMetadataTool {
+    param([Parameter(Mandatory)][string]$FixtureRoot,[switch]$Write)
+    $mode=if($Write){'-Write'}else{'-Check'}
+    $start=New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName='powershell.exe'
+    $start.Arguments="-NoProfile -ExecutionPolicy Bypass -File `"$($FixtureRoot)\scripts\sync-verification-metadata.ps1`" -RootPath `"$FixtureRoot`" -GitRootPath `"$RouterRoot`" $mode"
+    $start.UseShellExecute=$false;$start.CreateNoWindow=$true
+    $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $process=New-Object System.Diagnostics.Process;$process.StartInfo=$start
+    [void]$process.Start();$stdout=$process.StandardOutput.ReadToEnd();$stderr=$process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    return [pscustomobject]@{ExitCode=[int]$process.ExitCode;Output=(($stdout,$stderr)-join "`n").Trim()}
+}
+
+Describe 'v3.0.5 단계형 live canary와 verification drift' {
+    BeforeAll {
+        $script:CanaryOp3=New-CanaryHarnessFixture -Operation 3 -NextAction report
+        $script:CanaryOp3Result=Invoke-TestCanary -Fixture $script:CanaryOp3
+        $script:CanaryOp2=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review
+        $script:CanaryOp2Start=Invoke-TestCanary -Fixture $script:CanaryOp2
+        $script:CanaryOp1Pass=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict PASS
+        $script:CanaryOp1PassStart=Invoke-TestCanary -Fixture $script:CanaryOp1Pass
+        $script:CanaryOp1Repair=New-CanaryHarnessFixture -Operation 1 -NextAction review -ReviewVerdict REPAIR_REQUIRED
+        $script:CanaryOp1RepairStart=Invoke-TestCanary -Fixture $script:CanaryOp1Repair
+        $script:VerificationFixtures=New-Object System.Collections.ArrayList
+    }
+    AfterAll {
+        foreach($name in @('CanaryOp3','CanaryOp2','CanaryOp1Pass','CanaryOp1Repair')){
+            $variable=Get-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue
+            if($null -ne $variable -and $null -ne $variable.Value){Remove-PrFakeRepo -Fixture $variable.Value.Fixture}
+        }
+        $vf=Get-Variable -Name VerificationFixtures -Scope Script -ErrorAction SilentlyContinue
+        if($null -ne $vf){
+            foreach($path in @($vf.Value)){
+                if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Recurse -Force}
+            }
+        }
+    }
+
+    It '1. 승인 인수 없음은 LIVE_CANARY_NOT_EXECUTED다' {
+        $resultPath=Join-Path $TestWorkRoot 'forbidden-live-canary-result.json'
+        $output=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptsDir 'run-live-canary.ps1') `
+            -RepoPath $RouterRoot -Operation 3 -IssueNumber 6 -ResultPath $resultPath 2>&1|Out-String
+        $LASTEXITCODE|Should Be 2
+        $output|Should Match 'LIVE_CANARY_NOT_EXECUTED'
+        (Test-Path -LiteralPath $resultPath)|Should Be $false
+    }
+    It '2. RepoPath 없음은 실행과 결과 쓰기가 0회다' {
+        $path=Join-Path $TestWorkRoot 'missing-repo-canary.json'
+        $output=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptsDir 'run-live-canary.ps1') `
+            -ConfirmPaidProviderCall -Operation 3 -IssueNumber 6 -ResultPath $path 2>&1|Out-String
+        $LASTEXITCODE|Should Be 2
+        (Test-Path -LiteralPath $path)|Should Be $false
+    }
+    It '3. 잘못된 operation과 issue는 router 실행 전에 거부한다' {
+        $source=Get-Content -LiteralPath (Join-Path $ScriptsDir 'run-live-canary.ps1') -Raw -Encoding UTF8
+        $source|Should Match '\[ValidateSet\(1,2,3\)\]\[int\]\$Operation'
+        $source.Contains('$IssueNumber -lt 1')|Should Be $true
+    }
+    It '4. Continue와 Finalize는 기존 checkpoint를 요구한다' {
+        $result=Invoke-LiveCanary -ConfirmPaidProviderCall -RepoPath $script:CanaryOp3.Fixture.Repo `
+            -Operation 3 -IssueNumber $script:CanaryOp3.IssueNumber -Phase Continue `
+            -ResultPath (Join-Path $script:CanaryOp3.Fixture.Root 'absent.json')
+        $result.finalStatus|Should Be 'LIVE_CANARY_NOT_EXECUTED'
+    }
+    It '5. 결과에는 raw output prompt secret environment가 없다' {
+        $json=$script:CanaryOp3Result|ConvertTo-Json -Depth 20
+        foreach($forbidden in @('"prompt"','"secret"','"rawStdout"','"rawStderr"','"environment"')){
+            $json|Should Not Match ([regex]::Escape($forbidden))
+        }
+    }
+    It '6. Operation 3 active run은 watch를 자동 수행한다' {
+        @($script:CanaryOp3Result.routerCommands)|Should Be @('run','watch')
+        $script:CanaryOp3.State.WatchCalls|Should Be 1
+    }
+    It '7. Operation 3 terminal nextAction은 report다' {
+        $script:CanaryOp3Result.nextAction|Should Be 'report'
+        $script:CanaryOp3Result.finalStatus|Should Be 'LIVE_CANARY_OPERATION3_COMPLETE'
+    }
+    It '8. watch는 동일 executionId와 generation을 유지한다' {
+        $script:CanaryOp3Result.executionId|Should Be $script:CanaryOp3.State.Execution.executionId
+        $script:CanaryOp3Result.generation|Should Be 1
+    }
+    It '9. Operation 3 재진입은 구현 worker를 다시 시작하지 않는다' {
+        $again=Invoke-TestCanary -Fixture $script:CanaryOp3 -Phase Continue
+        $script:CanaryOp3.State.RunCalls|Should Be 1
+        @($again.routerCommands).Count|Should Be 0
+    }
+    It '10. 실제 result envelope와 worker report provenance를 검증한다' {
+        $script:CanaryOp3Result.resultEnvelopePresent|Should Be $true
+        $script:CanaryOp3Result.workerReportValid|Should Be $true
+        $script:CanaryOp3Result.verificationProvenance|Should Be 'valid_worker_result_envelope'
+    }
+    It '11. 실제 remote와 Draft PR head SHA를 기록한다' {
+        $script:CanaryOp3Result.prContextVerified|Should Be $true
+        $script:CanaryOp3Result.prHeadSha|Should Be $script:CanaryOp3Result.remoteWorkBranchHead
+    }
+    It '12. Operation 2는 evidence가 없으면 final review required다' {
+        $script:CanaryOp2Start.finalStatus|Should Be 'LIVE_CANARY_FINAL_REVIEW_REQUIRED'
+        $script:CanaryOp2.State.FinalizeCalls|Should Be 0
+    }
+    It '13. 잘못된 final review JSON을 거부한다' {
+        $path=Join-Path $script:CanaryOp2.Fixture.Root 'invalid-review.json'
+        '{bad'|Set-Content -LiteralPath $path -Encoding UTF8
+        $check=Test-CanaryFinalReviewEvidence -Path $path -Operation 2 -IssueNumber $script:CanaryOp2.IssueNumber `
+            -ExpectedHead $script:CanaryOp2.InitialHead -ExpectedWorkBranch $script:CanaryOp2.WorkBranch -ExpectedReviewer 'claude-sonnet-5'
+        $check.valid|Should Be $false
+    }
+    It '14. HEAD가 다른 final review evidence를 거부한다' {
+        $path=Write-CanaryReviewEvidence -Fixture $script:CanaryOp2 -Head ('0'*40)
+        $check=Test-CanaryFinalReviewEvidence -Path $path -Operation 2 -IssueNumber $script:CanaryOp2.IssueNumber `
+            -ExpectedHead $script:CanaryOp2.InitialHead -ExpectedWorkBranch $script:CanaryOp2.WorkBranch -ExpectedReviewer 'claude-sonnet-5'
+        $check.reason|Should Be 'final_review_evidence_head_mismatch'
+    }
+    It '15. 유효한 Operation 2 PASS evidence만 finalize를 호출한다' {
+        $path=Write-CanaryReviewEvidence -Fixture $script:CanaryOp2
+        $result=Invoke-TestCanary -Fixture $script:CanaryOp2 -Phase Finalize -FinalReviewEvidencePath $path
+        $result.finalStatus|Should Be 'merge_ready'
+        $script:CanaryOp2.State.FinalizeCalls|Should Be 1
+    }
+    It '16. CI pending 결과는 merge_ready를 합성하지 않는다' {
+        $fixture=New-CanaryHarnessFixture -Operation 2 -NextAction sonnet_end_review -FinalizeStatus pr_ci_pending
+        try{
+            [void](Invoke-TestCanary -Fixture $fixture)
+            $path=Write-CanaryReviewEvidence -Fixture $fixture
+            $result=Invoke-TestCanary -Fixture $fixture -Phase Finalize -FinalReviewEvidencePath $path
+            $result.mergeReady|Should Be $false
+            $result.finalStatus|Should Be 'pr_ci_pending'
+        }finally{Remove-PrFakeRepo -Fixture $fixture.Fixture}
+    }
+    It '17. 성공한 canary도 Draft를 유지하고 merge 미호출을 검증한다' {
+        $script:CanaryOp3Result.draftRetained|Should Be $true
+        $script:CanaryOp3Result.automaticMergeCalled|Should Be $false
+        $script:CanaryOp3Result.automaticMergeVerification|Should Be 'github-pr-draft-and-merge-state'
+    }
+    It '18. Operation 1 review nextAction은 router review를 호출한다' {
+        $script:CanaryOp1Pass.State.ReviewCalls|Should Be 1
+    }
+    It '19. Operation 1 review PASS 뒤 Opus evidence가 없으면 중단한다' {
+        $script:CanaryOp1PassStart.finalStatus|Should Be 'LIVE_CANARY_FINAL_REVIEW_REQUIRED'
+        $script:CanaryOp1Pass.State.FinalizeCalls|Should Be 0
+    }
+    It '20. REPAIR_REQUIRED이면 repair를 정확히 1회 수행한다' {
+        $script:CanaryOp1Repair.State.RepairCalls|Should Be 1
+        $script:CanaryOp1Repair.State.Repair|Should Not BeNullOrEmpty
+    }
+    It '21. repair 전 HEAD의 Opus evidence를 거부한다' {
+        $path=Write-CanaryReviewEvidence -Fixture $script:CanaryOp1Repair -Head $script:CanaryOp1Repair.InitialHead
+        $result=Invoke-TestCanary -Fixture $script:CanaryOp1Repair -Phase Finalize -FinalReviewEvidencePath $path
+        $result.finalStatus|Should Be 'LIVE_CANARY_FINAL_REVIEW_INVALID'
+    }
+    It '22. repair 최종 HEAD의 PASS evidence만 finalize한다' {
+        $path=Write-CanaryReviewEvidence -Fixture $script:CanaryOp1Repair
+        $result=Invoke-TestCanary -Fixture $script:CanaryOp1Repair -Phase Finalize -FinalReviewEvidencePath $path
+        $result.finalStatus|Should Be 'merge_ready'
+        $script:CanaryOp1Repair.State.FinalizeCalls|Should Be 1
+    }
+    It '23. opus_end_review 경로는 Sol review를 호출하지 않는다' {
+        $fixture=New-CanaryHarnessFixture -Operation 1 -NextAction opus_end_review
+        try{
+            $result=Invoke-TestCanary -Fixture $fixture
+            $fixture.State.ReviewCalls|Should Be 0
+            $result.finalStatus|Should Be 'LIVE_CANARY_FINAL_REVIEW_REQUIRED'
+        }finally{Remove-PrFakeRepo -Fixture $fixture.Fixture}
+    }
+    It '24. Operation 1 재진입은 구현 worker와 repair를 중복 호출하지 않는다' {
+        [void](Invoke-TestCanary -Fixture $script:CanaryOp1Repair -Phase Continue)
+        $script:CanaryOp1Repair.State.RunCalls|Should Be 1
+        $script:CanaryOp1Repair.State.RepairCalls|Should Be 1
+    }
+    It '25. router structured output과 result envelope 판정을 분리한다' {
+        $script:CanaryOp3Result.routerOutputParsed|Should Be $true
+        ($script:CanaryOp3Result.PSObject.Properties.Name -contains 'resultEnvelopePresent')|Should Be $true
+    }
+    It '26. local·remote·PR head가 다르면 context verification이 실패한다' {
+        $receipt=$script:CanaryOp3.State.Run
+        $script:CanaryOp3.PrProbe.State.AutoAdvanceHead=$false
+        $script:CanaryOp3.PrProbe.State.Items[0].headSha=('f'*40)
+        $evidence=Get-CanaryPrEvidence -RepoPath $script:CanaryOp3.Fixture.Repo -Receipt $receipt `
+            -PrProbe $script:CanaryOp3.PrProbe.Probe -CheckLister $script:CanaryOp3.CheckLister
+        $evidence.prContextVerified|Should Be $false
+        $script:CanaryOp3.PrProbe.State.Items[0].headSha=$script:CanaryOp3.InitialHead
+        $script:CanaryOp3.PrProbe.State.AutoAdvanceHead=$true
+    }
+    It '27. localVerificationComplete만 true인 worker report를 valid로 합성하지 않는다' {
+        $bad=[pscustomobject]@{localVerificationComplete=$true;verificationProvenance='unknown'
+            workerReportedVerification='passed';workerRemainingProblems=@();remainingProblems=@()}
+        $ev=Get-CanaryWorkerReportEvidence -ExecutionReceipt $null -AuthoritativeReceipt $bad `
+            -EnvelopeEvidence ([pscustomobject]@{valid=$true})
+        $ev.valid|Should Be $false
+    }
+    It '28. invocation receipt가 없으면 provider 호출 수는 null과 verified false다' {
+        $ev=Get-CanaryPaidCallEvidence -ExecutionReceipt ([pscustomobject]@{
+            operation=3;issueNumber=1;artifactRoot=(Join-Path $TestWorkRoot 'absent-artifacts')
+        }) -RouterCommands @('run')
+        $ev.count|Should BeNullOrEmpty
+        $ev.verified|Should Be $false
+    }
+    It '29. PR 증거가 없으면 merge 호출 여부를 unknown으로 남긴다' {
+        $ev=Get-CanaryPrEvidence -RepoPath $script:CanaryOp3.Fixture.Repo -Receipt $null
+        $ev.automaticMergeCalled|Should BeNullOrEmpty
+        $ev.automaticMergeVerification|Should Be 'unknown'
+    }
+    It '30. 결과는 receipt와 GitHub API evidence source를 기록한다' {
+        $sources=$script:CanaryOp3Result.evidenceSources
+        [string]::IsNullOrWhiteSpace([string]$sources.executionReceipt)|Should Be $false
+        $sources.pullRequest|Should Be 'github-api'
+        $sources.ci|Should Be 'github-api-pr-linked-checks'
+    }
+    It '31. README visible 숫자 변조를 거부한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        $p=Join-Path $root 'README.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('source-tree 390 passed','source-tree 391 passed')|Set-Content $p -Encoding UTF8
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
+    }
+    It '32. REENTRY visible 숫자 변조를 거부한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        $p=Join-Path $root 'REENTRY.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('manifest entries 46','manifest entries 47')|Set-Content $p -Encoding UTF8
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
+    }
+    It '33. VERIFICATION_MATRIX 실행 결과 변조를 거부한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        $p=Join-Path $root 'VERIFICATION_MATRIX.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('installed fixture 390 passed','installed fixture 389 passed')|Set-Content $p -Encoding UTF8
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
+    }
+    It '34. REENTRY 버전 변조를 거부한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        $p=Join-Path $root 'REENTRY.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.5','v3.0.4')|Set-Content $p -Encoding UTF8
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
+    }
+    It '35. VERIFICATION_MATRIX 버전 변조를 거부한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        $p=Join-Path $root 'VERIFICATION_MATRIX.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.5','v3.0.4')|Set-Content $p -Encoding UTF8
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
+    }
+    It '36. CHANGELOG 최신 버전 변조를 거부한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        $p=Join-Path $root 'CHANGELOG.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('## v3.0.5','## v3.0.4')|Set-Content $p -Encoding UTF8
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
+    }
+    It '37. parser 파일 수 drift를 거부한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        '# fixture'|Set-Content -LiteralPath (Join-Path $root 'extra.ps1') -Encoding UTF8
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
+    }
+    It '38. manifest entry 수 drift를 거부한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        ('0'*64+'  extra.txt')|Add-Content -LiteralPath (Join-Path $root 'manifest-sha256.txt') -Encoding UTF8
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
+    }
+    It '39. refactor 줄 수 drift를 거부한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        '# drift'|Add-Content -LiteralPath (Join-Path $root 'scripts\common.ps1') -Encoding UTF8
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
+    }
+    It '40. Write 뒤 Check가 visible block과 manifest를 함께 통과시킨다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        $p=Join-Path $root 'README.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('source-tree 390 passed','source-tree 999 passed')|Set-Content $p -Encoding UTF8
+        $writeResult=Invoke-VerificationMetadataTool -FixtureRoot $root -Write
+        $writeResult.ExitCode|Should Be 0
+        (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 0
+    }
+    It '41. manifest 동기화 중간 실패 시 문서와 manifest 원본을 복원한다' {
+        $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
+        $readme=Join-Path $root 'README.md';$manifest=Join-Path $root 'manifest-sha256.txt'
+        $beforeReadme=[Convert]::ToBase64String([IO.File]::ReadAllBytes($readme))
+        $beforeManifest=[Convert]::ToBase64String([IO.File]::ReadAllBytes($manifest))
+        {Invoke-VerificationMetadataSync -Mode Write -ResolvedRoot $root -ResolvedGitRoot $RouterRoot `
+            -ManifestSynchronizer {param($path)throw 'fixture write failure'}}|Should Throw
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($readme))|Should Be $beforeReadme
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifest))|Should Be $beforeManifest
     }
 }
 

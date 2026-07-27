@@ -1,10 +1,18 @@
-# REENTRY — operation-router v3.0.4 pull-request workflow
+# REENTRY — operation-router v3.0.5 pull-request workflow
 
 <!-- verification-summary sourceTreePassed=390 sourceTreeFailed=0 installedFixturePassed=390 installedFixtureFailed=0 -->
+<!-- verification-visible:start -->
+Official verification: source-tree 390 passed, 0 failed; installed fixture 390 passed, 0 failed.
+Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
+<!-- verification-visible:end -->
 
 ## Live E2E canary 정본 절차
 
-`scripts/run-live-canary.ps1`는 `-ConfirmPaidProviderCall`, 별도 `-RepoPath`, `-Operation`, `-IssueNumber`를 모두 명시한 경우에만 router를 실행한다. 인수가 없으면 `LIVE_CANARY_NOT_EXECUTED`와 사용법을 반환한다. 결과 JSON에는 prompt, secret, raw stdout/stderr, 환경 전체를 넣지 않는다. 각 시나리오는 disposable canary 저장소와 전용 이슈에서 실행하고 Draft를 유지하며 자동 merge를 호출하지 않는다.
+`scripts/run-live-canary.ps1`는 `-ConfirmPaidProviderCall`, 별도 `-RepoPath`, `-Operation`, `-IssueNumber`를 모두 명시한 경우에만 router를 실행한다. 인수가 없으면 `LIVE_CANARY_NOT_EXECUTED`와 사용법을 반환한다. `-Phase Start`는 `run -Detach → watch -Follow → operation_terminal → nextAction`을 수행하고, `Continue`와 `Finalize`는 결과 checkpoint와 실제 receipt의 저장소·작전·이슈 identity를 다시 검증해 기존 execution을 이어간다. 동일 구현 worker를 다시 시작하지 않는다.
+
+Operation 3은 terminal `nextAction=report`에서 끝난다. Operation 2는 `sonnet_end_review`, Operation 1은 Grok 경로의 router review·필요 시 repair 또는 GPT·Claude-only 경로의 `opus_end_review`에서 실제 외부 검토 evidence를 기다린다. evidence는 operation, issue, 현재 HEAD, work branch, reviewer, 충분한 review summary, verdict, remaining problems를 포함해야 한다. harness는 Sonnet·Opus 검토를 합성하지 않으며 evidence가 없거나 invalid이면 finalize하지 않는다.
+
+결과 JSON은 router structured output parsing과 execution receipt의 실제 result envelope를 구분한다. worker report는 verification provenance·local verification·reported verification·remaining problems를 함께 검증한다. Draft PR 번호·URL·head SHA·상태와 CI는 GitHub API에서 다시 조회하며 remote work branch HEAD와 receipt HEAD까지 일치해야 한다. Draft·merge 상태로 자동 merge 미호출을 증명할 수 없거나 invocation receipt로 provider 호출 수를 셀 수 없으면 해당 값은 `null`과 verified=false로 기록한다. prompt, secret, raw stdout/stderr, 환경 전체는 기록하지 않는다.
 
 1. Operation 3 소규모 성공은 작은 기계적 변경 한 건을 커밋·push하고 result envelope, worker report, local verification, Draft PR head SHA와 CI를 대조한다.
 2. Operation 2 성공은 구현 완료 뒤 Sonnet 종료 검토를 수행하고 `finalize`에서 PASS, CI success, Draft 유지, `merge_ready=true`를 확인한다.
@@ -19,7 +27,7 @@
 
 ## 최근 검증
 
-이슈 #6의 v3.0.4 수리 뒤 정식 source-tree 390개와 고유 임시 USERPROFILE installed fixture 390개가 모두 통과했다. installed integration failure는 0개이며, 저장소의 PowerShell 22개 구문 검사, config JSON 파싱, model contract, manifest 45개 SHA-256, `git diff --check`도 통과했다. 테스트 중 유료 모델 호출과 실제 사용자 홈 변경은 없었다.
+최신 공식 수치는 문서 상단의 visible verification block과 `evidence/verification-summary.json`을 함께 정본으로 사용한다. 테스트 중 유료 모델 호출과 실제 사용자 홈 변경은 없었다.
 
 ## 현재 계약
 

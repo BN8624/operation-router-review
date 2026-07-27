@@ -1,7 +1,20 @@
-# operation-router (v3.0.4)
+# operation-router (v3.0.5)
 
 <!-- verification-summary sourceTreePassed=390 sourceTreeFailed=0 installedFixturePassed=390 installedFixtureFailed=0 -->
-공식 검증 기준은 source-tree 390개 통과·0개 실패, installed fixture 390개 통과·0개 실패다. 기계 판독 가능한 정본은 `evidence/verification-summary.json`이며 `scripts/check-verification-metadata.ps1`가 문서 drift를 차단한다.
+<!-- verification-visible:start -->
+Official verification: source-tree 390 passed, 0 failed; installed fixture 390 passed, 0 failed.
+Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
+<!-- verification-visible:end -->
+
+기계 판독 가능한 정본은 `evidence/verification-summary.json`이며 `scripts/sync-verification-metadata.ps1 -Check`가 숨은 marker와 사람이 읽는 본문 drift를 함께 차단한다.
+
+## v3.0.5 단계형 live canary
+
+`scripts/run-live-canary.ps1`은 명시적으로 승인된 disposable 저장소에서 `Start`, `Continue`, `Finalize` 단계로 같은 execution receipt를 이어간다. `Start`는 `run -Detach` 뒤 active 실행을 `watch -Follow`로 terminal까지 추적하고, Operation 3은 `report`, Operation 2는 `sonnet_end_review`, Operation 1은 `review`·필요 시 repair 또는 `opus_end_review` 지점까지 진행한다.
+
+Operation 1·2의 최종 검토는 harness가 합성하지 않는다. 실제 외부 모델이나 사람이 작성한 구조화 evidence가 없거나 HEAD·work branch·reviewer·remaining problems 검증에 실패하면 `LIVE_CANARY_FINAL_REVIEW_REQUIRED` 또는 invalid 상태에서 멈추며 `finalize PASS`를 호출하지 않는다. 결과는 router structured output과 실제 result envelope, worker verification provenance, GitHub API의 Draft PR head, PR-linked CI, Draft·merge 상태, invocation receipt 기반 provider 호출 수를 분리해 기록한다. 증명할 수 없는 merge·호출 수는 `null`과 verified=false로 남긴다.
+
+별도 canary 저장소와 인증이 없으면 `LIVE_CANARY_NOT_EXECUTED`이며, 합성 회귀 테스트는 live E2E 통과가 아니다. 자동 Ready 전환과 자동 merge는 없다.
 
 ## v3.0.0 기본 Git workflow
 

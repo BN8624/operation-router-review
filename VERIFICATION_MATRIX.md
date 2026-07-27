@@ -1,4 +1,4 @@
-# VERIFICATION_MATRIX — operation-router v3.0.4
+# VERIFICATION_MATRIX — operation-router v3.0.5
 
 <!-- verification-summary sourceTreePassed=390 sourceTreeFailed=0 installedFixturePassed=390 installedFixtureFailed=0 -->
 
@@ -31,6 +31,8 @@
 | v3.0.2 모델 계약 | config 단일 원본·고정 ID·생성물 drift | source tree 정합성, Skill drift 복구, latest/family alias 쓰기 전 차단, Operation 2·3 공유 Skill 충돌 차단, modelPolicy 고정, doctor config 파생 보고 |
 | v3.0.3 모델 수명주기 | 미래 고정 ID 전파·provider 진단 | 가상 Grok/GPT/Claude ID를 config에서 Skill·README 두 표·CI cache·manifest로 생성, Codex 역할별 available/missing, Grok 성공 목록 exact-ID 판정, malformed/error fail-closed, 쓰기 선검증·rollback, source/installed fixture 격리 |
 | v3.0.3 detach 오류 정책 | F1-F3 envelope fidelity | direct-main/PR detached weekly/transient/provider/quota_unknown, clean Plan B, 2차 worker 오류 분류 보존, partial 반환·receipt 일치, usage-state 정직성, watch follow E2E, 유료 호출 0 |
+| v3.0.5 live canary 정본 | 단계·provenance·외부 final review | run/watch terminal 고정, Operation 1 review·repair, Operation 2·1 구조화 evidence gate, actual result envelope·worker report·Draft PR head·PR-linked CI, merge·provider 호출 unknown 정직성, 재진입 중복 구현 0 |
+| v3.0.5 visible verification | 사람이 읽는 수치와 버전 | summary 생성 block, README·REENTRY·VERIFICATION_MATRIX·CHANGELOG 버전, 실행 결과·parser·manifest·evidence·refactor metrics drift, Write rollback |
 
 ## 상태별 기대 판정
 
@@ -55,17 +57,18 @@ PR CI 기대 여부는 receipt에 고정된 base/head commit workflow 스냅샷�
 
 ## 실행 결과
 
-- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1`
-  - 종료 코드 0, 1195.91초
-  - 390 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
-- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-installed-fixture.ps1`
-  - 종료 코드 0, 1200.35초
-  - source tree 390 passed, 0 failed, 0 skipped, 0 pending, 0 inconclusive
-  - installed integration 실행, Skill 6종 byte-equivalence 실패 0
-- 최종 집중 검증
-  - model contract `-Check`, PowerShell 22개 파일 구문 검사, config JSON 파싱, manifest 45개 SHA-256, `git diff --check` 통과
+<!-- verification-visible:start -->
+- source-tree 390 passed, 0 failed
+- installed fixture 390 passed, 0 failed
+- installed integration failures 0
+- PowerShell parser files 23, manifest entries 46
+- paid model calls 0
+<!-- verification-visible:end -->
+
+- 전체 검증 명령은 `tests/run-tests.ps1`과 `tests/run-installed-fixture.ps1`이다.
+- 최종 집중 검증은 model contract, visible verification metadata, config·evidence JSON, manifest SHA-256, `git diff --check`를 포함한다.
 - 신규 테스트는 fake Git/bare remote, 주입 worker, mock PR/check probe, 합성 model cache와 고유 임시 USERPROFILE만 사용했다.
-- 실제 GitHub PR/check 변경과 유료 Grok·GPT·Claude 호출은 0회다.
+- 실제 GitHub PR/check 변경은 수행하지 않았다.
 
 상세 수치는 `evidence/source-tree-test-result.txt`에 보존한다.
 
