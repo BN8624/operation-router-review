@@ -1,5 +1,14 @@
 # CHANGELOG — operation-router
 
+## v3.0.6 (2026-07-27)
+
+- canary checkpoint: repository identity, execution ID, generation을 고정하고 Continue·Finalize 전에 현재 receipt와 다시 비교한다. 불일치 시 router 명령과 checkpoint 수정은 0회다.
+- operation gate: Operation 3은 `report`, Operation 2는 `sonnet_end_review`, Operation 1은 검증된 `review` 또는 `opus_end_review` 경로만 허용한다.
+- repair provenance: repair에 별도 execution ID, generation, sanitized result envelope를 저장하고 implementation/repair evidence를 분리한다. Repair 후 상위 호환 결과 필드는 repair worker 증거를 정본으로 사용한다.
+- invocation and merge evidence: invocation receipt를 현재 execution과 request context에 고정하고, unreceipted review·repair 호출 수는 추정하지 않는다. Draft·미병합 상태만으로 자동 merge 미호출을 단정하지 않는다.
+- tests: stale checkpoint, Operation 2 terminal action, mixed repair evidence, invocation provenance, merge mutation probe의 40개 회귀를 추가했다.
+- refactor metrics: baseline `4ef0c56ff0e8ce24fccdaf161835635e8e29feb5`, `common.ps1` 1671->1200, `run-operation.ps1` 2414->2389, `state-store.ps1` 309, `worker-contract.ps1` 319 lines.
+
 ## v3.0.5 (2026-07-27)
 
 - live canary: `run -Detach` 뒤 같은 execution을 `watch -Follow`로 terminal까지 추적하고 Operation 1 review·repair, Operation 1·2 구조화 final review evidence, Operation 3 report 경로를 단계별로 재진입한다.

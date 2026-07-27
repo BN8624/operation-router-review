@@ -1,10 +1,18 @@
-# operation-router (v3.0.5)
+# operation-router (v3.0.6)
 
-<!-- verification-summary sourceTreePassed=428 sourceTreeFailed=0 installedFixturePassed=428 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=468 sourceTreeFailed=0 installedFixturePassed=468 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 428 passed, 0 failed; installed fixture 428 passed, 0 failed.
+Official verification: source-tree 468 passed, 0 failed; installed fixture 468 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.6 execution-bound canary evidence
+
+Canary checkpoints are bound to the exact repository identity, `executionId`, and `generation`. `Continue` and `Finalize` re-read the current execution receipt before any router command and fail closed without rewriting the checkpoint when the identity differs. Operation 3 accepts only `report`, Operation 2 accepts only `sonnet_end_review`, and Operation 1 accepts only the verified `review` or `opus_end_review` paths.
+
+Implementation and repair evidence are separate. A completed repair has its own execution ID, generation, sanitized result envelope, worker report provenance, final HEAD, and repository context. Once repair occurs, that repair envelope is authoritative; the implementation envelope cannot be combined with a repair receipt. Provider call counts use only invocation receipts bound to the authoritative execution and required request fields. Unreceipted review or repair calls remain unknown rather than being estimated.
+
+Draft and unmerged PR state proves current PR state, not whether an automatic merge call was attempted. `automaticMergeCalled=false` is recorded only when a router mutation probe directly observes zero merge calls; otherwise the value is `null` with `not-directly-observable`.
 
 기계 판독 가능한 정본은 `evidence/verification-summary.json`이며 `scripts/sync-verification-metadata.ps1 -Check`가 숨은 marker와 사람이 읽는 본문 drift를 함께 차단한다.
 

@@ -3436,9 +3436,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v3.0.5를 현재 버전으로 기록한다' {
+    It '12. README는 v3.0.6을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v3\.0\.5\)'
+        $readme | Should Match '^# operation-router \(v3\.0\.6\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {
@@ -5708,7 +5708,8 @@ Describe 'v3.0.5 단계형 live canary와 verification drift' {
     }
     It '31. README visible 숫자 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'README.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('source-tree 390 passed','source-tree 391 passed')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'README.md';$s=Read-JsonFile (Join-Path $root 'evidence\verification-summary.json')
+        (Get-Content -Raw -Encoding UTF8 $p).Replace("source-tree $($s.sourceTreePassed) passed",'source-tree 999 passed')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '32. REENTRY visible 숫자 변조를 거부한다' {
@@ -5718,22 +5719,23 @@ Describe 'v3.0.5 단계형 live canary와 verification drift' {
     }
     It '33. VERIFICATION_MATRIX 실행 결과 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'VERIFICATION_MATRIX.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('installed fixture 390 passed','installed fixture 389 passed')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'VERIFICATION_MATRIX.md';$s=Read-JsonFile (Join-Path $root 'evidence\verification-summary.json')
+        (Get-Content -Raw -Encoding UTF8 $p).Replace("installed fixture $($s.installedFixturePassed) passed",'installed fixture 999 passed')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '34. REENTRY 버전 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'REENTRY.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.5','v3.0.4')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'REENTRY.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.6','v3.0.4')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '35. VERIFICATION_MATRIX 버전 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'VERIFICATION_MATRIX.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.5','v3.0.4')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'VERIFICATION_MATRIX.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.6','v3.0.4')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '36. CHANGELOG 최신 버전 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'CHANGELOG.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('## v3.0.5','## v3.0.4')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'CHANGELOG.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('## v3.0.6','## v3.0.4')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '37. parser 파일 수 drift를 거부한다' {
@@ -5753,7 +5755,8 @@ Describe 'v3.0.5 단계형 live canary와 verification drift' {
     }
     It '40. Write 뒤 Check가 visible block과 manifest를 함께 통과시킨다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'README.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('source-tree 390 passed','source-tree 999 passed')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'README.md';$s=Read-JsonFile (Join-Path $root 'evidence\verification-summary.json')
+        (Get-Content -Raw -Encoding UTF8 $p).Replace("source-tree $($s.sourceTreePassed) passed",'source-tree 999 passed')|Set-Content $p -Encoding UTF8
         $writeResult=Invoke-VerificationMetadataTool -FixtureRoot $root -Write
         $writeResult.ExitCode|Should Be 0
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 0

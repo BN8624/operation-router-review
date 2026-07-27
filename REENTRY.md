@@ -1,10 +1,18 @@
-# REENTRY — operation-router v3.0.5 pull-request workflow
+# REENTRY — operation-router v3.0.6 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=428 sourceTreeFailed=0 installedFixturePassed=428 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=468 sourceTreeFailed=0 installedFixturePassed=468 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 428 passed, 0 failed; installed fixture 428 passed, 0 failed.
+Official verification: source-tree 468 passed, 0 failed; installed fixture 468 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.6 canary 재진입과 provenance
+
+`Start`가 기록한 checkpoint는 저장소 owner/repo와 clone별 root hash뿐 아니라 구현 execution의 `executionId`와 `generation`까지 고정한다. `Continue`와 `Finalize`는 현재 execution receipt를 다시 읽어 이 값들을 비교하며, 오래된 checkpoint 또는 다른 clone·generation이면 모든 router 명령을 0회로 유지하고 fail-closed 한다.
+
+Operation 2의 종료 검토는 현재 receipt의 `nextAction=sonnet_end_review`에서만 허용된다. Operation 1은 `review` receipt의 저장소·HEAD·verdict를 다시 검증하거나 `opus_end_review` 경로를 확인한다. Repair가 수행된 경우 별도 repair execution/result/report가 authoritative evidence이며 implementation result envelope와 혼합하지 않는다.
+
+Invocation receipt는 schema, execution ID, generation, operation, issue, provider, invocation 종류, timestamp, 실제 provider 호출 구분 필드를 모두 검증한다. Review 또는 repair invocation receipt가 없으면 provider 호출 총수는 정수로 추정하지 않는다. 실제 PR의 Draft·merged 상태는 별도 기록하며 merge 호출 시도를 직접 관찰하지 못하면 unknown으로 남긴다.
 
 ## Live E2E canary 정본 절차
 
