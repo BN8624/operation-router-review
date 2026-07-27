@@ -1,10 +1,18 @@
-# REENTRY — operation-router v3.0.7 pull-request workflow
+# REENTRY — operation-router v3.0.8 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=500 sourceTreeFailed=0 installedFixturePassed=500 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=560 sourceTreeFailed=0 installedFixturePassed=560 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 500 passed, 0 failed; installed fixture 500 passed, 0 failed.
+Official verification: source-tree 560 passed, 0 failed; installed fixture 560 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.8 checkpoint와 Operation 3 재진입
+
+기존 checkpoint는 non-null JSON 객체만 허용한다. 손상 JSON, `null`, scalar, 배열, 빈 파일은 `LIVE_CANARY_CHECKPOINT_INVALID`이며 원본 파일의 경로·이름·존재·bytes를 바꾸지 않고 router 명령도 실행하지 않는다. `Continue`·`Finalize`의 checkpoint 누락은 `LIVE_CANARY_CHECKPOINT_REQUIRED`로, canary 자체가 시작되지 않은 `LIVE_CANARY_NOT_EXECUTED`와 구분한다. checkpoint 실패의 전체 `paidProviderCalls`는 unknown이고 현재 재진입 명령의 신규 호출 0회만 `providerCallsThisInvocation`으로 별도 증명한다.
+
+Implementation·repair envelope의 worker는 execution receipt worker와 대소문자까지 일치해야 한다. Operation 3도 유효한 authoritative evidence를 요구하며 pull-request mode에서는 정확한 OPEN Draft·미병합 PR context와 PR-linked CI success까지 확인한다. CI pending·unavailable·failure·required workflow 제거, PR mismatch, Draft 해제, 병합 상태는 COMPLETE가 아니다. Direct-main은 기존 receipt·HEAD 계약으로 계속 분기한다.
+
+결과 JSON은 schema 4이고 checkpoint 입력은 schema 3 호환을 유지한다. `checkpointSchemaVersion=3`과 `schemaVersion=4`를 혼동하지 않는다. `resultEnvelopePresent`는 deprecated file-presence alias이며, file present·parsed·context valid·worker valid·execution successful·overall valid를 각각 별도 필드로 기록한다. 단계형 harness와 합성 PR/check probe는 실제 유료 provider·disposable 저장소 live E2E가 아니다.
 
 ## v3.0.7 손상 checkpoint와 성공 증거
 
@@ -26,7 +34,7 @@ Invocation receipt는 schema, execution ID, generation, operation, issue, provid
 
 `scripts/run-live-canary.ps1`는 `-ConfirmPaidProviderCall`, 별도 `-RepoPath`, `-Operation`, `-IssueNumber`를 모두 명시한 경우에만 router를 실행한다. 인수가 없으면 `LIVE_CANARY_NOT_EXECUTED`와 사용법을 반환한다. `-Phase Start`는 `run -Detach → watch -Follow → operation_terminal → nextAction`을 수행하고, `Continue`와 `Finalize`는 결과 checkpoint와 실제 receipt의 저장소·작전·이슈 identity를 다시 검증해 기존 execution을 이어간다. 동일 구현 worker를 다시 시작하지 않는다.
 
-Operation 3은 terminal `nextAction=report`에서 끝난다. Operation 2는 `sonnet_end_review`, Operation 1은 Grok 경로의 router review·필요 시 repair 또는 GPT·Claude-only 경로의 `opus_end_review`에서 실제 외부 검토 evidence를 기다린다. evidence는 operation, issue, 현재 HEAD, work branch, reviewer, 충분한 review summary, verdict, remaining problems를 포함해야 한다. harness는 Sonnet·Opus 검토를 합성하지 않으며 evidence가 없거나 invalid이면 finalize하지 않는다.
+Operation 3은 terminal `nextAction=report`뿐 아니라 authoritative worker evidence와 workflow mode별 Git 증거를 모두 확인해야 끝난다. Operation 2는 `sonnet_end_review`, Operation 1은 Grok 경로의 router review·필요 시 repair 또는 GPT·Claude-only 경로의 `opus_end_review`에서 실제 외부 검토 evidence를 기다린다. evidence는 operation, issue, 현재 HEAD, work branch, reviewer, 충분한 review summary, verdict, remaining problems를 포함해야 한다. harness는 Sonnet·Opus 검토를 합성하지 않으며 evidence가 없거나 invalid이면 finalize하지 않는다.
 
 결과 JSON은 router structured output parsing과 execution receipt의 실제 result envelope를 구분한다. worker report는 verification provenance·local verification·reported verification·remaining problems를 함께 검증한다. Draft PR 번호·URL·head SHA·상태와 CI는 GitHub API에서 다시 조회하며 remote work branch HEAD와 receipt HEAD까지 일치해야 한다. Draft·merge 상태로 자동 merge 미호출을 증명할 수 없거나 invocation receipt로 provider 호출 수를 셀 수 없으면 해당 값은 `null`과 verified=false로 기록한다. prompt, secret, raw stdout/stderr, 환경 전체는 기록하지 않는다.
 

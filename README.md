@@ -1,10 +1,18 @@
-# operation-router (v3.0.7)
+# operation-router (v3.0.8)
 
-<!-- verification-summary sourceTreePassed=500 sourceTreeFailed=0 installedFixturePassed=500 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=560 sourceTreeFailed=0 installedFixturePassed=560 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 500 passed, 0 failed; installed fixture 500 passed, 0 failed.
+Official verification: source-tree 560 passed, 0 failed; installed fixture 560 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.8 canary schema v4 and Operation 3 evidence gates
+
+Canary checkpoints accept only a non-null JSON object. Malformed JSON, `null`, strings, numbers, Booleans, arrays, and empty files return `LIVE_CANARY_CHECKPOINT_INVALID`; the original path, name, existence, and bytes remain unchanged and no router command runs. A missing `Continue` or `Finalize` checkpoint returns `LIVE_CANARY_CHECKPOINT_REQUIRED`, which is distinct from a canary that never started. Checkpoint failures leave the complete execution's `paidProviderCalls` unknown while independently proving `providerCallsThisInvocation=0`.
+
+Implementation and repair result envelopes now require a case-sensitive worker match with the execution receipt. Operation 3 completion also requires authoritative worker evidence. In pull-request mode, the exact OPEN Draft, unmerged PR context and PR-linked CI must be valid; pending, unavailable, failed, or removed required workflows cannot produce `LIVE_CANARY_OPERATION3_COMPLETE`. Legacy direct-main remains supported through its receipt and HEAD contract. Synthetic harness results are not live E2E evidence.
+
+Canary result objects use `schemaVersion=4`, while re-entry checkpoints remain compatible with checkpoint schema 3 through `checkpointSchemaVersion=3`. The deprecated `resultEnvelopePresent` remains an alias for file presence. The explicit fields are `resultEnvelopeFilePresent`, `resultEnvelopeParsed`, `resultEnvelopeContextValid`, `resultEnvelopeWorkerValid`, `resultExecutionSuccessful`, and `resultEnvelopeValid`.
 
 ## v3.0.7 corrupt checkpoint and successful envelope evidence
 

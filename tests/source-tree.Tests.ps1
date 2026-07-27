@@ -3436,9 +3436,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v3.0.7을 현재 버전으로 기록한다' {
+    It '12. README는 v3.0.8을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v3\.0\.7\)'
+        $readme | Should Match '^# operation-router \(v3\.0\.8\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {
@@ -5565,11 +5565,11 @@ Describe 'v3.0.5 단계형 live canary와 verification drift' {
         $source|Should Match '\[ValidateSet\(1,2,3\)\]\[int\]\$Operation'
         $source.Contains('$IssueNumber -lt 1')|Should Be $true
     }
-    It '4. Continue와 Finalize는 기존 checkpoint를 요구한다' {
+    It '4. Continue와 Finalize의 checkpoint 누락은 CHECKPOINT_REQUIRED다' {
         $result=Invoke-LiveCanary -ConfirmPaidProviderCall -RepoPath $script:CanaryOp3.Fixture.Repo `
             -Operation 3 -IssueNumber $script:CanaryOp3.IssueNumber -Phase Continue `
             -ResultPath (Join-Path $script:CanaryOp3.Fixture.Root 'absent.json')
-        $result.finalStatus|Should Be 'LIVE_CANARY_NOT_EXECUTED'
+        $result.finalStatus|Should Be 'LIVE_CANARY_CHECKPOINT_REQUIRED'
     }
     It '5. 결과에는 raw output prompt secret environment가 없다' {
         $json=$script:CanaryOp3Result|ConvertTo-Json -Depth 20
@@ -5734,17 +5734,17 @@ Describe 'v3.0.5 단계형 live canary와 verification drift' {
     }
     It '34. REENTRY 버전 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'REENTRY.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.7','v3.0.4')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'REENTRY.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.8','v3.0.4')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '35. VERIFICATION_MATRIX 버전 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'VERIFICATION_MATRIX.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.7','v3.0.4')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'VERIFICATION_MATRIX.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.8','v3.0.4')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '36. CHANGELOG 최신 버전 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'CHANGELOG.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('## v3.0.7','## v3.0.4')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'CHANGELOG.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('## v3.0.8','## v3.0.4')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '37. parser 파일 수 drift를 거부한다' {

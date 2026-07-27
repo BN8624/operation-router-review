@@ -1,5 +1,13 @@
 # CHANGELOG — operation-router
 
+## v3.0.8 (2026-07-27)
+
+- checkpoint root: non-null JSON 객체만 checkpoint로 허용하고 손상 JSON, `null`, scalar, 배열, 빈 파일은 원본 bytes와 파일 상태를 보존한 채 router 명령 0회로 거부한다.
+- re-entry evidence: `Continue`·`Finalize` checkpoint 누락을 `LIVE_CANARY_CHECKPOINT_REQUIRED`로 분리하고 전체 provider 호출 수 unknown과 현재 invocation 신규 호출 0회를 별도 기록한다.
+- worker and Operation 3: implementation·repair envelope worker를 execution receipt와 case-sensitive로 고정하고 Operation 3에도 authoritative evidence, 정확한 OPEN Draft·미병합 PR context, PR-linked CI success를 요구한다. Direct-main 호환은 유지한다.
+- schema: canary result를 schema 4로 올리고 checkpoint schema 3을 별도 필드로 유지한다. file present, parsed, context valid, worker valid, execution success, overall validity를 독립 필드로 공개한다.
+- tests: checkpoint root·누락, worker identity, Operation 3 PR·CI·Draft·merge, direct-main, schema 4의 합성 회귀 60개를 추가했다. 실제 live E2E는 실행하지 않았다.
+
 ## v3.0.7 (2026-07-27)
 
 - corrupt checkpoint: 기존 `ResultPath`의 JSON이 손상되면 `LIVE_CANARY_CHECKPOINT_INVALID`로 중단하고 bytes, 파일, 경로를 수정하지 않는다. 별도 실행은 새 경로를 요구한다.
