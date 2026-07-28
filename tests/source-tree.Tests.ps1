@@ -3436,9 +3436,9 @@ Describe 'v2.3.4-1~17. 로그·상태·Skill·검토본 재현성' {
         (Get-SkillFrontmatter -Path (Join-Path $alternate 'SKILL.md')).name | Should Be 'wrong-installed-copy'
     }
 
-    It '12. README는 v3.0.10을 현재 버전으로 기록한다' {
+    It '12. README는 v3.0.11을 현재 버전으로 기록한다' {
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        $readme | Should Match '^# operation-router \(v3\.0\.10\)'
+        $readme | Should Match '^# operation-router \(v3\.0\.11\)'
     }
 
     It '13. README와 config는 alwaysApprove를 현재 권한 모드로 기록한다' {
@@ -5771,17 +5771,17 @@ Describe 'v3.0.5 단계형 live canary와 verification drift' {
     }
     It '34. REENTRY 버전 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'REENTRY.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.10','v3.0.4')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'REENTRY.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.11','v3.0.4')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '35. VERIFICATION_MATRIX 버전 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'VERIFICATION_MATRIX.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.10','v3.0.4')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'VERIFICATION_MATRIX.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('v3.0.11','v3.0.4')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '36. CHANGELOG 최신 버전 변조를 거부한다' {
         $root=New-VerificationMetadataFixture;[void]$script:VerificationFixtures.Add($root)
-        $p=Join-Path $root 'CHANGELOG.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('## v3.0.10','## v3.0.4')|Set-Content $p -Encoding UTF8
+        $p=Join-Path $root 'CHANGELOG.md';(Get-Content -Raw -Encoding UTF8 $p).Replace('## v3.0.11','## v3.0.4')|Set-Content $p -Encoding UTF8
         (Invoke-VerificationMetadataTool $root).ExitCode|Should Be 1
     }
     It '37. parser 파일 수 drift를 거부한다' {
@@ -7101,6 +7101,183 @@ Describe 'v3.0.4 usage-state 원자 저장과 직렬화' {
             $held.Dispose()
         }
         (Get-Content -LiteralPath $Script:UsageStatePath -Raw -Encoding UTF8) | Should Be $before
+    }
+}
+
+Describe 'v3.0.11 후속 주문 branch·order source·HEAD 재봉인' {
+    BeforeEach {
+        Set-TestGitWorkflow -Mode pull-request
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        Set-TestGitWorkflow -Mode direct-main
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It '1. 명시 WorkBranch는 다른 이슈의 유효한 소유권 영수증과 OPEN Draft PR을 재사용한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $first=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 81 -Config (Get-Config) -PrProbe $pr.Probe
+            Push-Location $f.Repo
+            try {
+                'first'|Set-Content -LiteralPath first.txt -Encoding UTF8
+                git add first.txt;git commit -q -m first;git push -q -u origin HEAD
+            } finally {Pop-Location}
+            $first.workflow.finalHead=Get-GitHead -Path $f.Repo
+            $pr.State.Items=@([pscustomobject]@{number=81;url='https://example.invalid/pr/81';state='OPEN';draft=$true
+                baseBranch='main';headBranch='operation-router/issue-81';headSha=$first.workflow.finalHead
+                headRepository='owner/repo';merged=$false})
+            $first.workflow.pr=$pr.State.Items[0]
+            Save-IssueWorkflowReceipt -IssueNumber 81 -RepoPath $f.Repo -Workflow $first.workflow|Out-Null
+            Push-Location $f.Repo;try{git switch -q main}finally{Pop-Location}
+            $follow=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 83 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-81' -PrProbe $pr.Probe
+            $follow.ok|Should Be $true
+            $follow.workflow.workBranch|Should Be 'operation-router/issue-81'
+            $follow.workflow.pr.number|Should Be 81
+            $follow.workflow.continuation.sourceIssueNumber|Should Be 81
+            $follow.workflow.continuation.currentIssueNumber|Should Be 83
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '2. 후속 이슈의 연결 영수증을 저장하면 WorkBranch 인수 없이 같은 branch를 재개한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $first=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 84 -Config (Get-Config)
+            Push-Location $f.Repo
+            try {
+                'first'|Set-Content -LiteralPath first.txt -Encoding UTF8
+                git add first.txt;git commit -q -m first;git push -q -u origin HEAD
+            } finally {Pop-Location}
+            $first.workflow.finalHead=Get-GitHead -Path $f.Repo
+            $pr.State.Items=@([pscustomobject]@{number=84;url='https://example.invalid/pr/84';state='OPEN';draft=$true
+                baseBranch='main';headBranch='operation-router/issue-84';headSha=$first.workflow.finalHead
+                headRepository='owner/repo';merged=$false})
+            $first.workflow.pr=$pr.State.Items[0]
+            Save-IssueWorkflowReceipt -IssueNumber 84 -RepoPath $f.Repo -Workflow $first.workflow|Out-Null
+            Push-Location $f.Repo;try{git switch -q main}finally{Pop-Location}
+            $follow=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 85 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-84' -PrProbe $pr.Probe
+            Save-IssueWorkflowReceipt -IssueNumber 85 -RepoPath $f.Repo -Workflow $follow.workflow|Out-Null
+            $resumed=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 85 -Config (Get-Config) -PrProbe $pr.Probe
+            $resumed.ok|Should Be $true
+            $resumed.workflow.workBranch|Should Be 'operation-router/issue-84'
+            $resumed.workflow.continuation.sourceIssueNumber|Should Be 84
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '3. 소유권 영수증이 없는 WorkBranch override는 branch 생성 전에 거부한다' {
+        $f=New-PrFakeRepo
+        try {
+            $result=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 86 -Config (Get-Config) -WorkBranch 'operation-router/issue-1'
+            $result.reason|Should Be 'work_branch_override_unowned'
+            (Get-GitRefHead -RepoPath $f.Repo -Ref 'refs/heads/operation-router/issue-1')|Should BeNullOrEmpty
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '4. unsafe WorkBranch와 direct-main override는 fail-closed한다' {
+        $f=New-PrFakeRepo
+        try {
+            (Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 87 -Config (Get-Config) -WorkBranch 'bad branch').reason|Should Be 'unsafe_work_branch_override'
+            Set-TestGitWorkflow -Mode direct-main
+            (Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 87 -Config (Get-Config) -WorkBranch 'operation-router/issue-1').reason|Should Be 'work_branch_override_requires_pull_request_mode'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '5. OrderFile은 절대 경로·byte hash·길이를 source로 고정하고 내용을 무손실로 읽는다' {
+        $path=Join-Path $TestWorkRoot 'v311-order.txt'
+        $body="# 후속 주문`n기존 PR을 수리한다 ✓"
+        [System.IO.File]::WriteAllText($path,$body,(New-Object System.Text.UTF8Encoding($false)))
+        $resolved=Resolve-OrderInput -IssueNumber 88 -RepoPath $TestWorkRoot -OrderFile $path
+        $resolved.content|Should Be $body
+        $resolved.source.kind|Should Be 'file'
+        $resolved.source.path|Should Be ([System.IO.Path]::GetFullPath($path))
+        $resolved.source.sha256|Should Be ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant())
+        $resolved.source.byteLength|Should Be ([System.Text.Encoding]::UTF8.GetByteCount($body))
+        $workflow=[pscustomobject]@{mode='pull-request';baseBranch='main';baseHead=('a'*40);workBranch='operation-router/issue-88'
+            remoteWorkBranch='origin/operation-router/issue-88';issueNumber=88;orderSource=$resolved.source}
+        $order=New-OrderContent -IssueBody $resolved.content -Workflow $workflow
+        $order|Should Match 'source=file'
+        $order|Should Not Match 'GitHub 이슈 본문 원문'
+    }
+
+    It '6. 기록된 OrderFile이 바뀌면 review·recover에서 재사용할 수 없다' {
+        $path=Join-Path $TestWorkRoot 'v311-order-change.txt'
+        [System.IO.File]::WriteAllText($path,'one',(New-Object System.Text.UTF8Encoding($false)))
+        $resolved=Resolve-OrderInput -IssueNumber 89 -RepoPath $TestWorkRoot -OrderFile $path
+        [System.IO.File]::WriteAllText($path,'two',(New-Object System.Text.UTF8Encoding($false)))
+        {Resolve-OrderInput -IssueNumber 89 -RepoPath $TestWorkRoot -RecordedSource $resolved.source}|Should Throw
+    }
+
+    It '7. 기본 이슈 본문도 source kind와 content hash를 기록한다' {
+        $resolved=Resolve-OrderInput -IssueNumber 90 -RepoPath $TestWorkRoot -IssueFetcher {param($n,$p)'issue body'}
+        $resolved.source.kind|Should Be 'issue-body'
+        $resolved.source.issueNumber|Should Be 90
+        $resolved.source.sha256|Should Be (Get-Sha256Text -Text 'issue body')
+    }
+
+    It '8. reseal은 push된 descendant HEAD와 같은 OPEN Draft PR만 검수 대상으로 다시 봉인한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 91 -Config (Get-Config)
+            Push-Location $f.Repo
+            try {
+                'worker'|Set-Content -LiteralPath worker.txt -Encoding UTF8
+                git add worker.txt;git commit -q -m worker;git push -q -u origin HEAD
+            } finally {Pop-Location}
+            $sealedHead=Get-GitHead -Path $f.Repo
+            $pre.workflow.finalHead=$sealedHead
+            $pr.State.Items=@([pscustomobject]@{number=91;url='https://example.invalid/pr/91';state='OPEN';draft=$true
+                baseBranch='main';headBranch='operation-router/issue-91';headSha=$sealedHead
+                headRepository='owner/repo';merged=$false})
+            $pre.workflow.pr=$pr.State.Items[0]
+            $pre.workflow.headWorkflow=Get-GitWorkflowSnapshot -RepoPath $f.Repo -Ref $sealedHead
+            $post=[pscustomobject]@{status='pr_opened';branch='operation-router/issue-91';startHead=$pre.snapshot.startHead
+                finalHead=$sealedHead;commitCount=1;worktreeClean=$true;pushComplete=$true;ciStatus='success';workerExitCode=0
+                workflow=(Copy-WorkflowContext -Workflow $pre.workflow)}
+            $route=[pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}
+            $worker=[pscustomobject]@{Output='done';WorkerReportedVerification='tests pass';WorkerRemainingProblems=@()}
+            Save-RunReceipt -Operation 1 -IssueNumber 91 -RepoPath $f.Repo -Snapshot $pre.snapshot -Postflight $post `
+                -Route $route -WorkerResult $worker -StatusOverride 'pr_opened' -ResultEnvelopePresent $true `
+                -Interrupted $false -LocalVerificationComplete $true -VerificationProvenance 'valid_worker_result_envelope' `
+                -Workflow $pre.workflow -ArtifactSanitizationStatus completed -ArtifactRetentionStatus completed|Out-Null
+            Save-IssueWorkflowReceipt -IssueNumber 91 -RepoPath $f.Repo -Workflow $pre.workflow|Out-Null
+            Push-Location $f.Repo
+            try {
+                'outside'|Set-Content -LiteralPath outside.txt -Encoding UTF8
+                git add outside.txt;git commit -q -m outside;git push -q
+            } finally {Pop-Location}
+            $currentHead=Get-GitHead -Path $f.Repo
+            $result=Invoke-ResealCommand -OperationNumber 1 -IssueNumber 91 -RepoPath $f.Repo -PrProbe $pr.Probe
+            $result.status|Should Be 'head_resealed_for_review'
+            $result.previousFinalHead|Should Be $sealedHead
+            $result.finalHead|Should Be $currentHead
+            $result.externalCommitCount|Should Be 1
+            $saved=Get-RunReceipt -Operation 1 -IssueNumber 91 -RepoPath $f.Repo
+            $saved.verificationProvenance|Should Be 'explicit_external_head_reseal'
+            $saved.resultEnvelopeCoversFinalHead|Should Be $false
+            $saved.externalCommitsIncluded|Should Be $true
+            $saved.localVerificationComplete|Should Be $false
+            (Test-RunReceiptVerificationEligible -Receipt $saved -RepoPath $f.Repo).eligible|Should Be $true
+            $readiness=Get-WorkflowMergeReadiness -RepoPath $f.Repo -Receipt $saved -ReviewVerdict PASS -PrProbe $pr.Probe `
+                -CheckLister {param($repo,$number,$head)[pscustomobject]@{ok=$true;checks=@()}}
+            $readiness.ready|Should Be $true
+            $readiness.ciStatus|Should Be 'not-requested'
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '9. 불완전한 reseal provenance는 독립 review 자격을 얻지 못한다' {
+        $f=New-PrFakeRepo
+        try {
+            $id=Get-RepoIdentity -RepoPath $f.Repo
+            $receipt=[pscustomobject]@{operation=1;worker='grok';status='pr_opened';finalHead=(Get-GitHead -Path $f.Repo)
+                resultEnvelopePresent=$true;interrupted=$false;verificationProvenance='explicit_external_head_reseal'
+                ownerRepo=$id.ownerRepo;canonicalRepoRoot=$id.canonicalRepoRoot;repoRootHash=$id.repoRootHash
+                workflow=[pscustomobject]@{mode='pull-request';baseBranch='main';workBranch='operation-router/issue-92'}}
+            $eligible=Test-RunReceiptVerificationEligible -Receipt $receipt -RepoPath $f.Repo
+            $eligible.eligible|Should Be $false
+            $eligible.reason|Should Be 'reseal_evidence_incomplete'
+        } finally {Remove-PrFakeRepo $f}
     }
 }
 

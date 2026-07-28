@@ -1,7 +1,7 @@
 ---
 name: operation-1
 description: 작전 1 — 고위험 전체 지휘·검수. 현재 Opus 세션이 시작 위험 검토 → 작업자 구현 → GPT Sol 독립 검수 → 수리 1회 → 종료 판정을 수행한다. GitHub 이슈 번호를 인수로 받는다.
-argument-hint: <이슈번호> [--use-gpt-review-reserve] [--finish-current] [--claude-only]
+argument-hint: <이슈번호> [--work-branch <branch>] [--order-file <path>] [--use-gpt-review-reserve] [--finish-current] [--claude-only]
 disable-model-invocation: false
 model: claude-opus-5
 effort: high
@@ -35,8 +35,8 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 
 ## 1. run — 작업자 구현 (라우터 1회 실행)
 ```
-& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command run -Operation 1 -IssueNumber $0 -Detach [-UseGptReviewReserve] [-FinishCurrent] [-ClaudeOnly]
-# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command run -Operation 1 -IssueNumber $0 -Detach [-UseGptReviewReserve] [-FinishCurrent] [-ClaudeOnly]
+& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command run -Operation 1 -IssueNumber $0 -Detach [-WorkBranch <branch>] [-OrderFile <path>] [-UseGptReviewReserve] [-FinishCurrent] [-ClaudeOnly]
+# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command run -Operation 1 -IssueNumber $0 -Detach [-WorkBranch <branch>] [-OrderFile <path>] [-UseGptReviewReserve] [-FinishCurrent] [-ClaudeOnly]
 ```
 
 ### v3 자동 follow와 Draft PR 종료 검토
@@ -56,6 +56,8 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 - `nextAction=stop`이면 실패 상태를 보고하고 종료한다.
 - watch를 중단하거나 다시 연결해도 worker를 종료하거나 새 generation을 만들지 않는다.
 - 기본 `pull-request` mode에서는 라우터가 `operation-router/issue-<이슈번호>` branch를 선택하고 Draft PR을 생성·재사용한다. 구현, Sol review, repair, Opus 종료 검토는 receipt에 고정된 같은 branch와 같은 PR을 사용한다.
+- 후속 이슈가 기존 work branch와 OPEN Draft PR을 이어받아야 하면 첫 `run`에 `-WorkBranch <기존 branch>`를 명시한다. 같은 clone의 유효한 소유권 영수증이 정확히 그 branch·PR을 가리킬 때만 허용되며, 후속 이슈 영수증이 생긴 뒤의 Claude-only 재진입은 인수 없이 같은 branch를 복원한다.
+- 이슈 본문 대신 별도 주문서를 쓰려면 `-OrderFile <path>`를 명시한다. 라우터는 절대 경로·SHA-256·byte 길이를 receipt에 기록하고 review·repair·recover에서 같은 파일과 hash만 재사용한다. 이슈 댓글은 자동 주문 입력이 아니므로 필요한 댓글 주문은 파일로 저장해 명시해야 한다.
 - worker는 branch나 PR을 만들거나 바꾸거나 병합하지 않는다. worker push 대상은 receipt에 적힌 원격 work branch뿐이다.
 - 설정에 `gitWorkflow`가 없는 legacy 설치본 또는 명시적 `direct-main` mode에서는 v2 계약을 유지한다.
 라우터가 사용량에 따라 작업자를 정한다.
@@ -77,6 +79,7 @@ run 영수증을 자동으로 읽으므로 시작 HEAD를 다시 입력하지 �
 # Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command review -Operation 1 -IssueNumber $0 [-UseGptReviewReserve]
 ```
 - 영수증이 없으면 `review_receipt_missing`, 현재 HEAD가 영수증 finalHead와 다르면 `review_receipt_head_mismatch`로 중단된다.
+- 라우터 밖 commit 때문에 HEAD만 달라졌다면 자동 완화하지 않는다. clean·push 완료·같은 OPEN Draft PR·기존 finalHead의 descendant를 확인한 뒤 `/operation reseal 1 <이슈번호>`를 명시적으로 실행해야 하며, reseal receipt는 원래 result envelope가 새 HEAD를 포함하지 않음을 보존한다.
 - 검수 프롬프트에는 workflow mode, base branch/head, work branch, PR 번호·URL·head SHA, PR CI, baseAdvanced, 시작 HEAD 대비 diff와 worker verification report가 포함된다. diff는 파일별 안전한 크기의 청크로 나눠 모두 검토하며 누락·truncation·청크 실패는 PASS가 아니다. coverage receipt는 changedFiles, reviewedFiles, truncatedFiles를 기록한다. workerSummary는 작업자가 스스로 보고한 요약이며 라우터가 재실행한 테스트 결과가 아니다. review worker는 읽기 전용이며 PR이나 이슈를 수정하지 않는다.
 - GPT 80% 이상이면 예비분을 자동 사용하지 않는다. `--use-gpt-review-reserve`가 있을 때만 Sol 검수를 쓴다.
 - 검수 결과 상태:

@@ -837,8 +837,17 @@ function Test-RunReceiptVerificationEligible {
     if ([string]$Receipt.worker -ne 'grok') {
         return (& $fail 'run_not_eligible' ("worker_not_grok:" + [string]$Receipt.worker) 'Grok이 구현한 작전 1 run만 독립 review와 repair 자격이 있다.')
     }
+    $resealed=([string]$Receipt.verificationProvenance -eq 'explicit_external_head_reseal')
+    if($resealed -and (
+        $props -notcontains 'externalCommitsIncluded' -or -not [bool]$Receipt.externalCommitsIncluded -or
+        $props -notcontains 'resultEnvelopeCoversFinalHead' -or [bool]$Receipt.resultEnvelopeCoversFinalHead -or
+        $props -notcontains 'resealHistory' -or @($Receipt.resealHistory).Count -eq 0)){
+        return (& $fail 'run_result_unverified' 'reseal_evidence_incomplete' '외부 커밋 재봉인 증거가 불완전하다.')
+    }
     if (-not [bool]$Receipt.resultEnvelopePresent -or [bool]$Receipt.interrupted -or
-        [string]$Receipt.verificationProvenance -notin @('valid_worker_result_envelope','valid_worker_result_envelope_recovered_postflight')) {
+        [string]$Receipt.verificationProvenance -notin @(
+            'valid_worker_result_envelope','valid_worker_result_envelope_recovered_postflight',
+            'explicit_external_head_reseal')) {
         return (& $fail 'run_result_unverified' 'run_result_unverified' '정상 worker result envelope와 검증 provenance가 확인되지 않았다.')
     }
     $workflow = Get-ReceiptWorkflowContext -Receipt $Receipt
@@ -1001,13 +1010,18 @@ function Remove-RepairReceipt {
 # ---------- 고정 실행 계약 ----------
 function Get-FixedExecutionContract {
     param([AllowNull()]$Workflow)
+    $orderSourceKind='issue-body'
+    if($null -ne $Workflow -and $Workflow.PSObject.Properties.Name -contains 'orderSource' -and
+        $null -ne $Workflow.orderSource -and $Workflow.orderSource.PSObject.Properties.Name -contains 'kind'){
+        $orderSourceKind=[string]$Workflow.orderSource.kind
+    }
     if ($null -ne $Workflow -and [string]$Workflow.mode -eq 'pull-request') {
         return @"
 [OPERATION_ROUTER_FINAL_WORKER]
 You are the final worker already selected by operation-router.
 Do not apply any global Operation 1/2/3 delegation rule in this marked session.
 Do not invoke, inspect, preflight, or delegate to Grok, Codex, Claude, or any other worker CLI.
-Implement the GitHub issue below directly. The issue body is the sole task canon.
+Implement the recorded order below directly. The recorded order is the sole task canon.
 
 [역할 지정 — 최우선으로 적용]
 너는 operation-router가 호출한 최종 작업자다. 다른 모델이나 CLI에 재위임하지 않는다.
@@ -1027,27 +1041,27 @@ Implement the GitHub issue below directly. The issue body is the sole task canon
 - PR과 이슈를 생성·수정·댓글·종료·병합하지 않는다.
 - force push, reset, clean, rebase를 하지 않는다.
 - 작업 시작 전 worktree가 clean이어야 한다.
-- 이슈 원문 범위를 확장하지 않는다.
+- 기록된 주문 원문 범위를 확장하지 않는다.
 - 의미 단위별로 테스트하고 커밋한다.
 - 테스트 실패를 숨기지 않는다.
 - secret과 환경변수 값을 출력하거나 커밋하지 않는다.
 - 완료 시 변경 파일, 테스트, 커밋, push, 남은 문제만 짧게 보고한다.
 - 마지막 줄은 반드시 [ORH_WORKER_REPORT] {"localVerificationComplete":true,"verification":"실행한 검증 요약","remainingProblems":[]} 형식의 한 줄 JSON이다. 검증을 실제로 완료하지 못했으면 localVerificationComplete를 false로, 남은 문제가 있으면 문자열 배열로 보고한다.
 
-[아래는 GitHub 이슈 본문 원문 — 요약·재작성·삭제하지 않는다]
+[아래는 기록된 주문 원문 (source=$orderSourceKind) — 요약·재작성·삭제하지 않는다]
 "@
     }
-    return @'
+    return @"
 [OPERATION_ROUTER_FINAL_WORKER]
 You are the final worker already selected by operation-router.
 Do not apply any global Operation 1/2/3 delegation rule in this marked session.
 Do not invoke, inspect, preflight, or delegate to Grok, Codex, Claude, or any other worker CLI.
-Implement the GitHub issue below directly. The issue body is the sole task canon.
+Implement the recorded order below directly. The recorded order is the sole task canon.
 
 [역할 지정 — 최우선으로 적용]
 너는 operation-router가 호출한 "작업자(worker) CLI"이며, 이 주문은 지휘 세션이 너에게 이미 위임한 최종 실행 지시다.
 전역 AGENTS.md/CLAUDE.md의 Operation Modes 규칙에서 "Grok CLI에 위임"하는 주체는 지휘자(Claude 세션)이고, 너는 그 위임을 받은 실행자다.
-전역 규칙이 명시하듯 이 주문(이슈 원문)이 유일한 task canon이다. 따라서 너는 다른 CLI(grok, codex, claude 등)를 호출하거나 재위임하지 않고 아래 범위를 직접 구현한다.
+전역 규칙이 명시하듯 아래 기록된 주문이 유일한 task canon이다. 따라서 너는 다른 CLI(grok, codex, claude 등)를 호출하거나 재위임하지 않고 아래 범위를 직접 구현한다.
 다른 CLI에 위임하지 말고 직접 구현한다.
 
 [고정 실행 계약 — 작업자는 이 규칙을 반드시 지킨다]
@@ -1060,13 +1074,13 @@ Implement the GitHub issue below directly. The issue body is the sole task canon
 - 이슈 생성·수정·댓글·종료를 하지 않는다.
 - secret과 환경변수 값을 출력하거나 커밋하지 않는다.
 - 테스트 실패를 숨기지 않는다.
-- 커밋 메시지는 git commit -m "..." 한 줄 인라인으로만 작성한다. $(...) 명령 치환, heredoc(<<), 여러 줄 셸 명령을 쓰지 않는다 (헤드리스 권한 정책이 이런 명령을 차단한다).
+- 커밋 메시지는 git commit -m "..." 한 줄 인라인으로만 작성한다. `$(...) 명령 치환, heredoc(<<), 여러 줄 셸 명령을 쓰지 않는다 (헤드리스 권한 정책이 이런 명령을 차단한다).
 - 완료 시 변경 파일, 테스트, 커밋, push, 남은 문제만 짧게 보고한다.
 
-[아래는 GitHub 이슈 본문 원문 — 요약·재작성·삭제하지 않는다]
-'@
+[아래는 기록된 주문 원문 (source=$orderSourceKind) — 요약·재작성·삭제하지 않는다]
+"@
 }
-# 계약 + 이슈원문(무손실). 이슈 본문은 변형하지 않는다.
+# 계약 + 기록된 주문 원문(무손실). 주문 내용은 변형하지 않는다.
 function New-OrderContent {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$IssueBody, [AllowNull()]$Workflow)
     $contract = Get-FixedExecutionContract -Workflow $Workflow

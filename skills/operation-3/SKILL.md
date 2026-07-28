@@ -1,7 +1,7 @@
 ---
 name: operation-3
 description: 작전 3 — 명확한 소규모 작업. 현재 Haiku 세션은 저장소를 조사하거나 검토하지 않고, 인수 검증 → 라우터 1회 실행 → postflight 결과 표시만 한다. GitHub 이슈 번호를 인수로 받는다.
-argument-hint: <이슈번호> [--kind logic|mechanical] [--finish-current] [--claude-only]
+argument-hint: <이슈번호> [--work-branch <branch>] [--order-file <path>] [--kind logic|mechanical] [--finish-current] [--claude-only]
 disable-model-invocation: false
 model: claude-haiku-4-5-20251001
 effort: low
@@ -34,8 +34,8 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 
 ## 실행
 ```
-& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command run -Operation 3 -IssueNumber $0 -Detach [-Kind logic|mechanical] [-FinishCurrent] [-ClaudeOnly]
-# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command run -Operation 3 -IssueNumber $0 -Detach [-Kind logic|mechanical] [-FinishCurrent] [-ClaudeOnly]
+& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command run -Operation 3 -IssueNumber $0 -Detach [-WorkBranch <branch>] [-OrderFile <path>] [-Kind logic|mechanical] [-FinishCurrent] [-ClaudeOnly]
+# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command run -Operation 3 -IssueNumber $0 -Detach [-WorkBranch <branch>] [-OrderFile <path>] [-Kind logic|mechanical] [-FinishCurrent] [-ClaudeOnly]
 ```
 
 - 기본 kind는 `logic`. 기계적/로직 판단은 라우터가 LLM으로 추측하지 않고 인수로 받는다.

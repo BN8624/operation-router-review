@@ -1,10 +1,16 @@
-# REENTRY — operation-router v3.0.10 pull-request workflow
+# REENTRY — operation-router v3.0.11 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=619 sourceTreeFailed=0 installedFixturePassed=619 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=628 sourceTreeFailed=0 installedFixturePassed=628 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 619 passed, 0 failed; installed fixture 619 passed, 0 failed.
+Official verification: source-tree 628 passed, 0 failed; installed fixture 628 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.11 follow-up order continuity
+
+후속 이슈는 첫 `run`에 `-WorkBranch <기존 branch>`를 명시해 receipt가 소유한 기존 OPEN Draft PR을 이어받을 수 있다. 별도 주문서는 `-OrderFile <path>`로 주입하며 source path·SHA-256·byte length가 receipt에 고정된다. Review·repair·recover는 같은 source hash만 재사용한다.
+
+Operation 1에서 라우터 밖 commit이 추가되면 `reseal -Operation 1 -IssueNumber <n>`을 명시적으로 실행한다. Clean·push·descendant HEAD와 같은 OPEN Draft PR을 검증하고 stale review/repair를 폐기하며, 원래 result envelope가 현재 HEAD를 포함하지 않는다는 증거를 남긴다.
 
 ## v3.0.10 commit-bound direct-main workflow evidence
 

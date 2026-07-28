@@ -319,13 +319,45 @@ function Find-IssueWorkflowReceipt {
     return $owned[0]
 }
 
+function Find-WorkflowReceiptForWorkBranch {
+    param(
+        [Parameter(Mandatory)][string]$WorkBranch,
+        [Parameter(Mandatory)][string]$RepoPath
+    )
+    if (-not (Test-SafeGitRefPolicyValue -Value $WorkBranch)) { return $null }
+    $namespace=Get-PendingNamespacePath -RepoPath $RepoPath
+    if(-not (Test-Path -LiteralPath $namespace -PathType Container)){return $null}
+    $candidates=@()
+    foreach($file in @(Get-ChildItem -LiteralPath $namespace -File -Filter 'issue-*-workflow.json' -ErrorAction SilentlyContinue)){
+        Assert-PathWithinRoot -Path $file.FullName -Root $Script:PendingDir|Out-Null
+        try{$receipt=Read-JsonFileStable -Path $file.FullName -MaxAttempts 3 -DelayMilliseconds 25}catch{continue}
+        if($null -eq $receipt -or -not (Test-ReceiptRepoMatch -Receipt $receipt -RepoPath $RepoPath)){continue}
+        $workflow=Get-ReceiptWorkflowContext -Receipt $receipt
+        if([string]$workflow.mode -cne 'pull-request' -or [string]$workflow.workBranch -cne $WorkBranch){continue}
+        if($receipt.PSObject.Properties.Name -notcontains 'issueNumber' -or $receipt.issueNumber -isnot [int]){continue}
+        $candidates += [pscustomobject]@{
+            receipt=$receipt
+            workflow=$workflow
+            sourceIssueNumber=[int]$receipt.issueNumber
+            updatedAt=if($receipt.PSObject.Properties.Name -contains 'updatedAt'){[string]$receipt.updatedAt}else{''}
+        }
+    }
+    $ordered=@($candidates|Sort-Object updatedAt -Descending)
+    if($ordered.Count -eq 0){return $null}
+    return $ordered[0]
+}
+
 function Initialize-GitWorkflowRun {
     param(
         [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][int]$IssueNumber,
-        [Parameter(Mandatory)]$Config, [scriptblock]$FetchProbe, [scriptblock]$PrProbe
+        [Parameter(Mandatory)]$Config, [scriptblock]$FetchProbe, [scriptblock]$PrProbe,
+        [string]$WorkBranch
     )
     $policy = Get-GitWorkflowPolicy -Config $Config
     if ($policy.mode -eq 'direct-main') {
+        if(-not [string]::IsNullOrWhiteSpace($WorkBranch)){
+            return [pscustomobject]@{ok=$false;reason='work_branch_override_requires_pull_request_mode'}
+        }
         $pre = Test-StartPreconditions -RepoPath $RepoPath
         if (-not $pre.ok) { return $pre }
         $workflow = [pscustomobject]@{mode='direct-main';baseBranch='main';workBranch=$null;legacyConfig=[bool]$policy.legacyDefault}
@@ -338,9 +370,36 @@ function Initialize-GitWorkflowRun {
     $ownerRepo = Get-GitOriginOwnerRepo -Path $RepoPath
     if ([string]::IsNullOrWhiteSpace($ownerRepo)) { return [pscustomobject]@{ok=$false;reason='remote_sync_unavailable'} }
     $base = [string]$policy.baseBranch
-    $work = Get-IssueWorkBranch -IssueNumber $IssueNumber -Policy $policy
+    $generatedWork = Get-IssueWorkBranch -IssueNumber $IssueNumber -Policy $policy
+    $issueOwnerReceipt=Find-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $issueOwnerWorkflow=if($null -ne $issueOwnerReceipt){Get-ReceiptWorkflowContext -Receipt $issueOwnerReceipt}else{$null}
+    $work = if(-not [string]::IsNullOrWhiteSpace($WorkBranch)){
+        [string]$WorkBranch
+    }elseif($null -ne $issueOwnerWorkflow -and [string]$issueOwnerWorkflow.mode -eq 'pull-request' -and
+        -not [string]::IsNullOrWhiteSpace([string]$issueOwnerWorkflow.workBranch)){
+        [string]$issueOwnerWorkflow.workBranch
+    }else{
+        $generatedWork
+    }
+    if(-not (Test-SafeGitRefPolicyValue -Value $work)){
+        return [pscustomobject]@{ok=$false;reason='unsafe_work_branch_override'}
+    }
+    $continuation=($work -cne $generatedWork)
     $current = Get-GitCurrentBranch -Path $RepoPath
-    $ownerReceipt = Find-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $continuationOwner=$null
+    $ownerReceipt = if($continuation){
+        if($null -ne $issueOwnerReceipt){
+            $continuationOwner=[pscustomobject]@{receipt=$issueOwnerReceipt;workflow=$issueOwnerWorkflow;sourceIssueNumber=$IssueNumber}
+        }else{
+            $continuationOwner=Find-WorkflowReceiptForWorkBranch -WorkBranch $work -RepoPath $RepoPath
+        }
+        if($null -ne $continuationOwner){$continuationOwner.receipt}else{$null}
+    }else{
+        $issueOwnerReceipt
+    }
+    if($continuation -and $null -eq $ownerReceipt){
+        return [pscustomobject]@{ok=$false;reason='work_branch_override_unowned'}
+    }
     if ($current -notin @($base,$work)) { return [pscustomobject]@{ok=$false;reason='not_on_base_or_work_branch'} }
     if ($current -eq $work -and $null -eq $ownerReceipt) { return [pscustomobject]@{ok=$false;reason='work_branch_unowned'} }
     $localBase = Get-GitRefHead -RepoPath $RepoPath -Ref "refs/heads/$base"
@@ -437,11 +496,28 @@ function Initialize-GitWorkflowRun {
     if (-not $baseWorkflow.ok) { return [pscustomobject]@{ok=$false;reason='remote_sync_unavailable'} }
     $workflow = [pscustomobject]@{
         mode='pull-request';baseBranch=$base;baseHead=$localBase;baseLocalHead=$localBase;baseRemoteHead=$remoteBase
-        workBranch=$work;remoteWorkBranch="origin/$work";workStartHead=$snap.startHead;workRemoteHeadAtStart=$remoteWork;finalHead=$null
+        workBranch=$work;remoteWorkBranch="origin/$work";workStartHead=$snap.startHead;workRemoteHeadAtStart=$remoteWork;finalHead=$remoteWork
         initialUpstream=(Get-GitUpstream -RepoPath $RepoPath);baseAdvanced=$false;pr=$priorPr
         createDraftPullRequest=[bool]$policy.createDraftPullRequest;autoMerge=$false
         requireCiWhenWorkflowPresent=[bool]$policy.requireCiWhenWorkflowPresent
-        baseWorkflow=$baseWorkflow;headWorkflow=$null
+        baseWorkflow=$baseWorkflow;headWorkflow=if($remoteWork){Get-GitWorkflowSnapshot -RepoPath $RepoPath -Ref $remoteWork}else{$null}
+    }
+    if($continuation){
+        $continuationSourceIssue=[int]$continuationOwner.sourceIssueNumber
+        if($null -ne $issueOwnerWorkflow -and $issueOwnerWorkflow.PSObject.Properties.Name -contains 'continuation' -and
+            $null -ne $issueOwnerWorkflow.continuation -and
+            $issueOwnerWorkflow.continuation.PSObject.Properties.Name -contains 'sourceIssueNumber'){
+            $continuationSourceIssue=[int]$issueOwnerWorkflow.continuation.sourceIssueNumber
+        }
+        Add-Member -InputObject $workflow -NotePropertyName continuation -NotePropertyValue ([pscustomobject]@{
+            explicitWorkBranch=$true
+            sourceIssueNumber=$continuationSourceIssue
+            currentIssueNumber=$IssueNumber
+            adoptedAt=(Get-Date).ToUniversalTime().ToString('o')
+        }) -Force
+    }
+    if($null -ne $issueOwnerWorkflow -and $issueOwnerWorkflow.PSObject.Properties.Name -contains 'orderSource'){
+        Add-Member -InputObject $workflow -NotePropertyName orderSource -NotePropertyValue $issueOwnerWorkflow.orderSource -Force
     }
     Add-Member -InputObject $snap -NotePropertyName workflow -NotePropertyValue $workflow -Force
     return [pscustomobject]@{ok=$true;snapshot=$snap;ownerRepo=$ownerRepo;workflow=$workflow;policy=$policy}
@@ -1033,12 +1109,17 @@ function Get-WorkflowMergeReadiness {
     foreach($required in @('resultEnvelopePresent','interrupted','localVerificationComplete','verificationProvenance','artifactSanitizationStatus','artifactRetentionStatus')){
         if($Receipt.PSObject.Properties.Name -notcontains $required){return [pscustomobject]@{ready=$false;status='workflow_receipt_incomplete';workflow=$w}}
     }
-    if(-not [bool]$Receipt.resultEnvelopePresent -or [bool]$Receipt.interrupted -or -not [bool]$Receipt.localVerificationComplete){
+    $explicitReseal=([string]$Receipt.verificationProvenance -eq 'explicit_external_head_reseal' -and
+        $Receipt.PSObject.Properties.Name -contains 'externalCommitsIncluded' -and [bool]$Receipt.externalCommitsIncluded -and
+        $Receipt.PSObject.Properties.Name -contains 'resultEnvelopeCoversFinalHead' -and -not [bool]$Receipt.resultEnvelopeCoversFinalHead -and
+        $Receipt.PSObject.Properties.Name -contains 'resealHistory' -and @($Receipt.resealHistory).Count -gt 0)
+    if(-not [bool]$Receipt.resultEnvelopePresent -or [bool]$Receipt.interrupted -or
+        (-not [bool]$Receipt.localVerificationComplete -and -not $explicitReseal)){
         return [pscustomobject]@{ready=$false;status='worker_result_unverified';workflow=$w}
     }
     if([string]$Receipt.verificationProvenance -notin @(
         'valid_worker_result_envelope','valid_worker_result_envelope_recovered_postflight',
-        'valid_repair_worker_result','valid_claude_completion_report')){
+        'valid_repair_worker_result','valid_claude_completion_report','explicit_external_head_reseal')){
         return [pscustomobject]@{ready=$false;status='worker_result_unverified';workflow=$w}
     }
     if($Receipt.PSObject.Properties.Name -contains 'workerRemainingProblems' -and

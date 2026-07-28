@@ -1,5 +1,5 @@
 {
-  "_comment": "operation-router v3.0.3 config. New bundles default to issue branches and Draft PRs. A legacy installed config with no gitWorkflow object remains direct-main. Model assignments are pinned here and synchronized to generated Skill, documentation, doctor, and test-fixture surfaces.",
+  "_comment": "operation-router v3.0.11 config. New bundles default to issue branches and Draft PRs. A legacy installed config with no gitWorkflow object remains direct-main. Model assignments are pinned here and synchronized to generated Skill, documentation, doctor, and test-fixture surfaces.",
   "modelPolicy": {
     "selection": "pinned",
     "allowLatestAliases": false,

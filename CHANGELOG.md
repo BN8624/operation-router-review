@@ -1,5 +1,15 @@
 # CHANGELOG — operation-router
 
+## v3.0.11 (2026-07-28)
+
+- follow-up work branch: `run -WorkBranch` reuses an existing receipt-owned work branch only when its exact OPEN Draft PR and remote HEAD remain valid. The follow-up issue receives a link receipt and re-entry restores the adopted branch without a second branch or PR.
+- explicit order source: `run -OrderFile` records absolute path, SHA-256, and byte length. Review, repair, and recover reload the recorded source and fail closed if it changed or disappeared; issue-body input is also identified and hashed.
+- explicit HEAD reseal: Operation 1 `reseal` accepts only a clean, pushed descendant HEAD on the receipt-bound branch and same OPEN Draft PR. It invalidates stale review/repair receipts and records external commit count plus `resultEnvelopeCoversFinalHead=false`.
+- review/finalize: a complete explicit reseal provenance can enter Grok-only independent review and, after full diff PASS plus current CI/context gates, finalize without hiding that local worker verification does not cover the external commits.
+- unchanged constraint: independent Sol review still requires the original implementation worker to be Grok. Reseal does not relabel human, Claude, or GPT work.
+- tests: cross-issue branch/PR adoption and re-entry, unowned/unsafe override rejection, immutable file and issue-body order sources, successful and incomplete reseal evidence regressions were added. Paid providers and live GitHub mutations were not invoked.
+- refactor metrics: baseline `4ef0c56ff0e8ce24fccdaf161835635e8e29feb5`, `common.ps1` 1671->1214, `run-operation.ps1` 2414->2582, `state-store.ps1` 309, `worker-contract.ps1` 319 lines.
+
 ## v3.0.10 (2026-07-27)
 
 - direct-main workflow evidence: Operation 3의 branch·HEAD 일치 게이트 뒤 정확한 final HEAD에서 commit-bound workflow snapshot을 읽는다.

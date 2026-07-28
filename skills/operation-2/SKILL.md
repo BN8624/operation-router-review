@@ -1,7 +1,7 @@
 ---
 name: operation-2
 description: 작전 2 — 일반 복합 구현. 현재 Sonnet 세션이 좁은 시작 검토 → Grok 또는 GPT Terra 구현 → 종료 검토 1회를 수행한다. GitHub 이슈 번호를 인수로 받는다.
-argument-hint: <이슈번호> [--finish-current] [--claude-only]
+argument-hint: <이슈번호> [--work-branch <branch>] [--order-file <path>] [--finish-current] [--claude-only]
 disable-model-invocation: false
 model: claude-sonnet-5
 effort: medium
@@ -25,8 +25,8 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 
 ## 2. 작업자 구현 — 라우터 1회 실행
 ```
-& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command run -Operation 2 -IssueNumber $0 -Detach [-FinishCurrent] [-ClaudeOnly]
-# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command run -Operation 2 -IssueNumber $0 -Detach [-FinishCurrent] [-ClaudeOnly]
+& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command run -Operation 2 -IssueNumber $0 -Detach [-WorkBranch <branch>] [-OrderFile <path>] [-FinishCurrent] [-ClaudeOnly]
+# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command run -Operation 2 -IssueNumber $0 -Detach [-WorkBranch <branch>] [-OrderFile <path>] [-FinishCurrent] [-ClaudeOnly]
 ```
 
 ### v3 자동 follow와 Sonnet 종료 검토

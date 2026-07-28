@@ -1,9 +1,9 @@
 ﻿# operation-router 메인 진입점.
-# 명령: run | watch | review | repair | finalize | postflight | recover | abandon-claude | status | doctor | set | reset
-# run 역할: 시작검토 -> 계약+이슈원문 주문서 -> 라우팅 -> 작업자 1회 -> (한도오류 시 부분변경 가드) -> postflight -> 전체 JSON.
+# 명령: run | watch | review | repair | finalize | reseal | postflight | recover | abandon-claude | status | doctor | set | reset
+# run 역할: 시작검토 -> 계약+기록된 주문서 -> 라우팅 -> 작업자 1회 -> (한도오류 시 부분변경 가드) -> postflight -> 전체 JSON.
 
 param(
-    [ValidateSet('run','watch','review','repair','finalize','postflight','recover','abandon-claude','status','doctor','set','reset')][string]$Command = 'run',
+    [ValidateSet('run','watch','review','repair','finalize','reseal','postflight','recover','abandon-claude','status','doctor','set','reset')][string]$Command = 'run',
     [int]$Operation,
     [int]$IssueNumber,
     [ValidateSet('logic','mechanical')][string]$Kind = 'logic',
@@ -17,6 +17,8 @@ param(
     [string]$PostReviewHead,
     [string]$FindingsFile,
     [string]$WorkerReportPath,
+    [string]$WorkBranch,
+    [string]$OrderFile,
     [ValidateSet('grok','gpt')][string]$Target,
     [ValidateSet('PASS','REPAIR_REQUIRED')][string]$ReviewVerdict,
     [string]$Value
@@ -204,6 +206,67 @@ function New-WorkerPolicyFailureOutput {
                   workerExitCode = $workerExit; workerStopReason = $stopReason }
 }
 
+function Resolve-OrderInput {
+    param(
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$RepoPath,
+        [scriptblock]$IssueFetcher,
+        [string]$OrderFile,
+        [AllowNull()]$RecordedSource
+    )
+    $recordedKind=''
+    if($null -ne $RecordedSource -and $RecordedSource.PSObject.Properties.Name -contains 'kind'){
+        $recordedKind=[string]$RecordedSource.kind
+    }
+    $selectedFile=$OrderFile
+    if([string]::IsNullOrWhiteSpace($selectedFile) -and $recordedKind -eq 'file' -and
+        $RecordedSource.PSObject.Properties.Name -contains 'path'){
+        $selectedFile=[string]$RecordedSource.path
+    }
+    if(-not [string]::IsNullOrWhiteSpace($selectedFile)){
+        $fullPath=if([System.IO.Path]::IsPathRooted($selectedFile)){
+            [System.IO.Path]::GetFullPath($selectedFile)
+        }else{
+            [System.IO.Path]::GetFullPath((Join-Path $RepoPath $selectedFile))
+        }
+        if(-not (Test-Path -LiteralPath $fullPath -PathType Leaf)){throw "order file does not exist: $fullPath"}
+        $hash=(Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if($recordedKind -eq 'file' -and $RecordedSource.PSObject.Properties.Name -contains 'sha256' -and
+            [string]$RecordedSource.sha256 -cne $hash){
+            throw 'recorded order file hash does not match the current file'
+        }
+        $content=Get-Content -LiteralPath $fullPath -Raw -Encoding UTF8
+        return [pscustomobject]@{
+            content=$content
+            source=[pscustomobject]@{
+                kind='file';path=$fullPath;sha256=$hash
+                byteLength=[int64](Get-Item -LiteralPath $fullPath).Length
+            }
+        }
+    }
+    if($recordedKind -notin @('','issue-body')){
+        throw "unsupported recorded order source '$recordedKind'"
+    }
+    if($null -eq $IssueFetcher){
+        $IssueFetcher={
+            param($num,$path)
+            $out=& gh issue view $num --json body -q .body 2>&1
+            if($LASTEXITCODE -ne 0){throw "gh issue view failed: $out"}
+            return ($out|Out-String)
+        }
+    }
+    $content=& $IssueFetcher $IssueNumber $RepoPath
+    $hash=Get-Sha256Text -Text ([string]$content)
+    if($recordedKind -eq 'issue-body' -and $RecordedSource.PSObject.Properties.Name -contains 'sha256' -and
+        [string]$RecordedSource.sha256 -cne $hash){
+        throw 'recorded issue body hash does not match the current issue body'
+    }
+    return [pscustomobject]@{
+        content=[string]$content
+        source=[pscustomobject]@{kind='issue-body';issueNumber=$IssueNumber;sha256=$hash}
+    }
+}
+
 # 부분 변경으로 fallback을 거부할 때 사용자 반환값과 persistent execution receipt를 같은 terminal 상태로 맞춘다.
 function Complete-PartialWorkerExecutionReceipt {
     param(
@@ -358,7 +421,7 @@ localVerificationComplete가 false이거나 remainingProblems가 비어 있지 �
             orderPath = $orderPath; workerReportPath=$reportPath; startHead = $Snapshot.startHead
             postflightCommand = "-Command postflight -Operation $Operation -IssueNumber $IssueNumber -WorkerReportPath `"$reportPath`""
             workflow = $Workflow; workflowMode=$Workflow.mode; baseBranch=$Workflow.baseBranch; workBranch=$Workflow.workBranch
-            note = '현재 세션이 요구 모델이면 고정 실행 계약+이슈 원문(orderPath)을 직접 수행한 뒤 postflightCommand를 실행하라. 재라우팅/재귀 handoff 없음.'
+            note = '현재 세션이 요구 모델이면 고정 실행 계약+기록된 주문 원문(orderPath)을 직접 수행한 뒤 postflightCommand를 실행하라. 재라우팅/재귀 handoff 없음.'
         }
 }
 
@@ -439,7 +502,7 @@ function Invoke-RunOperation {
         [scriptblock]$IssueFetcher, [scriptblock]$GrokRunner, [scriptblock]$GptRunner, [scriptblock]$CiProbe,
         [scriptblock]$ClaudeImplementer, [scriptblock]$FetchProbe, [scriptblock]$PrProbe,
         [scriptblock]$CheckLister, [scriptblock]$IssueTitleFetcher, [scriptblock]$RemoteHeadProbe,
-        [scriptblock]$ProcessProbe
+        [scriptblock]$ProcessProbe, [string]$WorkBranch, [string]$OrderFile
     )
     $config = Get-Config
     if(-not (Test-GitRepository -Path $RepoPath)){
@@ -469,7 +532,18 @@ function Invoke-RunOperation {
                 }
         }
     }
-    $pre = Initialize-GitWorkflowRun -RepoPath $RepoPath -IssueNumber $IssueNumber -Config $config -FetchProbe $FetchProbe -PrProbe $PrProbe
+    $orderInput=$null
+    if(-not [string]::IsNullOrWhiteSpace($OrderFile)){
+        try{
+            $orderInput=Resolve-OrderInput -IssueNumber $IssueNumber -RepoPath $RepoPath -OrderFile $OrderFile
+        }catch{
+            $orderError=Protect-SecretText -Text ([string]$_.Exception.Message)
+            return New-FinalOutput -Operation $OperationNumber -RouteLabel 'blocked-preflight' -Status 'order_input_unavailable' `
+                -Worker $null -Model $null -Effort $null -Snapshot $null -Postflight $null `
+                -IssueNumber $IssueNumber -LogPath $null -RemainingProblems @($orderError)
+        }
+    }
+    $pre = Initialize-GitWorkflowRun -RepoPath $RepoPath -IssueNumber $IssueNumber -Config $config -FetchProbe $FetchProbe -PrProbe $PrProbe -WorkBranch $WorkBranch
     if (-not $pre.ok) {
         $preSnap = $null
         if ($pre.PSObject.Properties.Name -contains 'snapshot') { $preSnap = $pre.snapshot }
@@ -479,23 +553,25 @@ function Invoke-RunOperation {
     }
     $snapshot = $pre.snapshot
     $workflow = Copy-WorkflowContext -Workflow $pre.workflow
+    if($null -eq $orderInput){
+        try{
+            $recordedOrderSource=if($workflow.PSObject.Properties.Name -contains 'orderSource'){$workflow.orderSource}else{$null}
+            $orderInput=Resolve-OrderInput -IssueNumber $IssueNumber -RepoPath $RepoPath -IssueFetcher $IssueFetcher -RecordedSource $recordedOrderSource
+        }catch{
+            $orderError=Protect-SecretText -Text ([string]$_.Exception.Message)
+            return New-FinalOutput -Operation $OperationNumber -RouteLabel 'blocked-preflight' -Status 'order_input_unavailable' `
+                -Worker $null -Model $null -Effort $null -Snapshot $snapshot -Postflight $null `
+                -IssueNumber $IssueNumber -LogPath $null -RemainingProblems @($orderError)
+        }
+    }
+    Add-Member -InputObject $workflow -NotePropertyName orderSource -NotePropertyValue $orderInput.source -Force
     Add-Member -InputObject $workflow -NotePropertyName issueNumber -NotePropertyValue $IssueNumber -Force
     Add-Member -InputObject $snapshot -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $workflow) -Force
     if([string]$workflow.mode -eq 'pull-request'){
         Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow | Out-Null
     }
 
-    if ($null -eq $IssueFetcher) {
-        $IssueFetcher = {
-            param($num, $path)
-            $r = Invoke-GitRaw -Path $path -GitArgs @('rev-parse','--is-inside-work-tree')
-            $out = & gh issue view $num --json body -q .body 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "gh issue view failed: $out" }
-            return ($out | Out-String)
-        }
-    }
-    $issueBody = & $IssueFetcher $IssueNumber $RepoPath
-    $order = New-OrderContent -IssueBody $issueBody -Workflow $workflow
+    $order = New-OrderContent -IssueBody $orderInput.content -Workflow $workflow
     $tempOrderPath = New-TempOrderFile -Content $order
 
     $log = New-Object System.Collections.Generic.List[string]
@@ -1112,10 +1188,14 @@ function Invoke-OperationReview {
             startHead = $startHead; finalHead = $finalHead }
     }
 
-    if ($null -eq $IssueFetcher) {
-        $IssueFetcher = { param($num, $path) $out = & gh issue view $num --json body -q .body 2>&1; if ($LASTEXITCODE -ne 0) { throw "gh issue view failed: $out" }; return ($out | Out-String) }
+    $recordedOrderSource=if($workflow.PSObject.Properties.Name -contains 'orderSource'){$workflow.orderSource}else{$null}
+    try{
+        $reviewOrderInput=Resolve-OrderInput -IssueNumber $IssueNumber -RepoPath $RepoPath -IssueFetcher $IssueFetcher -RecordedSource $recordedOrderSource
+    }catch{
+        return [pscustomobject]@{status='review_not_eligible';verdict=$null;findings=@();reason='order_input_changed_or_unavailable'
+            note=(Protect-SecretText -Text ([string]$_.Exception.Message))}
     }
-    $issueBody = & $IssueFetcher $IssueNumber $RepoPath
+    $issueBody=$reviewOrderInput.content
     $coverage=Get-GitReviewDiffChunks -Path $RepoPath -SinceHead $startHead
     $changed=@($coverage.changedFiles)
     $reviewedFiles=@()
@@ -1206,7 +1286,7 @@ $($changed -join "`n")
 [workerSummary — 작업자가 스스로 보고한 요약이며 라우터가 재실행한 테스트 결과가 아니다]
 $workerSummary
 
-[GitHub 이슈 원문]
+[기록된 주문 원문]
 $issueBody
 
 [변경 diff — 현재 파일 청크]
@@ -1301,7 +1381,7 @@ $($chunk.text)
 }
 
 # ---------------- 작전 1: 단일 수리 (v2.2) ----------------
-# 검수가 REPAIR_REQUIRED일 때, 원래 이슈 원문 + findings만 작업자에게 전달해 최대 1회 수리.
+# 검수가 REPAIR_REQUIRED일 때, 원래 기록된 주문 원문 + findings만 작업자에게 전달해 최대 1회 수리.
 # - 수리 워커도 사용량 상태를 준수한다. 사용할 작업자가 없으면 repair_worker_unavailable로 중단하고
 #   다른 작업자로 몰래 교체하지 않는다. 검수 예비분은 수리에 사용하지 않는다.
 # - 수리 전 HEAD/worktree가 검수 직후 상태와 일치해야 한다. 재검수는 없다.
@@ -1480,10 +1560,14 @@ function Invoke-OperationRepair {
     $snapshot = Get-StartSnapshot -RepoPath $RepoPath
     Add-Member -InputObject $snapshot -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $workflow) -Force
 
-    if ($null -eq $IssueFetcher) {
-        $IssueFetcher = { param($num, $path) $out = & gh issue view $num --json body -q .body 2>&1; if ($LASTEXITCODE -ne 0) { throw "gh issue view failed: $out" }; return ($out | Out-String) }
+    $recordedOrderSource=if($workflow.PSObject.Properties.Name -contains 'orderSource'){$workflow.orderSource}else{$null}
+    try{
+        $repairOrderInput=Resolve-OrderInput -IssueNumber $IssueNumber -RepoPath $RepoPath -IssueFetcher $IssueFetcher -RecordedSource $recordedOrderSource
+    }catch{
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='repair_order_input_changed_or_unavailable'
+            repairAttempted=$false;reason=(Protect-SecretText -Text ([string]$_.Exception.Message))}
     }
-    $issueBody = & $IssueFetcher $IssueNumber $RepoPath
+    $issueBody=$repairOrderInput.content
     $findingsJson = ($Findings | ConvertTo-Json -Depth 8)
     $repairOrder = (New-OrderContent -IssueBody $issueBody -Workflow $workflow) + "`n`n[검수 결함 목록 — 아래 항목만 수리한다]`n$findingsJson"
     $promptPath = New-TempOrderFile -Content $repairOrder
@@ -1757,22 +1841,19 @@ function Invoke-RecoverCommand {
                 }
                 # clean → 자동 Plan B (동기 계약과 동일). 주문서는 이슈를 재조회해 재구성한다.
                 # Plan B는 새 execution generation을 열어야 하므로 현재 recover execution lock을 잠시 해제한다.
-                if ($null -eq $IssueFetcher) {
-                    $IssueFetcher = {
-                        param($num, $path)
-                        $out = & gh issue view $num --json body -q .body 2>&1
-                        if ($LASTEXITCODE -ne 0) { throw "gh issue view failed: $out" }
-                        return ($out | Out-String)
-                    }
-                }
                 try {
-                    $issueBody = & $IssueFetcher $IssueNumber $RepoPath
+                    $recordedOrderSource=if($workflow.PSObject.Properties.Name -contains 'orderSource'){$workflow.orderSource}else{$null}
+                    $recoveredOrderInput=Resolve-OrderInput -IssueNumber $IssueNumber -RepoPath $RepoPath -IssueFetcher $IssueFetcher -RecordedSource $recordedOrderSource
+                    $issueBody=$recoveredOrderInput.content
                 } catch {
                     $planBError = Protect-SecretText -Text ([string]$_.Exception.Message)
-                    $log.Add("Plan B issue fetch failed: $planBError")
+                    $planBStatus=if($null -ne $recordedOrderSource -and
+                        $recordedOrderSource.PSObject.Properties.Name -contains 'kind' -and
+                        [string]$recordedOrderSource.kind -eq 'file'){'order_input_unavailable'}else{'issue_fetch_failed'}
+                    $log.Add("Plan B order input failed: $planBError")
                     return (Complete-RecoveredPolicyFailure -Receipt $receipt -RepoPath $RepoPath -Snapshot $snapshot -Workflow $workflow `
                         -Status 'quota_exhausted' -ErrorClass $errorClass -WorkerResult $result -UsageStateChanged $true `
-                        -FallbackAttempted $false -ExtraFields @{ planBStatus='issue_fetch_failed'; planBError=$planBError })
+                        -FallbackAttempted $false -ExtraFields @{ planBStatus=$planBStatus; planBError=$planBError })
                 }
                 $order = New-OrderContent -IssueBody $issueBody -Workflow $workflow
                 $tempOrderPath = New-TempOrderFile -Content $order
@@ -1938,6 +2019,111 @@ function Invoke-RecoverCommand {
             }
         }
     } finally { if ($null -ne $lock) { $lock.Dispose() } }
+}
+
+function Invoke-ResealCommand {
+    param(
+        [Parameter(Mandatory)][int]$OperationNumber,[Parameter(Mandatory)][int]$IssueNumber,
+        [string]$RepoPath=(Get-Location).Path,[scriptblock]$PrProbe,[scriptblock]$RemoteHeadProbe,
+        [scriptblock]$ProcessProbe
+    )
+    if($OperationNumber -ne 1){
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_not_eligible';reason='operation_not_1';workerCalls=0}
+    }
+    $receipt=Get-RunReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+    $eligibility=Test-RunReceiptVerificationEligible -Receipt $receipt -RepoPath $RepoPath
+    if(-not $eligibility.eligible){
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_not_eligible';reason=$eligibility.reason;workerCalls=0}
+    }
+    $workflow=Get-ReceiptWorkflowContext -Receipt $receipt
+    if([string]$workflow.mode -ne 'pull-request'){
+        return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_not_eligible';reason='pull_request_mode_required';workerCalls=0}
+    }
+    $mutation=Enter-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Purpose 'reseal' -ProcessProbe $ProcessProbe
+    if(-not $mutation.acquired){return $mutation}
+    try{
+        $currentHead=Get-GitHead -Path $RepoPath
+        $previousHead=[string]$receipt.finalHead
+        if(-not (Get-GitWorktreeStatus -Path $RepoPath).Clean){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_rejected';reason='dirty_worktree';workerCalls=0}
+        }
+        if((Get-GitCurrentBranch -Path $RepoPath) -cne [string]$workflow.workBranch){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_rejected';reason='work_branch_mismatch';workerCalls=0}
+        }
+        if($currentHead -ceq $previousHead){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='head_already_sealed';finalHead=$currentHead;workerCalls=0}
+        }
+        if(-not (Test-GitCommitAncestor -RepoPath $RepoPath -Ancestor $previousHead -Descendant $currentHead)){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_rejected';reason='current_head_not_descendant';workerCalls=0}
+        }
+        if((Get-GitUpstream -RepoPath $RepoPath) -cne [string]$workflow.remoteWorkBranch){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_rejected';reason='work_branch_upstream_mismatch';workerCalls=0}
+        }
+        $remoteHead=Get-GitRemoteBranchHead -RepoPath $RepoPath -Branch ([string]$workflow.workBranch) -RemoteHeadProbe $RemoteHeadProbe
+        if(-not $remoteHead -or $remoteHead -cne $currentHead){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_rejected';reason='work_branch_push_incomplete';workerCalls=0}
+        }
+        $ownerRepo=Get-GitOriginOwnerRepo -Path $RepoPath
+        $lookup=Get-PullRequestForBranch -RepoPath $RepoPath -OwnerRepo $ownerRepo -WorkBranch ([string]$workflow.workBranch) -PrProbe $PrProbe
+        if(-not $lookup.ok -or $lookup.items.Count -ne 1){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_rejected';reason='pr_context_mismatch';workerCalls=0}
+        }
+        $checked=Test-PullRequestContext -PullRequest $lookup.items[0] -BaseBranch ([string]$workflow.baseBranch) `
+            -WorkBranch ([string]$workflow.workBranch) -HeadSha $currentHead -OwnerRepo $ownerRepo -RequireDraft
+        if(-not $checked.ok -or $workflow.PSObject.Properties.Name -notcontains 'pr' -or $null -eq $workflow.pr -or
+            [int]$checked.pr.number -ne [int]$workflow.pr.number){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_rejected';reason='pr_context_mismatch';workerCalls=0}
+        }
+        $countResult=Invoke-GitRaw -Path $RepoPath -GitArgs @('rev-list','--count',"$previousHead..$currentHead")
+        if($countResult.ExitCode -ne 0 -or $countResult.Text -notmatch '^\d+$'){
+            return [pscustomobject]@{operation=$OperationNumber;issueNumber=$IssueNumber;status='reseal_rejected';reason='external_commit_count_unavailable';workerCalls=0}
+        }
+        $externalCommitCount=[int]$countResult.Text
+        $resealRecord=[pscustomobject]@{
+            previousFinalHead=$previousHead;sealedFinalHead=$currentHead
+            externalCommitsIncluded=$true;externalCommitCount=$externalCommitCount
+            originalResultEnvelopeCoversFinalHead=$false
+            sealedAt=(Get-Date).ToUniversalTime().ToString('o')
+        }
+        $history=@()
+        if($receipt.PSObject.Properties.Name -contains 'resealHistory' -and $null -ne $receipt.resealHistory){$history=@($receipt.resealHistory)}
+        $history+=@($resealRecord)
+        $workflow.finalHead=$currentHead
+        $workflow.pr=$checked.pr
+        $workflow.headWorkflow=Get-GitWorkflowSnapshot -RepoPath $RepoPath -Ref $currentHead
+        Add-Member -InputObject $workflow -NotePropertyName reseal -NotePropertyValue $resealRecord -Force
+        $receipt.finalHead=$currentHead
+        $receipt.status='pr_opened'
+        $receipt.localVerificationComplete=$false
+        $receipt.verificationProvenance='explicit_external_head_reseal'
+        $receipt.remainingProblems=@("explicit reseal includes $externalCommitCount commit(s) outside the original worker result envelope")
+        Add-Member -InputObject $receipt -NotePropertyName resultEnvelopeCoversFinalHead -NotePropertyValue $false -Force
+        Add-Member -InputObject $receipt -NotePropertyName externalCommitsIncluded -NotePropertyValue $true -Force
+        Add-Member -InputObject $receipt -NotePropertyName resealHistory -NotePropertyValue @($history) -Force
+        Add-Member -InputObject $receipt -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $workflow) -Force
+        if($receipt.PSObject.Properties.Name -contains 'postflight' -and $null -ne $receipt.postflight){
+            $receipt.postflight.finalHead=$currentHead
+            $receipt.postflight.branch=[string]$workflow.workBranch
+            $receipt.postflight.worktreeClean=$true
+            $receipt.postflight.pushComplete=$true
+            $receipt.postflight.status='pr_opened'
+            $receipt.postflight.ciStatus='not-checked'
+            Add-Member -InputObject $receipt.postflight -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $workflow) -Force
+        }
+        Write-JsonFile -Path (Get-RunReceiptPath -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath) -Object $receipt
+        Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow|Out-Null
+        Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+        Remove-RepairReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
+        return [pscustomobject]@{
+            operation=$OperationNumber;issueNumber=$IssueNumber;status='head_resealed_for_review'
+            previousFinalHead=$previousHead;finalHead=$currentHead;externalCommitCount=$externalCommitCount
+            verificationProvenance='explicit_external_head_reseal';resultEnvelopeCoversFinalHead=$false
+            reviewCommand="-Command review -Operation $OperationNumber -IssueNumber $IssueNumber"
+            workerCalls=0
+        }
+    }finally{
+        Exit-RepositoryMutation -RepoPath $RepoPath -Operation $OperationNumber -IssueNumber $IssueNumber -Token $mutation.token|Out-Null
+    }
 }
 
 function Invoke-FinalizeCommand {
@@ -2328,7 +2514,8 @@ if ($MyInvocation.InvocationName -ne '.') {
             Assert-ValidOperationNumber -Value ([string]$Operation) | Out-Null
             Assert-ValidIssueNumber -Value ([string]$IssueNumber) | Out-Null
             Invoke-RunOperation -OperationNumber $Operation -IssueNumber $IssueNumber -Kind $Kind `
-                -UseGptReviewReserve:$UseGptReviewReserve -FinishCurrent:$FinishCurrent -ClaudeOnly:$ClaudeOnly -Detach:$Detach | ConvertTo-Json -Depth 12
+                -UseGptReviewReserve:$UseGptReviewReserve -FinishCurrent:$FinishCurrent -ClaudeOnly:$ClaudeOnly -Detach:$Detach `
+                -WorkBranch $WorkBranch -OrderFile $OrderFile | ConvertTo-Json -Depth 12
         }
         'watch' {
             if (-not $Operation -or -not $IssueNumber) { throw 'watch requires -Operation <1|2|3> and -IssueNumber <positive int>' }
@@ -2368,6 +2555,12 @@ if ($MyInvocation.InvocationName -ne '.') {
             Assert-ValidIssueNumber -Value ([string]$IssueNumber) | Out-Null
             Invoke-FinalizeCommand -OperationNumber $Operation -IssueNumber $IssueNumber -ReviewVerdict $ReviewVerdict `
                 -RepoPath (Get-Location).Path | ConvertTo-Json -Depth 20
+        }
+        'reseal' {
+            if (-not $Operation -or -not $IssueNumber) { throw 'reseal requires -Operation and -IssueNumber' }
+            Assert-ValidOperationNumber -Value ([string]$Operation) | Out-Null
+            Assert-ValidIssueNumber -Value ([string]$IssueNumber) | Out-Null
+            Invoke-ResealCommand -OperationNumber $Operation -IssueNumber $IssueNumber -RepoPath (Get-Location).Path | ConvertTo-Json -Depth 20
         }
         'repair' {
             # v2.2: -PostReviewHead/-FindingsFile/-Target은 선택 인수. 없으면 run/review 영수증에서 자동 복원한다.

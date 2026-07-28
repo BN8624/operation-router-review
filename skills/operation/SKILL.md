@@ -1,7 +1,7 @@
 ---
 name: operation
-description: operation-router 보조 명령. status|doctor|set|reset, watch/recover, 방치된 Claude 지시 해제, 최종 검토 뒤 finalize를 제공한다. 작전 실행은 /operation-1, /operation-2, /operation-3를 쓴다.
-argument-hint: status | doctor | watch <작전번호> <이슈번호> | recover <작전번호> <이슈번호> | abandon-claude <작전번호> <이슈번호> | finalize <작전번호> <이슈번호> | set grok <0-100|available|exhausted> | set gpt <0-100|available|reserved|exhausted> | reset
+description: operation-router 보조 명령. status|doctor|set|reset, watch/recover, 외부 HEAD 재봉인, 방치된 Claude 지시 해제, 최종 검토 뒤 finalize를 제공한다. 작전 실행은 /operation-1, /operation-2, /operation-3를 쓴다.
+argument-hint: status | doctor | watch <작전번호> <이슈번호> | recover <작전번호> <이슈번호> | reseal 1 <이슈번호> | abandon-claude <작전번호> <이슈번호> | finalize <작전번호> <이슈번호> | set grok <0-100|available|exhausted> | set gpt <0-100|available|reserved|exhausted> | reset
 disable-model-invocation: true
 model: claude-haiku-4-5-20251001
 effort: low
@@ -77,6 +77,13 @@ Operation 1 Opus 또는 Operation 2 Sonnet의 최종 종료 검토가 PASS일 �
 ```
 & "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command finalize -Operation <작전번호> -IssueNumber <이슈번호> -ReviewVerdict PASS
 # Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command finalize -Operation <작전번호> -IssueNumber <이슈번호> -ReviewVerdict PASS
+```
+
+### `/operation reseal 1 <이슈번호>`
+작전 1 run 뒤 라우터 밖 commit이 기존 work branch와 Draft PR에 추가됐을 때만 사용한다. 현재 HEAD가 기존 finalHead의 descendant이고 clean·push 완료 상태이며 같은 OPEN Draft PR head와 일치하는지 확인한 뒤 review 대상으로 명시적으로 재봉인한다. 원래 worker result envelope가 새 HEAD를 포함하지 않는다는 사실과 외부 commit 수를 영수증에 남기며 worker 호출은 0회다.
+```
+& "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command reseal -Operation 1 -IssueNumber <이슈번호>
+# Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command reseal -Operation 1 -IssueNumber <이슈번호>
 ```
 
 ## 출력

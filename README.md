@@ -1,10 +1,25 @@
-# operation-router (v3.0.10)
+# operation-router (v3.0.11)
 
-<!-- verification-summary sourceTreePassed=619 sourceTreeFailed=0 installedFixturePassed=619 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=628 sourceTreeFailed=0 installedFixturePassed=628 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 619 passed, 0 failed; installed fixture 619 passed, 0 failed.
+Official verification: source-tree 628 passed, 0 failed; installed fixture 628 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.11 follow-up order continuity
+
+Pull-request mode now accepts `-WorkBranch <existing-branch>` only when a repository-bound ownership receipt identifies that exact branch and its single OPEN Draft PR. A follow-up issue stores its own link receipt, so later Claude-only re-entry restores the adopted branch without creating a second branch or PR.
+
+`-OrderFile <path>` replaces the issue body as the worker order. The receipt records the absolute path, SHA-256, and byte length, and review, repair, and recover reuse only the same unchanged source. Issue comments are not silently treated as orders.
+
+Operation 1 can explicitly run `reseal` after commits were added outside the router. Reseal requires a clean pushed descendant HEAD on the receipt-bound work branch and the same OPEN Draft PR, invalidates stale review/repair receipts, and records that the original result envelope does not cover the resealed HEAD. The subsequent independent review still covers the complete start-to-current diff.
+
+```powershell
+operation-router.cmd -Command run -Operation 1 -IssueNumber 3 -WorkBranch operation-router/issue-1 -OrderFile .\follow-up-order.md -Detach
+operation-router.cmd -Command reseal -Operation 1 -IssueNumber 3
+```
+
+Operation 1 independent review remains restricted to an original `worker=grok`; the reseal command does not convert human or Claude implementation into Grok provenance.
 
 ## v3.0.10 commit-bound direct-main workflow evidence
 
