@@ -7938,6 +7938,24 @@ Describe 'v3.0.12 후속 이슈 Draft PR 본문 연결' {
             $result.workflow.followUpIssueLink.verification|Should Be 'github-pr-body-marker'
         } finally {Remove-PrFakeRepo $a.Fixture}
     }
+
+    It '56. update-body 임시 JSON은 BOM 없이 기록된다' {
+        $path=New-TempOrderFile -Content ([pscustomobject]@{body='Closes #1229'}|ConvertTo-Json -Compress)
+        try {
+            $bytes=[System.IO.File]::ReadAllBytes($path)
+            (@($bytes[0],$bytes[1],$bytes[2]) -join ',')|Should Not Be '239,187,191'
+            ([char]$bytes[0])|Should Be '{'
+        } finally {Remove-TempOrderFile -Path $path}
+    }
+
+    It '57. 한글 본문은 임시 파일에서 BOM 없는 UTF-8로 왕복한다' {
+        $content="주문서 본문`n한글 확인"
+        $path=New-TempOrderFile -Content $content
+        try {
+            [System.IO.File]::ReadAllText($path,(New-Object System.Text.UTF8Encoding($false)))|Should Be $content
+            ([System.IO.File]::ReadAllBytes($path))[0]|Should Be 236
+        } finally {Remove-TempOrderFile -Path $path}
+    }
 }
 
 Write-Host "`nsourceTreeTests complete; isolated usage-state retained only for runner cleanup."

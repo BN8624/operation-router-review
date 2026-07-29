@@ -1094,7 +1094,7 @@ function New-TempOrderFile {
     $name = 'order-' + [guid]::NewGuid().ToString('N') + '.txt'
     $path = Join-Path $Script:TempDir $name
     Assert-PathWithinRoot -Path $path -Root $Script:TempDir | Out-Null
-    Set-Content -LiteralPath $path -Value $Content -Encoding UTF8 -NoNewline
+    [System.IO.File]::WriteAllText($path, $Content, (New-Object System.Text.UTF8Encoding($false)))
     return $path
 }
 function Remove-TempOrderFile {
