@@ -267,7 +267,8 @@ function New-TestPullRequestProbe {
     $state=[pscustomobject]@{
         Items=@();CreateCalls=0;ReadyCalls=0;LookupCalls=0;Body=$null;BodyPath=$null
         BodyPathExistedDuringCreate=$false;Actions=@();AutoAdvanceHead=$AutoAdvanceHead
-        CreateFailure=$false;ReadyFailure=$false
+        CreateFailure=$false;ReadyFailure=$false;ReadBodyCalls=0;UpdateBodyCalls=0
+        ReadBodyFailure=$false;UpdateBodyFailure=$false;TamperAfterUpdate=$false
     }
     $probe={
         param($Action,$Context)
@@ -291,6 +292,20 @@ function New-TestPullRequestProbe {
                 baseBranch=[string]$Context.baseBranch;headBranch=[string]$Context.workBranch;headSha=$head
                 headRepository=[string]$Context.ownerRepo;merged=$false})
             return [pscustomobject]@{ok=$true;url='https://example.invalid/pr/42';items=@()}
+        }
+        if($Action -eq 'read-body'){
+            $state.ReadBodyCalls++
+            if($state.ReadBodyFailure){return [pscustomobject]@{ok=$false;error='pr_body_read_failed';body=$null}}
+            return [pscustomobject]@{ok=$true;body=if($null -eq $state.Body){''}else{[string]$state.Body}}
+        }
+        if($Action -eq 'update-body'){
+            $state.UpdateBodyCalls++
+            if($state.UpdateBodyFailure){return [pscustomobject]@{ok=$false;error='pr_body_update_failed'}}
+            $state.Body=[string]$Context.body
+            if($state.TamperAfterUpdate){
+                $state.Body=([regex]::new('(?m)^- #[1-9][0-9]*\r?\n?')).Replace([string]$state.Body,'',1)
+            }
+            return [pscustomobject]@{ok=$true}
         }
         $state.ReadyCalls++
         if($state.ReadyFailure){return [pscustomobject]@{ok=$false;error='pr_ready_failed'}}
@@ -7703,6 +7718,225 @@ Describe 'v3.0.12 OrderFile 단일 byte snapshot' {
         [IO.File]::WriteAllText($path,'changed',(New-Object Text.UTF8Encoding($false)))
         {Resolve-OrderInput -IssueNumber 1116 -RepoPath $TestWorkRoot -RecordedSource $source}|
             Should Throw 'recorded_order_file_length_mismatch'
+    }
+}
+
+function New-V312AdoptionFixture {
+    param([int]$SourceIssue=1200,[string]$Body)
+    Set-TestGitWorkflow -Mode pull-request
+    $fixture=New-PrFakeRepo
+    $probe=New-TestPullRequestProbe
+    $first=Initialize-GitWorkflowRun -RepoPath $fixture.Repo -IssueNumber $SourceIssue -Config (Get-Config) -PrProbe $probe.Probe
+    Push-Location $fixture.Repo
+    try {
+        'source'|Set-Content -LiteralPath source.txt -Encoding UTF8
+        git add source.txt;git commit -q -m source;git push -q -u origin HEAD
+    } finally {Pop-Location}
+    $first.workflow.finalHead=Get-GitHead -Path $fixture.Repo
+    $probe.State.Items=@([pscustomobject]@{
+        number=$SourceIssue;url="https://example.invalid/pr/$SourceIssue";state='OPEN';draft=$true
+        baseBranch='main';headBranch="operation-router/issue-$SourceIssue";headSha=$first.workflow.finalHead
+        headRepository='owner/repo';merged=$false
+    })
+    $first.workflow.pr=$probe.State.Items[0]
+    $probe.State.Body=if([string]::IsNullOrWhiteSpace($Body)){
+        "Original title context`n`nCloses #$SourceIssue`n`nUser-authored notes stay here."
+    }else{$Body}
+    Save-IssueWorkflowReceipt -IssueNumber $SourceIssue -RepoPath $fixture.Repo -Workflow $first.workflow|Out-Null
+    Push-Location $fixture.Repo;try{git switch -q main}finally{Pop-Location}
+    return [pscustomobject]@{Fixture=$fixture;Probe=$probe;First=$first;SourceIssue=$SourceIssue}
+}
+
+Describe 'v3.0.12 후속 이슈 Draft PR 본문 연결' {
+    BeforeEach {
+        Set-TestGitWorkflow -Mode pull-request
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        Set-TestGitWorkflow -Mode direct-main
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It '37. 기존 PR 승계 시 follow-up marker를 생성한다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1200
+        try {
+            $result=Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1201 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1200' -PrProbe $a.Probe.Probe
+            $result.ok|Should Be $true
+            $a.Probe.State.Body|Should Match '<!-- operation-router-follow-ups:start -->'
+            $a.Probe.State.Body|Should Match '(?m)^- #1201$'
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '38. 기존 Closes 원본 이슈 문구를 보존한다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1202
+        try {
+            Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1203 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1202' -PrProbe $a.Probe.Probe|Out-Null
+            $a.Probe.State.Body|Should Match 'Closes #1202'
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '39. 기존 사용자 본문을 보존한다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1204
+        try {
+            Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1205 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1204' -PrProbe $a.Probe.Probe|Out-Null
+            $a.Probe.State.Body|Should Match 'Original title context'
+            $a.Probe.State.Body|Should Match 'User-authored notes stay here\.'
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '40. 두 번째 후속 이슈 추가 시 기존 항목을 보존하고 오름차순 정렬한다' {
+        $body="Intro`n`n<!-- operation-router-follow-ups:start -->`nFollow-up issues:`n- #7`n- #3`n<!-- operation-router-follow-ups:end -->"
+        $plan=Get-FollowUpIssueBodyPlan -Body $body -IssueNumber 5
+        $plan.ok|Should Be $true
+        $plan.body|Should Match "(?s)- #3`n- #5`n- #7"
+    }
+
+    It '41. 동일 이슈 재진입은 중복 추가하지 않는다' {
+        $body="<!-- operation-router-follow-ups:start -->`nFollow-up issues:`n- #9`n<!-- operation-router-follow-ups:end -->"
+        $plan=Get-FollowUpIssueBodyPlan -Body $body -IssueNumber 9
+        $plan.updated|Should Be $false
+        $plan.reason|Should Be 'already-linked'
+        ([regex]::Matches($plan.body,'#9')).Count|Should Be 1
+    }
+
+    It '42. marker 시작만 존재하면 fail-closed한다' {
+        (Get-FollowUpIssueBodyPlan -Body '<!-- operation-router-follow-ups:start -->' -IssueNumber 10).reason|
+            Should Be 'follow_up_marker_malformed'
+    }
+
+    It '43. marker 종료만 존재하면 fail-closed한다' {
+        (Get-FollowUpIssueBodyPlan -Body '<!-- operation-router-follow-ups:end -->' -IssueNumber 10).reason|
+            Should Be 'follow_up_marker_malformed'
+    }
+
+    It '44. marker가 중복되면 fail-closed한다' {
+        $body="<!-- operation-router-follow-ups:start -->`n<!-- operation-router-follow-ups:start -->`n<!-- operation-router-follow-ups:end -->"
+        (Get-FollowUpIssueBodyPlan -Body $body -IssueNumber 10).reason|Should Be 'follow_up_marker_malformed'
+    }
+
+    It '45. PR head SHA mismatch에서는 body update가 0회다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1210
+        try {
+            $a.Probe.State.AutoAdvanceHead=$false;$a.Probe.State.Items[0].headSha=('f'*40)
+            $result=Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1211 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1210' -PrProbe $a.Probe.Probe
+            $result.ok|Should Be $false
+            $a.Probe.State.UpdateBodyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '46. PR이 Ready 상태면 body update가 0회다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1212
+        try {
+            $a.Probe.State.Items[0].draft=$false
+            (Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1213 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1212' -PrProbe $a.Probe.Probe).ok|Should Be $false
+            $a.Probe.State.UpdateBodyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '47. PR이 CLOSED면 body update가 0회다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1214
+        try {
+            $a.Probe.State.Items[0].state='CLOSED'
+            (Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1215 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1214' -PrProbe $a.Probe.Probe).ok|Should Be $false
+            $a.Probe.State.UpdateBodyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '48. PR이 merged면 body update가 0회다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1216
+        try {
+            $a.Probe.State.Items[0].merged=$true
+            (Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1217 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1216' -PrProbe $a.Probe.Probe).ok|Should Be $false
+            $a.Probe.State.UpdateBodyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '49. 같은 branch PR이 두 개면 body update가 0회다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1218
+        try {
+            $a.Probe.State.Items=@($a.Probe.State.Items[0],$a.Probe.State.Items[0])
+            (Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1219 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1218' -PrProbe $a.Probe.Probe).ok|Should Be $false
+            $a.Probe.State.UpdateBodyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '50. update API 실패는 성공 evidence로 기록하지 않는다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1220
+        try {
+            $a.Probe.State.UpdateBodyFailure=$true
+            $result=Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1221 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1220' -PrProbe $a.Probe.Probe
+            $result.ok|Should Be $false
+            $result.reason|Should Be 'follow_up_issue_link_unavailable'
+            $a.Probe.State.UpdateBodyCalls|Should Be 1
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '51. update 뒤 재조회에서 이슈 번호가 없으면 실패한다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1222
+        try {
+            $a.Probe.State.TamperAfterUpdate=$true
+            $result=Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1223 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1222' -PrProbe $a.Probe.Probe
+            $result.ok|Should Be $false
+            $result.reason|Should Be 'follow_up_issue_link_unavailable'
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '52. 신규 PR 생성 경로의 기존 본문 계약은 그대로다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 1224 -Config (Get-Config) -PrProbe $pr.Probe
+            Push-Location $f.Repo
+            try{'new'|Set-Content new.txt -Encoding UTF8;git add .;git commit -q -m new;git push -q -u origin HEAD}finally{Pop-Location}
+            $pre.workflow.finalHead=Get-GitHead -Path $f.Repo
+            $result=Ensure-DraftPullRequest -RepoPath $f.Repo -Operation 1 -IssueNumber 1224 `
+                -Route ([pscustomobject]@{worker='grok';model='grok-4.5';effort='high'}) -Workflow $pre.workflow -PrProbe $pr.Probe
+            $result.ok|Should Be $true
+            $pr.State.Body|Should Match 'Closes #1224'
+            $pr.State.Body|Should Not Match 'operation-router-follow-ups'
+            $pr.State.UpdateBodyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '53. direct-main 경로에서는 PR body mutation이 0회다' {
+        Set-TestGitWorkflow -Mode direct-main
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            (Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 1225 -Config (Get-Config) -PrProbe $pr.Probe).ok|
+                Should Be $true
+            $pr.State.UpdateBodyCalls|Should Be 0
+        } finally {Remove-PrFakeRepo $f;Set-TestGitWorkflow -Mode pull-request}
+    }
+
+    It '54. 일반 같은 이슈 재진입은 follow-up을 추가하지 않는다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1226
+        try {
+            $result=Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1226 -Config (Get-Config) -PrProbe $a.Probe.Probe
+            $result.ok|Should Be $true
+            $a.Probe.State.UpdateBodyCalls|Should Be 0
+            $a.Probe.State.Body|Should Not Match 'operation-router-follow-ups'
+        } finally {Remove-PrFakeRepo $a.Fixture}
+    }
+
+    It '55. 후속 issue workflow receipt에 mutation evidence를 기록한다' {
+        $a=New-V312AdoptionFixture -SourceIssue 1227
+        try {
+            $result=Initialize-GitWorkflowRun -RepoPath $a.Fixture.Repo -IssueNumber 1228 -Config (Get-Config) `
+                -WorkBranch 'operation-router/issue-1227' -PrProbe $a.Probe.Probe
+            $result.workflow.followUpIssueLink.issueNumber|Should Be 1228
+            $result.workflow.followUpIssueLink.prNumber|Should Be 1227
+            $result.workflow.followUpIssueLink.updated|Should Be $true
+            $result.workflow.followUpIssueLink.verification|Should Be 'github-pr-body-marker'
+        } finally {Remove-PrFakeRepo $a.Fixture}
     }
 }
 

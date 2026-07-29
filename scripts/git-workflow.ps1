@@ -186,7 +186,7 @@ function ConvertTo-NormalizedPullRequest {
 }
 
 function Invoke-DefaultPullRequestProbe {
-    param([Parameter(Mandatory)][ValidateSet('lookup','create')][string]$Action, [Parameter(Mandatory)]$Context)
+    param([Parameter(Mandatory)][ValidateSet('lookup','create','read-body','update-body')][string]$Action, [Parameter(Mandatory)]$Context)
     if ($null -eq (Get-Command gh -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ok=$false;error='pr_tool_unavailable';items=@()} }
     $ErrorActionPreference = 'Continue'
     Push-Location ([string]$Context.repoPath)
@@ -205,12 +205,30 @@ function Invoke-DefaultPullRequestProbe {
             if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ok=$false;error='pr_create_failed';items=@()} }
             return [pscustomobject]@{ok=$true;error=$null;url=(($out | Out-String).Trim());items=@()}
         }
+        if($Action -eq 'read-body'){
+            $endpoint="repos/$($Context.ownerRepo)/pulls/$([int]$Context.prNumber)"
+            $out=& gh api -X GET $endpoint 2>&1
+            if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;error='pr_body_read_failed';body=$null}}
+            try{$item=(($out|Out-String)|ConvertFrom-Json -ErrorAction Stop)}
+            catch{return [pscustomobject]@{ok=$false;error='pr_body_read_failed';body=$null}}
+            $body=if($null -eq $item.body){''}else{[string]$item.body}
+            return [pscustomobject]@{ok=$true;error=$null;body=$body}
+        }
+        if($Action -eq 'update-body'){
+            $endpoint="repos/$($Context.ownerRepo)/pulls/$([int]$Context.prNumber)"
+            $json=([pscustomobject]@{body=[string]$Context.body}|ConvertTo-Json -Compress)
+            $jsonPath=New-TempOrderFile -Content $json
+            try{$out=& gh api -X PATCH $endpoint --input $jsonPath 2>&1}
+            finally{Remove-TempOrderFile -Path $jsonPath}
+            if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;error='pr_body_update_failed'}}
+            return [pscustomobject]@{ok=$true;error=$null}
+        }
     } finally { Pop-Location }
 }
 
 function Invoke-PullRequestProbe {
     param(
-        [Parameter(Mandatory)][ValidateSet('lookup','create')][string]$Action,
+        [Parameter(Mandatory)][ValidateSet('lookup','create','read-body','update-body')][string]$Action,
         [Parameter(Mandatory)]$Context, [scriptblock]$PrProbe
     )
     try {
@@ -220,9 +238,117 @@ function Invoke-PullRequestProbe {
         $error = switch ($Action) {
             'lookup' { 'pr_lookup_failed' }
             'create' { 'pr_create_failed' }
+            'read-body' { 'pr_body_read_failed' }
+            'update-body' { 'pr_body_update_failed' }
             default  { 'pr_create_failed' }
         }
         return [pscustomobject]@{ok=$false;error=$error;items=@()}
+    }
+}
+
+function Get-FollowUpIssueBodyPlan {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Body,
+        [Parameter(Mandatory)][int]$IssueNumber
+    )
+    $start='<!-- operation-router-follow-ups:start -->'
+    $end='<!-- operation-router-follow-ups:end -->'
+    $startMatches=[regex]::Matches($Body,[regex]::Escape($start))
+    $endMatches=[regex]::Matches($Body,[regex]::Escape($end))
+    if($startMatches.Count -eq 0 -and $endMatches.Count -eq 0){
+        $block="$start`nFollow-up issues:`n- #$IssueNumber`n$end"
+        $separator=if([string]::IsNullOrEmpty($Body)){''}elseif($Body.EndsWith("`n")){"`n"}else{"`n`n"}
+        return [pscustomobject]@{ok=$true;updated=$true;reason=$null;body=$Body+$separator+$block;issues=@($IssueNumber)}
+    }
+    if($startMatches.Count -ne 1 -or $endMatches.Count -ne 1 -or
+        $startMatches[0].Index -ge $endMatches[0].Index){
+        return [pscustomobject]@{ok=$false;updated=$false;reason='follow_up_marker_malformed';body=$Body;issues=@()}
+    }
+    $contentStart=$startMatches[0].Index+$startMatches[0].Length
+    $contentLength=$endMatches[0].Index-$contentStart
+    $inner=$Body.Substring($contentStart,$contentLength)
+    $issues=@()
+    $unrecognized=@()
+    foreach($line in @($inner -split "`r?`n")){
+        $trimmed=$line.Trim()
+        if([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed -eq 'Follow-up issues:'){continue}
+        if($trimmed -match '^-\s+#([1-9][0-9]{0,9})$'){$issues+=[int]$Matches[1]}
+        else{$unrecognized+=$trimmed}
+    }
+    if($unrecognized.Count -gt 0 -or @($issues|Group-Object|Where-Object{$_.Count -gt 1}).Count -gt 0){
+        return [pscustomobject]@{ok=$false;updated=$false;reason='follow_up_marker_malformed';body=$Body;issues=@()}
+    }
+    if($issues -contains $IssueNumber){
+        return [pscustomobject]@{ok=$true;updated=$false;reason='already-linked';body=$Body;issues=@($issues|Sort-Object)}
+    }
+    $issues=@($issues+@($IssueNumber)|Sort-Object -Unique)
+    $replacement="$start`nFollow-up issues:`n"+(@($issues|ForEach-Object{"- #$_"}) -join "`n")+"`n$end"
+    $prefix=$Body.Substring(0,$startMatches[0].Index)
+    $suffix=$Body.Substring($endMatches[0].Index+$endMatches[0].Length)
+    return [pscustomobject]@{ok=$true;updated=$true;reason=$null;body=$prefix+$replacement+$suffix;issues=@($issues)}
+}
+
+function Ensure-FollowUpIssueLink {
+    param(
+        [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)][string]$OwnerRepo,
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)]$Workflow,
+        [scriptblock]$PrProbe
+    )
+    $fail={
+        param([string]$Reason)
+        return [pscustomobject]@{ok=$false;status='follow_up_pr_link_failed';reason=$Reason;evidence=$null}
+    }
+    if($Workflow.PSObject.Properties.Name -notcontains 'pr' -or $null -eq $Workflow.pr){
+        return (& $fail 'follow_up_issue_link_unavailable')
+    }
+    $lookup=Get-PullRequestForBranch -RepoPath $RepoPath -OwnerRepo $OwnerRepo -WorkBranch ([string]$Workflow.workBranch) -PrProbe $PrProbe
+    if(-not $lookup.ok -or $lookup.items.Count -ne 1){return (& $fail 'follow_up_issue_link_unavailable')}
+    $checked=Test-PullRequestContext -PullRequest $lookup.items[0] -BaseBranch ([string]$Workflow.baseBranch) `
+        -WorkBranch ([string]$Workflow.workBranch) -HeadSha ([string]$Workflow.finalHead) -OwnerRepo $OwnerRepo -RequireDraft
+    if(-not $checked.ok -or [int]$checked.pr.number -ne [int]$Workflow.pr.number){
+        return (& $fail 'follow_up_issue_link_unavailable')
+    }
+    $read=Invoke-PullRequestProbe -Action 'read-body' -Context ([pscustomobject]@{
+        repoPath=$RepoPath;ownerRepo=$OwnerRepo;prNumber=[int]$checked.pr.number
+    }) -PrProbe $PrProbe
+    if($null -eq $read -or -not [bool]$read.ok -or $read.PSObject.Properties.Name -notcontains 'body'){
+        return (& $fail 'follow_up_issue_link_unavailable')
+    }
+    $body=if($null -eq $read.body){''}else{[string]$read.body}
+    $plan=Get-FollowUpIssueBodyPlan -Body $body -IssueNumber $IssueNumber
+    if(-not $plan.ok){return (& $fail $plan.reason)}
+    $now=(Get-Date).ToUniversalTime().ToString('o')
+    if(-not $plan.updated){
+        return [pscustomobject]@{
+            ok=$true;status='linked';reason='already-linked'
+            evidence=[pscustomobject]@{
+                issueNumber=$IssueNumber;prNumber=[int]$checked.pr.number;updated=$false
+                reason='already-linked';verification='github-pr-body-marker';recordedAtUtc=$now
+            }
+        }
+    }
+    $updated=Invoke-PullRequestProbe -Action 'update-body' -Context ([pscustomobject]@{
+        repoPath=$RepoPath;ownerRepo=$OwnerRepo;prNumber=[int]$checked.pr.number;body=[string]$plan.body
+    }) -PrProbe $PrProbe
+    if($null -eq $updated -or -not [bool]$updated.ok){return (& $fail 'follow_up_issue_link_unavailable')}
+    $verified=Invoke-PullRequestProbe -Action 'read-body' -Context ([pscustomobject]@{
+        repoPath=$RepoPath;ownerRepo=$OwnerRepo;prNumber=[int]$checked.pr.number
+    }) -PrProbe $PrProbe
+    if($null -eq $verified -or -not [bool]$verified.ok -or [string]$verified.body -cne [string]$plan.body){
+        return (& $fail 'follow_up_issue_link_unavailable')
+    }
+    $verifiedPlan=Get-FollowUpIssueBodyPlan -Body ([string]$verified.body) -IssueNumber $IssueNumber
+    if(-not $verifiedPlan.ok -or $verifiedPlan.updated -or $verifiedPlan.reason -ne 'already-linked'){
+        return (& $fail 'follow_up_issue_link_unavailable')
+    }
+    return [pscustomobject]@{
+        ok=$true;status='linked';reason=$null
+        evidence=[pscustomobject]@{
+            issueNumber=$IssueNumber;prNumber=[int]$checked.pr.number;updated=$true
+            verification='github-pr-body-marker';recordedAtUtc=$now
+        }
     }
 }
 
@@ -515,6 +641,12 @@ function Initialize-GitWorkflowRun {
             currentIssueNumber=$IssueNumber
             adoptedAt=(Get-Date).ToUniversalTime().ToString('o')
         }) -Force
+        $link=Ensure-FollowUpIssueLink -RepoPath $RepoPath -OwnerRepo $ownerRepo -IssueNumber $IssueNumber `
+            -Workflow $workflow -PrProbe $PrProbe
+        if(-not $link.ok){
+            return [pscustomobject]@{ok=$false;reason='follow_up_issue_link_unavailable';linkStatus=$link.status;linkReason=$link.reason}
+        }
+        Add-Member -InputObject $workflow -NotePropertyName followUpIssueLink -NotePropertyValue $link.evidence -Force
     }
     if($null -ne $issueOwnerWorkflow -and $issueOwnerWorkflow.PSObject.Properties.Name -contains 'orderSource'){
         Add-Member -InputObject $workflow -NotePropertyName orderSource -NotePropertyValue $issueOwnerWorkflow.orderSource -Force
