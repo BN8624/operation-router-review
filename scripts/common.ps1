@@ -870,6 +870,103 @@ function Remove-RunReceipt {
     Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
 }
+
+function Get-ResealVerificationReceiptPath {
+    param(
+        [Parameter(Mandatory)][int]$Operation,
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$RepoPath
+    )
+    return (Join-Path (Get-PendingNamespacePath -RepoPath $RepoPath) "op$Operation-issue$IssueNumber-reseal-verification.json")
+}
+
+function Remove-ResealVerificationReceipt {
+    param(
+        [Parameter(Mandatory)][int]$Operation,
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$RepoPath
+    )
+    $path=Get-ResealVerificationReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
+    if(Test-Path -LiteralPath $path -PathType Leaf){Remove-Item -LiteralPath $path -Force}
+}
+
+function Test-ResealVerificationReceipt {
+    param(
+        [Parameter(Mandatory)][int]$Operation,
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$RepoPath,
+        [Parameter(Mandatory)][string]$ExpectedHead,
+        [Parameter(Mandatory)][string]$ExpectedWorkBranch
+    )
+    $invalid={
+        param([string]$Reason,[bool]$Exists=$true)
+        return [pscustomobject]@{
+            valid=$false;exists=$Exists;reason=$Reason;receipt=$null
+            source='local-verification-receipt'
+        }
+    }
+    $path=Get-ResealVerificationReceiptPath -Operation $Operation -IssueNumber $IssueNumber -RepoPath $RepoPath
+    Assert-PathWithinRoot -Path $path -Root $Script:PendingDir | Out-Null
+    if(-not (Test-Path -LiteralPath $path -PathType Leaf)){
+        return (& $invalid 'reseal_verification_receipt_missing' $false)
+    }
+    try{$receipt=Read-JsonFileStable -Path $path -MaxAttempts 3 -DelayMilliseconds 25}
+    catch{return (& $invalid 'reseal_verification_receipt_malformed')}
+    if($null -eq $receipt -or $receipt -is [System.Array]){
+        return (& $invalid 'reseal_verification_receipt_schema_mismatch')
+    }
+    $props=@($receipt.PSObject.Properties.Name)
+    foreach($required in @(
+        'schemaVersion','operation','issueNumber','ownerRepo','repoRootHash','workBranch','head',
+        'localVerificationComplete','verification','remainingProblems','verifiedAtUtc'
+    )){
+        if($props -notcontains $required){return (& $invalid 'reseal_verification_receipt_schema_mismatch')}
+    }
+    if($receipt.schemaVersion -isnot [int] -or [int]$receipt.schemaVersion -ne 1 -or
+        $receipt.operation -isnot [int] -or [int]$receipt.operation -ne $Operation -or
+        $receipt.issueNumber -isnot [int] -or [int]$receipt.issueNumber -ne $IssueNumber -or
+        $receipt.ownerRepo -isnot [string] -or $receipt.repoRootHash -isnot [string] -or
+        $receipt.workBranch -isnot [string] -or $receipt.head -isnot [string] -or
+        $receipt.localVerificationComplete -isnot [bool] -or $receipt.verification -isnot [string] -or
+        $receipt.remainingProblems -isnot [System.Array] -or $receipt.verifiedAtUtc -isnot [string]){
+        return (& $invalid 'reseal_verification_receipt_schema_mismatch')
+    }
+    $identity=Get-RepoIdentity -RepoPath $RepoPath
+    if([string]::IsNullOrWhiteSpace([string]$identity.ownerRepo) -or
+        -not ([string]$receipt.ownerRepo).Equals([string]$identity.ownerRepo,[System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]$receipt.repoRootHash -cne [string]$identity.repoRootHash){
+        return (& $invalid 'reseal_verification_receipt_repository_mismatch')
+    }
+    if([string]$receipt.workBranch -cne $ExpectedWorkBranch){
+        return (& $invalid 'reseal_verification_receipt_branch_mismatch')
+    }
+    if([string]$receipt.head -cne $ExpectedHead){
+        return (& $invalid 'reseal_verification_receipt_head_mismatch')
+    }
+    if(-not [bool]$receipt.localVerificationComplete){
+        return (& $invalid 'reseal_verification_incomplete')
+    }
+    $verification=([string]$receipt.verification).Trim()
+    if([string]::IsNullOrWhiteSpace($verification) -or
+        $verification -match '(?i)^(current .+ session completed implementation|verification complete|verified|complete(d)?|done|success|tests? pass(ed)?|all tests pass(ed)?|검증 완료|테스트 통과|성공)$'){
+        return (& $invalid 'reseal_verification_description_invalid')
+    }
+    if(@($receipt.remainingProblems).Count -ne 0){
+        return (& $invalid 'reseal_verification_remaining_problems')
+    }
+    $verifiedAt=[DateTimeOffset]::MinValue
+    if(-not [DateTimeOffset]::TryParseExact(
+        [string]$receipt.verifiedAtUtc,'o',[Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,[ref]$verifiedAt)){
+        return (& $invalid 'reseal_verification_timestamp_invalid')
+    }
+    return [pscustomobject]@{
+        valid=$true;exists=$true;reason=$null;receipt=$receipt
+        source='local-verification-receipt'
+    }
+}
+
 function Get-ReviewReceiptPath {
     param([Parameter(Mandatory)][int]$Operation, [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)][string]$RepoPath)
     return (Join-Path (Get-PendingNamespacePath -RepoPath $RepoPath) "op$Operation-issue$IssueNumber-review.json")

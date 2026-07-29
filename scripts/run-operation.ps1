@@ -2110,6 +2110,7 @@ function Invoke-ResealCommand {
             $receipt.postflight.ciStatus='not-checked'
             Add-Member -InputObject $receipt.postflight -NotePropertyName workflow -NotePropertyValue (Copy-WorkflowContext -Workflow $workflow) -Force
         }
+        Remove-ResealVerificationReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath
         Write-JsonFile -Path (Get-RunReceiptPath -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath) -Object $receipt
         Save-IssueWorkflowReceipt -IssueNumber $IssueNumber -RepoPath $RepoPath -Workflow $workflow|Out-Null
         Remove-ReviewReceipt -Operation $OperationNumber -IssueNumber $IssueNumber -RepoPath $RepoPath

@@ -413,9 +413,9 @@ function New-ClaudePrPostflightFixture {
 }
 
 function New-PrMergeFixture {
-    param([int]$IssueNumber=900,[int]$Operation=2)
+    param([int]$IssueNumber=900,[int]$Operation=2,[switch]$WithWorkflow)
     Set-TestGitWorkflow -Mode pull-request
-    $fixture=New-PrFakeRepo
+    $fixture=New-PrFakeRepo -WithWorkflow:$WithWorkflow
     $probe=New-TestPullRequestProbe
     $config=Get-Config
     $pre=Initialize-GitWorkflowRun -RepoPath $fixture.Repo -IssueNumber $IssueNumber -Config $config -PrProbe $probe.Probe
@@ -7242,6 +7242,8 @@ Describe 'v3.0.11 후속 주문 branch·order source·HEAD 재봉인' {
                 -Interrupted $false -LocalVerificationComplete $true -VerificationProvenance 'valid_worker_result_envelope' `
                 -Workflow $pre.workflow -ArtifactSanitizationStatus completed -ArtifactRetentionStatus completed|Out-Null
             Save-IssueWorkflowReceipt -IssueNumber 91 -RepoPath $f.Repo -Workflow $pre.workflow|Out-Null
+            $oldVerificationPath=Get-ResealVerificationReceiptPath -Operation 1 -IssueNumber 91 -RepoPath $f.Repo
+            Write-AtomicJsonFile -Path $oldVerificationPath -Object ([pscustomobject]@{stale=$true})
             Push-Location $f.Repo
             try {
                 'outside'|Set-Content -LiteralPath outside.txt -Encoding UTF8
@@ -7258,10 +7260,12 @@ Describe 'v3.0.11 후속 주문 branch·order source·HEAD 재봉인' {
             $saved.resultEnvelopeCoversFinalHead|Should Be $false
             $saved.externalCommitsIncluded|Should Be $true
             $saved.localVerificationComplete|Should Be $false
+            (Test-Path -LiteralPath $oldVerificationPath)|Should Be $false
             (Test-RunReceiptVerificationEligible -Receipt $saved -RepoPath $f.Repo).eligible|Should Be $true
             $readiness=Get-WorkflowMergeReadiness -RepoPath $f.Repo -Receipt $saved -ReviewVerdict PASS -PrProbe $pr.Probe `
                 -CheckLister {param($repo,$number,$head)[pscustomobject]@{ok=$true;checks=@()}}
-            $readiness.ready|Should Be $true
+            $readiness.ready|Should Be $false
+            $readiness.status|Should Be 'reseal_verification_required'
             $readiness.ciStatus|Should Be 'not-requested'
         } finally {Remove-PrFakeRepo $f}
     }
@@ -7278,6 +7282,272 @@ Describe 'v3.0.11 후속 주문 branch·order source·HEAD 재봉인' {
             $eligible.eligible|Should Be $false
             $eligible.reason|Should Be 'reseal_evidence_incomplete'
         } finally {Remove-PrFakeRepo $f}
+    }
+}
+
+function ConvertTo-V312ResealedReceipt {
+    param([Parameter(Mandatory)]$Fixture)
+    $receipt=$Fixture.Receipt
+    $receipt.localVerificationComplete=$false
+    $receipt.verificationProvenance='explicit_external_head_reseal'
+    Add-Member -InputObject $receipt -NotePropertyName resultEnvelopeCoversFinalHead -NotePropertyValue $false -Force
+    Add-Member -InputObject $receipt -NotePropertyName externalCommitsIncluded -NotePropertyValue $true -Force
+    Add-Member -InputObject $receipt -NotePropertyName resealHistory -NotePropertyValue @(
+        [pscustomobject]@{previousFinalHead=$receipt.startHead;sealedFinalHead=$receipt.finalHead;externalCommitCount=1}
+    ) -Force
+    return $receipt
+}
+
+function Write-V312ResealVerificationReceipt {
+    param(
+        [Parameter(Mandatory)]$Fixture,
+        [string]$Head,
+        [string]$WorkBranch,
+        [int]$IssueNumber=0,
+        [string]$OwnerRepo,
+        [string]$RepoRootHash,
+        $LocalVerificationComplete=$true,
+        $Verification='powershell tests/run-tests.ps1 completed with 648 passed and exit code 0',
+        $RemainingProblems=@(),
+        [string]$VerifiedAtUtc='2026-07-29T00:00:00.0000000+00:00'
+    )
+    $receipt=$Fixture.Receipt
+    $identity=Get-RepoIdentity -RepoPath $Fixture.Fixture.Repo
+    if([string]::IsNullOrWhiteSpace($Head)){$Head=[string]$receipt.finalHead}
+    if([string]::IsNullOrWhiteSpace($WorkBranch)){$WorkBranch=[string]$receipt.workflow.workBranch}
+    if($IssueNumber -eq 0){$IssueNumber=[int]$receipt.issueNumber}
+    if([string]::IsNullOrWhiteSpace($OwnerRepo)){$OwnerRepo=[string]$identity.ownerRepo}
+    if([string]::IsNullOrWhiteSpace($RepoRootHash)){$RepoRootHash=[string]$identity.repoRootHash}
+    $payload=[pscustomobject]@{
+        schemaVersion=1;operation=1;issueNumber=$IssueNumber;ownerRepo=$OwnerRepo;repoRootHash=$RepoRootHash
+        workBranch=$WorkBranch;head=$Head;localVerificationComplete=$LocalVerificationComplete
+        verification=$Verification;remainingProblems=$RemainingProblems;verifiedAtUtc=$VerifiedAtUtc
+    }
+    $path=Get-ResealVerificationReceiptPath -Operation 1 -IssueNumber ([int]$receipt.issueNumber) -RepoPath $Fixture.Fixture.Repo
+    Write-AtomicJsonFile -Path $path -Object $payload
+    return $path
+}
+
+Describe 'v3.0.12 reseal 실행 검증 게이트' {
+    BeforeEach {
+        Set-TestGitWorkflow -Mode pull-request
+        Invoke-ResetCommand|Out-Null
+    }
+    AfterEach {
+        Set-TestGitWorkflow -Mode direct-main
+        Invoke-ResetCommand|Out-Null
+    }
+
+    It '1. reseal과 PR-linked CI success는 readiness를 허용한다' {
+        $m=New-PrMergeFixture -IssueNumber 1010 -Operation 1 -WithWorkflow
+        try {
+            $receipt=ConvertTo-V312ResealedReceipt $m
+            $checks={param($repo,$number,$head)[pscustomobject]@{ok=$true;checks=@(
+                (New-PrCiCheck -PrNumber $number -HeadSha $head)
+            )}}
+            $result=Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $receipt -ReviewVerdict PASS `
+                -PrProbe $m.Probe.Probe -CheckLister $checks
+            $result.ready|Should Be $true
+            $result.resealVerificationSource|Should Be 'pr-linked-ci'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '2. workflow 없음과 CI not-requested에서 receipt가 없으면 차단한다' {
+        $m=New-PrMergeFixture -IssueNumber 1011 -Operation 1
+        try {
+            $result=Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt (ConvertTo-V312ResealedReceipt $m) `
+                -ReviewVerdict PASS -PrProbe $m.Probe.Probe -CheckLister {param($r,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $result.ready|Should Be $false
+            $result.status|Should Be 'reseal_verification_required'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '3. 현재 HEAD에 묶인 valid local receipt는 not-requested를 허용한다' {
+        $m=New-PrMergeFixture -IssueNumber 1012 -Operation 1
+        try {
+            $receipt=ConvertTo-V312ResealedReceipt $m
+            Write-V312ResealVerificationReceipt $m|Out-Null
+            $result=Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $receipt -ReviewVerdict PASS `
+                -PrProbe $m.Probe.Probe -CheckLister {param($r,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $result.ready|Should Be $true
+            $result.resealVerificationSource|Should Be 'local-verification-receipt'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '4. 이전 HEAD receipt를 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1013 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -Head ('a'*40)|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1013 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_receipt_head_mismatch'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '5. branch mismatch receipt를 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1014 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -WorkBranch 'operation-router/issue-else'|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1014 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_receipt_branch_mismatch'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '6. issue mismatch receipt를 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1015 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -IssueNumber 999|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1015 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_receipt_schema_mismatch'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '7. repository identity mismatch receipt를 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1016 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -RepoRootHash ('f'*64)|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1016 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_receipt_repository_mismatch'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '8. localVerificationComplete false를 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1017 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -LocalVerificationComplete $false|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1017 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_incomplete'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '9. 빈 verification을 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1018 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -Verification ' '|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1018 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_description_invalid'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '10. 단순 고정 완료 문구를 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1019 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -Verification 'tests passed'|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1019 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_description_invalid'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '11. remainingProblems가 있으면 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1020 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -RemainingProblems @('unresolved')|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1020 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_remaining_problems'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '12. malformed JSON을 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1021 -Operation 1
+        try {
+            $path=Get-ResealVerificationReceiptPath -Operation 1 -IssueNumber 1021 -RepoPath $m.Fixture.Repo
+            [IO.File]::WriteAllText($path,'{"broken":')
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1021 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_receipt_malformed'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '13. 잘못된 Boolean 타입을 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1022 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -LocalVerificationComplete 'true'|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1022 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_receipt_schema_mismatch'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '14. 잘못된 remainingProblems 타입을 거부한다' {
+        $m=New-PrMergeFixture -IssueNumber 1023 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m -RemainingProblems 'none'|Out-Null
+            (Test-ResealVerificationReceipt -Operation 1 -IssueNumber 1023 -RepoPath $m.Fixture.Repo `
+                -ExpectedHead $m.Receipt.finalHead -ExpectedWorkBranch $m.Receipt.workflow.workBranch).reason|
+                Should Be 'reseal_verification_receipt_schema_mismatch'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '15. workflow CI failure는 valid local receipt로 우회하지 않는다' {
+        $m=New-PrMergeFixture -IssueNumber 1024 -Operation 1 -WithWorkflow
+        try {
+            Write-V312ResealVerificationReceipt $m|Out-Null
+            $checks={param($repo,$number,$head)[pscustomobject]@{ok=$true;checks=@(
+                (New-PrCiCheck -PrNumber $number -HeadSha $head -Conclusion failure)
+            )}}
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt (ConvertTo-V312ResealedReceipt $m) `
+                -ReviewVerdict PASS -PrProbe $m.Probe.Probe -CheckLister $checks).status|Should Be 'pr_ci_failed'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '16. workflow CI pending은 valid local receipt로 우회하지 않는다' {
+        $m=New-PrMergeFixture -IssueNumber 1025 -Operation 1 -WithWorkflow
+        try {
+            Write-V312ResealVerificationReceipt $m|Out-Null
+            $checks={param($repo,$number,$head)[pscustomobject]@{ok=$true;checks=@(
+                (New-PrCiCheck -PrNumber $number -HeadSha $head -Status in_progress -Conclusion $null)
+            )}}
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt (ConvertTo-V312ResealedReceipt $m) `
+                -ReviewVerdict PASS -PrProbe $m.Probe.Probe -CheckLister $checks).status|Should Be 'pr_ci_pending'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '17. required workflow removed는 valid local receipt로 우회하지 않는다' {
+        $m=New-PrMergeFixture -IssueNumber 1026 -Operation 1
+        try {
+            Write-V312ResealVerificationReceipt $m|Out-Null
+            $receipt=ConvertTo-V312ResealedReceipt $m
+            $receipt.workflow.baseWorkflow.exists=$true
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $receipt -ReviewVerdict PASS `
+                -PrProbe $m.Probe.Probe -CheckLister {param($r,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}).status|
+                Should Be 'required_workflow_removed'
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '18. 일반 non-reseal run의 readiness 계약은 유지된다' {
+        $m=New-PrMergeFixture -IssueNumber 1027 -Operation 1
+        try {
+            (Get-WorkflowMergeReadiness -RepoPath $m.Fixture.Repo -Receipt $m.Receipt -ReviewVerdict PASS `
+                -PrProbe $m.Probe.Probe -CheckLister {param($r,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}).ready|
+                Should Be $true
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '19. reseal receipt는 원래 result envelope coverage를 true로 바꾸지 않는다' {
+        $m=New-PrMergeFixture -IssueNumber 1028 -Operation 1
+        try {
+            $receipt=ConvertTo-V312ResealedReceipt $m
+            Write-V312ResealVerificationReceipt $m|Out-Null
+            [bool]$receipt.resultEnvelopeCoversFinalHead|Should Be $false
+            [bool]$receipt.localVerificationComplete|Should Be $false
+        } finally {Remove-PrFakeRepo $m.Fixture}
+    }
+
+    It '20. resealHistory와 외부 commit count 증거를 보존한다' {
+        $m=New-PrMergeFixture -IssueNumber 1029 -Operation 1
+        try {
+            $receipt=ConvertTo-V312ResealedReceipt $m
+            @($receipt.resealHistory).Count|Should Be 1
+            $receipt.resealHistory[0].externalCommitCount|Should Be 1
+            $receipt.externalCommitsIncluded|Should Be $true
+        } finally {Remove-PrFakeRepo $m.Fixture}
     }
 }
 

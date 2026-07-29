@@ -1174,5 +1174,43 @@ function Get-WorkflowMergeReadiness {
     if($ci -eq 'pending'){return [pscustomobject]@{ready=$false;status='pr_ci_pending';ciStatus=$ci;workflow=$w}}
     if($ci -eq 'failure'){return [pscustomobject]@{ready=$false;status='pr_ci_failed';ciStatus=$ci;workflow=$w}}
     if($ci -eq 'unavailable'){return [pscustomobject]@{ready=$false;status='pr_ci_unavailable';ciStatus=$ci;workflow=$w}}
+    if($explicitReseal){
+        $issueNumber=if($Receipt.PSObject.Properties.Name -contains 'issueNumber' -and $Receipt.issueNumber -is [int]){
+            [int]$Receipt.issueNumber
+        }else{0}
+        if($issueNumber -le 0){
+            return [pscustomobject]@{
+                ready=$false;status='reseal_verification_required';ciStatus=$ci;workflow=$w
+                resealVerificationValid=$false;resealVerificationSource=$null
+                resealVerificationReason='reseal_verification_receipt_schema_mismatch'
+            }
+        }
+        $resealVerification=Test-ResealVerificationReceipt -Operation 1 -IssueNumber $issueNumber `
+            -RepoPath $RepoPath -ExpectedHead $head -ExpectedWorkBranch ([string]$w.workBranch)
+        if($resealVerification.exists -and -not $resealVerification.valid){
+            return [pscustomobject]@{
+                ready=$false;status='reseal_verification_required';ciStatus=$ci;workflow=$w
+                resealVerificationValid=$false;resealVerificationSource='local-verification-receipt'
+                resealVerificationReason=$resealVerification.reason
+            }
+        }
+        if($ci -eq 'success'){
+            return [pscustomobject]@{
+                ready=$true;status='ready';ciStatus=$ci;workflow=$w
+                resealVerificationValid=$true;resealVerificationSource='pr-linked-ci'
+            }
+        }
+        if($ci -eq 'not-requested' -and $resealVerification.valid){
+            return [pscustomobject]@{
+                ready=$true;status='ready';ciStatus=$ci;workflow=$w
+                resealVerificationValid=$true;resealVerificationSource='local-verification-receipt'
+            }
+        }
+        return [pscustomobject]@{
+            ready=$false;status='reseal_verification_required';ciStatus=$ci;workflow=$w
+            resealVerificationValid=$false;resealVerificationSource=$null
+            resealVerificationReason=$resealVerification.reason
+        }
+    }
     return [pscustomobject]@{ready=$true;status='ready';ciStatus=$ci;workflow=$w}
 }
