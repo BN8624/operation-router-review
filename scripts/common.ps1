@@ -1047,7 +1047,7 @@ Implement the recorded order below directly. The recorded order is the sole task
 - 테스트 실패를 숨기지 않는다.
 - secret과 환경변수 값을 출력하거나 커밋하지 않는다.
 - 완료 시 변경 파일, 테스트, 커밋, push, 남은 문제만 짧게 보고한다.
-- 마지막 줄은 반드시 [ORH_WORKER_REPORT] {"localVerificationComplete":true,"verification":"실행한 검증 요약","remainingProblems":[]} 형식의 한 줄 JSON이다. 검증을 실제로 완료하지 못했으면 localVerificationComplete를 false로, 남은 문제가 있으면 문자열 배열로 보고한다.
+- 마지막 줄은 반드시 [ORH_WORKER_REPORT] {"localVerificationComplete":true,"verification":"실행한 검증 요약","remainingProblems":[]} 형식의 한 줄 JSON이다. 검증을 실제로 완료하지 못했으면 localVerificationComplete를 false로, 남은 문제가 있으면 문자열 배열로 보고한다. remainingProblems는 이 워커 세션 범위에서 실제로 해결하지 못한 결함과 검증 공백만 적는다. 위 금지 항목(PR·이슈 수정, branch 변경 등)과 이 세션 이후에 수행되는 독립 검수·PR 본문 갱신·종료 판정은 남은 문제가 아니므로 적지 않는다.
 
 [아래는 기록된 주문 원문 (source=$orderSourceKind) — 요약·재작성·삭제하지 않는다]
 "@

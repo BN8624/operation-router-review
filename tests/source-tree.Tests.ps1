@@ -3751,6 +3751,17 @@ Describe 'v3.0.0. issue branch와 Draft PR workflow' {
         $order|Should Match '\[ORH_WORKER_REPORT\].*localVerificationComplete'
     }
 
+    It '14a. 계약은 remainingProblems를 워커 자기 범위의 미해결 결함으로 한정한다' {
+        # 회귀: 2026-07-29 op1-issue9에서 worker가 PR 수정 금지와 독립 검수 미수행을
+        # remainingProblems로 보고해 finalize가 worker_reported_remaining_problems로 막혔다.
+        # 코드는 결함이 없었고 검수는 PASS였다.
+        $w=[pscustomobject]@{mode='pull-request';baseBranch='main';baseHead=('2'*40);workBranch='operation-router/issue-14'
+            remoteWorkBranch='origin/operation-router/issue-14';issueNumber=14}
+        $order=New-OrderContent -IssueBody 'x' -Workflow $w
+        $order|Should Match 'remainingProblems는 이 워커 세션 범위에서 실제로 해결하지 못한'
+        $order|Should Match '독립 검수·PR 본문 갱신·종료 판정은 남은 문제가 아니므로 적지 않는다'
+    }
+
     It '14b. 실제 worker 최종 메시지의 엄격 완료 보고만 로컬 검증 증거로 읽는다' {
         $marker='[ORH_WORKER_REPORT] {"localVerificationComplete":true,"verification":"12 tests passed","remainingProblems":[]}'
         $plain=ConvertFrom-WorkerCompletionReport -Text $marker
