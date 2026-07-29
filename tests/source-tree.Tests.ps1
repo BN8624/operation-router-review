@@ -7551,4 +7551,159 @@ Describe 'v3.0.12 reseal 실행 검증 게이트' {
     }
 }
 
+Describe 'v3.0.12 OrderFile 단일 byte snapshot' {
+    BeforeEach {Invoke-ResetCommand|Out-Null}
+    AfterEach {Invoke-ResetCommand|Out-Null}
+
+    It '21. 한 번 읽은 bytes에서 content hash length를 함께 계산한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-21.txt'
+        $bytes=[Text.Encoding]::UTF8.GetBytes("한 번`n✓")
+        [IO.File]::WriteAllBytes($path,$bytes)
+        $result=Resolve-OrderInput -IssueNumber 1101 -RepoPath $TestWorkRoot -OrderFile $path
+        $result.content|Should Be "한 번`n✓"
+        $result.source.byteLength|Should Be $bytes.Length
+        $result.source.sha256|Should Be ((Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant())
+    }
+
+    It '22. 한글 특수문자 LF를 보존한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-22.txt';$text="주문 α✓`n둘째 줄`n"
+        [IO.File]::WriteAllText($path,$text,(New-Object Text.UTF8Encoding($false)))
+        (Resolve-OrderInput -IssueNumber 1102 -RepoPath $TestWorkRoot -OrderFile $path).content|Should Be $text
+    }
+
+    It '23. CRLF를 LF로 바꾸지 않는다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-23.txt';$text="first`r`nsecond`r`n"
+        [IO.File]::WriteAllText($path,$text,(New-Object Text.UTF8Encoding($false)))
+        (Resolve-OrderInput -IssueNumber 1103 -RepoPath $TestWorkRoot -OrderFile $path).content|Should Be $text
+    }
+
+    It '24. UTF-8 BOM은 byte 증거에 포함하고 본문에서는 제거한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-24.txt';$text='BOM 주문 ✓'
+        [IO.File]::WriteAllText($path,$text,(New-Object Text.UTF8Encoding($true)))
+        $result=Resolve-OrderInput -IssueNumber 1104 -RepoPath $TestWorkRoot -OrderFile $path
+        $result.content|Should Be $text
+        $result.source.byteLength|Should Be ([Text.Encoding]::UTF8.GetByteCount($text)+3)
+        $result.source.sha256|Should Be ((Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant())
+    }
+
+    It '25. invalid UTF-8 byte sequence를 fail-closed한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-25.txt'
+        [IO.File]::WriteAllBytes($path,[byte[]]@(0xC3,0x28))
+        {Resolve-OrderInput -IssueNumber 1105 -RepoPath $TestWorkRoot -OrderFile $path}|Should Throw 'order_file_invalid_utf8'
+    }
+
+    It '26. byte read 직후 파일이 교체돼도 현재 호출 증거는 최초 snapshot과 일치한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-26.txt';$old='old 주문';$new='new replacement'
+        [IO.File]::WriteAllText($path,$old,(New-Object Text.UTF8Encoding($false)))
+        $oldBytes=[IO.File]::ReadAllBytes($path)
+        $result=Resolve-OrderInput -IssueNumber 1106 -RepoPath $TestWorkRoot -OrderFile $path -AfterFileSnapshot {
+            param($p,$bytes)[IO.File]::WriteAllText($p,$new,(New-Object Text.UTF8Encoding($false)))
+        }
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{$oldHash=([BitConverter]::ToString($sha.ComputeHash($oldBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        $result.content|Should Be $old
+        $result.source.sha256|Should Be $oldHash
+        $result.source.byteLength|Should Be $oldBytes.Length
+    }
+
+    It '27. 다음 재진입에서는 교체된 파일을 거부한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-27.txt'
+        [IO.File]::WriteAllText($path,'old',(New-Object Text.UTF8Encoding($false)))
+        $first=Resolve-OrderInput -IssueNumber 1107 -RepoPath $TestWorkRoot -OrderFile $path -AfterFileSnapshot {
+            param($p,$bytes)[IO.File]::WriteAllText($p,'changed',(New-Object Text.UTF8Encoding($false)))
+        }
+        {Resolve-OrderInput -IssueNumber 1107 -RepoPath $TestWorkRoot -RecordedSource $first.source}|
+            Should Throw 'recorded_order_file_length_mismatch'
+    }
+
+    It '28. hash가 같아도 recorded length 불일치 조작을 거부한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-28.txt';[IO.File]::WriteAllText($path,'same',(New-Object Text.UTF8Encoding($false)))
+        $first=Resolve-OrderInput -IssueNumber 1108 -RepoPath $TestWorkRoot -OrderFile $path
+        $first.source.byteLength=[int64]$first.source.byteLength+1
+        {Resolve-OrderInput -IssueNumber 1108 -RepoPath $TestWorkRoot -RecordedSource $first.source}|
+            Should Throw 'recorded_order_file_length_mismatch'
+    }
+
+    It '29. length가 같아도 recorded hash 불일치를 거부한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-29.txt';[IO.File]::WriteAllText($path,'same',(New-Object Text.UTF8Encoding($false)))
+        $first=Resolve-OrderInput -IssueNumber 1109 -RepoPath $TestWorkRoot -OrderFile $path
+        $first.source.sha256=('f'*64)
+        {Resolve-OrderInput -IssueNumber 1109 -RepoPath $TestWorkRoot -RecordedSource $first.source}|
+            Should Throw 'recorded_order_file_hash_mismatch'
+    }
+
+    It '30. 기록 뒤 삭제된 파일을 거부한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-30.txt';[IO.File]::WriteAllText($path,'delete',(New-Object Text.UTF8Encoding($false)))
+        $first=Resolve-OrderInput -IssueNumber 1110 -RepoPath $TestWorkRoot -OrderFile $path
+        Remove-Item -LiteralPath $path -Force
+        {Resolve-OrderInput -IssueNumber 1110 -RepoPath $TestWorkRoot -RecordedSource $first.source}|
+            Should Throw 'recorded_order_file_changed_or_unavailable'
+    }
+
+    It '31. file path가 directory면 거부한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-dir';New-Item -ItemType Directory -Path $path -Force|Out-Null
+        {Resolve-OrderInput -IssueNumber 1111 -RepoPath $TestWorkRoot -OrderFile $path}|Should Throw
+    }
+
+    It '32. relative path는 repo 기준 절대 경로로 정규화한다' {
+        $name='v312-order-32.txt';$path=Join-Path $TestWorkRoot $name
+        [IO.File]::WriteAllText($path,'relative',(New-Object Text.UTF8Encoding($false)))
+        (Resolve-OrderInput -IssueNumber 1112 -RepoPath $TestWorkRoot -OrderFile $name).source.path|
+            Should Be ([IO.Path]::GetFullPath($path))
+    }
+
+    It '33. 기존 issue-body source 계약은 유지된다' {
+        $result=Resolve-OrderInput -IssueNumber 1113 -RepoPath $TestWorkRoot -IssueFetcher {param($n,$p)'issue 원문'}
+        $result.content|Should Be 'issue 원문'
+        $result.source.kind|Should Be 'issue-body'
+        $result.source.sha256|Should Be (Get-Sha256Text -Text 'issue 원문')
+    }
+
+    It '34. review는 변경된 recorded file source를 worker 호출 전에 거부한다' {
+        Set-TestGitWorkflow -Mode pull-request
+        $m=New-PrMergeFixture -IssueNumber 1114 -Operation 1
+        try {
+            $path=Join-Path $TestWorkRoot 'v312-order-34.txt';[IO.File]::WriteAllText($path,'before',(New-Object Text.UTF8Encoding($false)))
+            $source=(Resolve-OrderInput -IssueNumber 1114 -RepoPath $m.Fixture.Repo -OrderFile $path).source
+            Add-Member -InputObject $m.Receipt.workflow -NotePropertyName orderSource -NotePropertyValue $source -Force
+            Write-JsonFile -Path (Get-RunReceiptPath -Operation 1 -IssueNumber 1114 -RepoPath $m.Fixture.Repo) -Object $m.Receipt
+            [IO.File]::WriteAllText($path,'after!',(New-Object Text.UTF8Encoding($false)))
+            $calls=0
+            $result=Invoke-OperationReview -OperationNumber 1 -IssueNumber 1114 -RepoPath $m.Fixture.Repo `
+                -PrProbe $m.Probe.Probe -GptReviewRunner {$calls++;throw 'must not run'}
+            $result.reason|Should Be 'order_input_changed_or_unavailable'
+            $calls|Should Be 0
+        } finally {Remove-PrFakeRepo $m.Fixture;Set-TestGitWorkflow -Mode direct-main}
+    }
+
+    It '35. repair는 변경된 recorded file source를 worker 호출 전에 거부한다' {
+        Set-TestGitWorkflow -Mode pull-request
+        $m=New-PrMergeFixture -IssueNumber 1115 -Operation 1
+        try {
+            $path=Join-Path $TestWorkRoot 'v312-order-35.txt';[IO.File]::WriteAllText($path,'before',(New-Object Text.UTF8Encoding($false)))
+            $source=(Resolve-OrderInput -IssueNumber 1115 -RepoPath $m.Fixture.Repo -OrderFile $path).source
+            Add-Member -InputObject $m.Receipt.workflow -NotePropertyName orderSource -NotePropertyValue $source -Force
+            Write-JsonFile -Path (Get-RunReceiptPath -Operation 1 -IssueNumber 1115 -RepoPath $m.Fixture.Repo) -Object $m.Receipt
+            $finding=[pscustomobject]@{severity='high';file='x.ps1';issue='broken';requiredFix='fix it'}
+            Save-ReviewReceipt -Operation 1 -IssueNumber 1115 -RepoPath $m.Fixture.Repo -Verdict REPAIR_REQUIRED `
+                -Findings @($finding) -PostReviewHead $m.Receipt.finalHead -OriginalWorker grok -Workflow $m.Receipt.workflow `
+                -ChangedFiles @('x.ps1') -ReviewedFiles @('x.ps1') -TruncatedFiles @()|Out-Null
+            [IO.File]::WriteAllText($path,'after!',(New-Object Text.UTF8Encoding($false)))
+            $calls=0
+            $result=Invoke-OperationRepair -OperationNumber 1 -IssueNumber 1115 -RepoPath $m.Fixture.Repo `
+                -PrProbe $m.Probe.Probe -RepairRunner {$calls++;throw 'must not run'}
+            $result.status|Should Be 'repair_order_input_changed_or_unavailable'
+            $calls|Should Be 0
+        } finally {Remove-PrFakeRepo $m.Fixture;Set-TestGitWorkflow -Mode direct-main}
+    }
+
+    It '36. recover Plan B가 사용하는 recorded source 재진입도 변경 파일을 거부한다' {
+        $path=Join-Path $TestWorkRoot 'v312-order-36.txt';[IO.File]::WriteAllText($path,'before',(New-Object Text.UTF8Encoding($false)))
+        $source=(Resolve-OrderInput -IssueNumber 1116 -RepoPath $TestWorkRoot -OrderFile $path).source
+        [IO.File]::WriteAllText($path,'changed',(New-Object Text.UTF8Encoding($false)))
+        {Resolve-OrderInput -IssueNumber 1116 -RepoPath $TestWorkRoot -RecordedSource $source}|
+            Should Throw 'recorded_order_file_length_mismatch'
+    }
+}
+
 Write-Host "`nsourceTreeTests complete; isolated usage-state retained only for runner cleanup."

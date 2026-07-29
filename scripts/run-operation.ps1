@@ -206,13 +206,41 @@ function New-WorkerPolicyFailureOutput {
                   workerExitCode = $workerExit; workerStopReason = $stopReason }
 }
 
+function Read-OrderFileSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [scriptblock]$AfterFileSnapshot
+    )
+    $bytes=[System.IO.File]::ReadAllBytes($Path)
+    if($null -ne $AfterFileSnapshot){& $AfterFileSnapshot $Path $bytes}
+    $sha=[System.Security.Cryptography.SHA256]::Create()
+    try{
+        $hashBytes=$sha.ComputeHash($bytes)
+        $hash=([System.BitConverter]::ToString($hashBytes)).Replace('-','').ToLowerInvariant()
+    }finally{$sha.Dispose()}
+    $offset=0
+    if($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF){
+        $offset=3
+    }
+    try{
+        $decoder=New-Object System.Text.UTF8Encoding($false,$true)
+        $content=$decoder.GetString($bytes,$offset,$bytes.Length-$offset)
+    }catch [System.Text.DecoderFallbackException]{
+        throw 'order_file_invalid_utf8'
+    }
+    return [pscustomobject]@{
+        bytes=$bytes;content=$content;sha256=$hash;byteLength=[int64]$bytes.Length
+    }
+}
+
 function Resolve-OrderInput {
     param(
         [Parameter(Mandatory)][int]$IssueNumber,
         [Parameter(Mandatory)][string]$RepoPath,
         [scriptblock]$IssueFetcher,
         [string]$OrderFile,
-        [AllowNull()]$RecordedSource
+        [AllowNull()]$RecordedSource,
+        [scriptblock]$AfterFileSnapshot
     )
     $recordedKind=''
     if($null -ne $RecordedSource -and $RecordedSource.PSObject.Properties.Name -contains 'kind'){
@@ -229,18 +257,48 @@ function Resolve-OrderInput {
         }else{
             [System.IO.Path]::GetFullPath((Join-Path $RepoPath $selectedFile))
         }
-        if(-not (Test-Path -LiteralPath $fullPath -PathType Leaf)){throw "order file does not exist: $fullPath"}
-        $hash=(Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if($recordedKind -eq 'file' -and $RecordedSource.PSObject.Properties.Name -contains 'sha256' -and
-            [string]$RecordedSource.sha256 -cne $hash){
-            throw 'recorded order file hash does not match the current file'
+        if($recordedKind -eq 'file'){
+            foreach($required in @('path','sha256','byteLength')){
+                if($RecordedSource.PSObject.Properties.Name -notcontains $required){
+                    throw 'recorded_order_file_source_incomplete'
+                }
+            }
+            $recordedPath=[System.IO.Path]::GetFullPath([string]$RecordedSource.path)
+            if(-not $recordedPath.Equals($fullPath,[System.StringComparison]::OrdinalIgnoreCase)){
+                throw 'recorded_order_file_path_mismatch'
+            }
         }
-        $content=Get-Content -LiteralPath $fullPath -Raw -Encoding UTF8
+        if(-not (Test-Path -LiteralPath $fullPath -PathType Leaf)){
+            if($recordedKind -eq 'file'){throw 'recorded_order_file_changed_or_unavailable'}
+            throw "order file does not exist: $fullPath"
+        }
+        try{$snapshot=Read-OrderFileSnapshot -Path $fullPath -AfterFileSnapshot $AfterFileSnapshot}
+        catch [System.Text.DecoderFallbackException]{
+            if($recordedKind -eq 'file'){throw 'recorded_order_file_invalid_utf8'}
+            throw 'order_file_invalid_utf8'
+        }catch{
+            if([string]$_.Exception.Message -eq 'order_file_invalid_utf8'){
+                if($recordedKind -eq 'file'){throw 'recorded_order_file_invalid_utf8'}
+                throw
+            }
+            throw
+        }
+        if($recordedKind -eq 'file'){
+            if($RecordedSource.byteLength -isnot [int] -and $RecordedSource.byteLength -isnot [long]){
+                throw 'recorded_order_file_source_incomplete'
+            }
+            if([int64]$RecordedSource.byteLength -ne [int64]$snapshot.byteLength){
+                throw 'recorded_order_file_length_mismatch'
+            }
+            if($RecordedSource.sha256 -isnot [string] -or [string]$RecordedSource.sha256 -cne [string]$snapshot.sha256){
+                throw 'recorded_order_file_hash_mismatch'
+            }
+        }
         return [pscustomobject]@{
-            content=$content
+            content=$snapshot.content
             source=[pscustomobject]@{
-                kind='file';path=$fullPath;sha256=$hash
-                byteLength=[int64](Get-Item -LiteralPath $fullPath).Length
+                kind='file';path=$fullPath;sha256=$snapshot.sha256
+                byteLength=[int64]$snapshot.byteLength
             }
         }
     }
