@@ -80,7 +80,7 @@ Operation 1 Opus 또는 Operation 2 Sonnet의 최종 종료 검토가 PASS일 �
 ```
 
 ### `/operation reseal 1 <이슈번호>`
-작전 1 run 뒤 라우터 밖 commit이 기존 work branch와 Draft PR에 추가됐을 때만 사용한다. 현재 HEAD가 기존 finalHead의 descendant이고 clean·push 완료 상태이며 같은 OPEN Draft PR head와 일치하는지 확인한 뒤 review 대상으로 명시적으로 재봉인한다. 원래 worker result envelope가 새 HEAD를 포함하지 않는다는 사실과 외부 commit 수를 영수증에 남기며 worker 호출은 0회다.
+작전 1 run 뒤 라우터 밖 commit이 기존 work branch와 Draft PR에 추가됐을 때만 사용한다. 현재 HEAD가 기존 finalHead의 descendant이고 clean·push 완료 상태이며 같은 OPEN Draft PR head와 일치하는지 확인한 뒤 review 대상으로 명시적으로 재봉인한다. Reseal은 실행 검증이 아니므로 merge readiness에는 정확한 HEAD의 PR-linked CI success 또는 `state/pending/<repo-namespace>/op1-issue-<n>-reseal-verification.json`의 구조화된 검증 receipt가 필요하다. CI pending·failure·unavailable·required workflow 제거는 local receipt로 우회하지 못한다. 원래 worker result envelope가 새 HEAD를 포함하지 않는다는 사실과 외부 commit 수는 그대로 보존되며 worker 호출은 0회다.
 ```
 & "$env:USERPROFILE\.claude\operation-router\operation-router.cmd" -Command reseal -Operation 1 -IssueNumber <이슈번호>
 # Git Bash: "$USERPROFILE/.claude/operation-router/operation-router.cmd" -Command reseal -Operation 1 -IssueNumber <이슈번호>

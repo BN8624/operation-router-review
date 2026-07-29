@@ -1,6 +1,6 @@
-# VERIFICATION_MATRIX — operation-router v3.0.11
+# VERIFICATION_MATRIX — operation-router v3.0.12
 
-<!-- verification-summary sourceTreePassed=628 sourceTreeFailed=0 installedFixturePassed=628 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=683 sourceTreeFailed=0 installedFixturePassed=683 installedFixtureFailed=0 -->
 
 현재 실행 계약은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` → final review → `finalize` 순서다. recover는 watch가 없는 새 세션 재진입에만 사용한다.
 
@@ -38,6 +38,9 @@
 | v3.0.8 canary schema v4 | checkpoint 객체·worker identity·Operation 3 | null/scalar/array/빈 파일 불변 거부, 누락 reentry 별도 상태, 전체/현재 invocation 호출 증거 분리, case-sensitive worker 일치, authoritative evidence·OPEN Draft·미병합 PR context·CI success gate, direct-main 회귀, result schema 4/checkpoint schema 3 분리 |
 | v3.0.9 schema 4·direct-main 마감 | 공통 반환·validity 분리·legacy 완료 증거 | ResultPath 인수/파일 누락 reason 분리, 모든 조기 반환 공통 Boolean·배열·null 타입, envelope validity와 authoritative validity 분리, direct-main main·HEAD·clean·push·status·CI fail-closed, pull-request gate 보존 |
 | v3.0.10 direct-main workflow snapshot | final HEAD workflow 존재·CI 상태 결합 | authoritative/run/postflight/current HEAD 일치 후 commit-bound `.github/workflows/*.yml`·`*.yaml` snapshot, workflow 있음+success 허용, 있음+not-requested 전용 실패, 없음+not-requested 허용, snapshot unavailable fail-closed, pull-request gate 불변 |
+| v3.0.12 reseal verification | 외부 HEAD 실행 검증 | 정확한 reseal HEAD의 PR-linked CI success 또는 저장소·issue·branch·HEAD 결합 local verification receipt 필요, pending/failure/unavailable/required workflow removed 우회 금지, 새 reseal에서 stale receipt 제거 |
+| v3.0.12 atomic OrderFile | 주문 원문 증거 | 단일 byte snapshot에서 strict UTF-8 content·SHA-256·byte length 생성, BOM 처리, invalid UTF-8 거부, review·repair·recover path/hash/length 재검증 |
+| v3.0.12 follow-up PR link | GitHub 추적성 | 기존 본문·Closes 보존, 결정론적 marker와 중복 방지, OPEN Draft·base/head/SHA/PR 번호 재검증 후 mutation, update 후 재조회, mismatch·marker 손상 fail-closed |
 | v3.0.11 후속 주문 continuity | branch·PR·order source·외부 HEAD | receipt-owned 기존 branch와 단일 OPEN Draft PR만 명시 재사용, 후속 이슈 link receipt 재진입, file/issue-body source hash 고정, 변경 source fail-closed, clean pushed descendant HEAD 명시 reseal, 원래 envelope 비포함 증거 보존 |
 
 ## 상태별 기대 판정
@@ -65,8 +68,8 @@ PR CI 기대 여부는 receipt에 고정된 base/head commit workflow 스냅샷�
 ## 실행 결과
 
 <!-- verification-visible:start -->
-- source-tree 628 passed, 0 failed
-- installed fixture 628 passed, 0 failed
+- source-tree 683 passed, 0 failed
+- installed fixture 683 passed, 0 failed
 - installed integration failures 0
 - PowerShell parser files 23, manifest entries 46
 - paid model calls 0

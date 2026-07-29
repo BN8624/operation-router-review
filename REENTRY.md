@@ -1,10 +1,18 @@
-# REENTRY — operation-router v3.0.11 pull-request workflow
+# REENTRY — operation-router v3.0.12 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=628 sourceTreeFailed=0 installedFixturePassed=628 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=683 sourceTreeFailed=0 installedFixturePassed=683 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 628 passed, 0 failed; installed fixture 628 passed, 0 failed.
+Official verification: source-tree 683 passed, 0 failed; installed fixture 683 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.12 re-entry invariants
+
+Reseal은 새 HEAD와 기존 OPEN Draft PR context를 다시 결합하지만 실행 검증을 합성하지 않는다. `explicit_external_head_reseal` 이후에는 현재 HEAD에 연결된 PR-linked CI success 또는 저장소·Operation 1·후속 issue·work branch·HEAD와 정확히 일치하는 `op1-issue-<n>-reseal-verification.json`이 필요하다. Workflow CI pending·failure·unavailable 또는 required workflow 제거는 local receipt로 우회할 수 없다. 새 reseal과 추가 HEAD 변경은 이전 local verification receipt를 무효화한다.
+
+`OrderFile`의 content·SHA-256·byte length는 한 번 읽은 동일 byte snapshot에서 계산된다. UTF-8 BOM은 제거해 worker text를 만들고 원본 byte 증거에는 포함하며 invalid UTF-8은 거부한다. Review·repair·recover는 기록된 절대 path·hash·length를 모두 다시 확인한다.
+
+후속 issue가 receipt-owned Draft PR을 승계하면 기존 본문과 최초 `Closes`를 보존한 채 `operation-router-follow-ups` marker에 issue 번호를 오름차순으로 기록한다. Marker 손상, PR context 불일치, update 실패, 재조회 불일치는 후속 실행을 fail-closed한다.
 
 ## v3.0.11 follow-up order continuity
 

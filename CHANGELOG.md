@@ -1,5 +1,14 @@
 # CHANGELOG — operation-router
 
+## v3.0.12 (2026-07-29)
+
+- reseal verification gate: an explicitly resealed external HEAD now requires exact-head PR-linked CI success or a structured local verification receipt bound to Operation 1, repository identity, follow-up issue, work branch, and current HEAD. Missing or invalid evidence returns `reseal_verification_required`.
+- CI precedence: local reseal verification cannot bypass pending, failed, unavailable, or removed required workflows. A stale or malformed local receipt fails closed, and every new reseal removes the previous receipt without changing the original worker envelope coverage fields.
+- atomic order source: `OrderFile` is read once as bytes. Strict UTF-8 content, SHA-256, and byte length come from that same snapshot; BOM is handled deterministically, malformed UTF-8 is rejected, and review, repair, and recover verify path, hash, and length.
+- follow-up traceability: adoption of an existing OPEN Draft PR preserves its body and original `Closes` text while adding an idempotent, sorted `operation-router-follow-ups` marker. Exact PR context is revalidated before mutation and the body is re-read afterward.
+- tests: 55 regressions cover reseal evidence and CI precedence, byte-snapshot order input and replacement races, and injected PR-body mutation behavior. Paid providers, the real user runtime, and live external PR or issue mutations were not used.
+- refactor metrics: baseline `4ef0c56ff0e8ce24fccdaf161835635e8e29feb5`, `common.ps1` 1671->1215, `run-operation.ps1` 2414->2641, `state-store.ps1` 309, `worker-contract.ps1` 319 lines.
+
 ## v3.0.11 (2026-07-28)
 
 - follow-up work branch: `run -WorkBranch` reuses an existing receipt-owned work branch only when its exact OPEN Draft PR and remote HEAD remain valid. The follow-up issue receives a link receipt and re-entry restores the adopted branch without a second branch or PR.

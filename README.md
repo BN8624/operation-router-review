@@ -1,10 +1,28 @@
-# operation-router (v3.0.11)
+# operation-router (v3.0.12)
 
-<!-- verification-summary sourceTreePassed=628 sourceTreeFailed=0 installedFixturePassed=628 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=683 sourceTreeFailed=0 installedFixturePassed=683 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 628 passed, 0 failed; installed fixture 628 passed, 0 failed.
+Official verification: source-tree 683 passed, 0 failed; installed fixture 683 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.12 reseal verification, atomic orders, and follow-up links
+
+`reseal` binds a clean pushed descendant HEAD and its existing OPEN Draft PR context, but it is not execution verification. An `explicit_external_head_reseal` reaches `merge_ready` only when PR-linked CI succeeds for the exact resealed HEAD or when a valid `op1-issue-<n>-reseal-verification.json` receipt binds completed local verification to the same repository, issue, branch, and HEAD. CI pending, failure, unavailable evidence, or required workflow removal cannot be bypassed by a local receipt. The original worker result envelope remains explicitly outside the external commits.
+
+`-OrderFile` now reads one byte snapshot and derives its strict UTF-8 content, SHA-256, and byte length from those same bytes. A UTF-8 BOM is accepted without becoming worker text; malformed UTF-8 is rejected. Review, repair, and recover re-check the recorded absolute path, hash, and byte length before using the order.
+
+When a follow-up issue adopts an existing receipt-owned OPEN Draft PR, the router preserves the existing PR body and original `Closes #<issue>` text while maintaining a deterministic marker block.
+
+```text
+<!-- operation-router-follow-ups:start -->
+Follow-up issues:
+- #3
+- #7
+<!-- operation-router-follow-ups:end -->
+```
+
+Malformed or duplicate markers, PR context mismatches, and failed or unverifiable body updates fail closed. The router does not automatically undraft, merge, comment on, or close an issue.
 
 ## v3.0.11 follow-up order continuity
 
