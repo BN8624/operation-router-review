@@ -6,7 +6,10 @@ param(
     [Parameter(ParameterSetName = 'Check')]
     [switch]$Check,
     [Parameter(ParameterSetName = 'Write')]
-    [switch]$Write
+    [switch]$Write,
+    [Parameter(ParameterSetName = 'Write')]
+    [ValidatePattern('^[a-z0-9][a-z0-9.-]*\d[a-z0-9.-]*$')]
+    [string]$GrokModel
 )
 
 Set-StrictMode -Version Latest
@@ -287,7 +290,19 @@ function Get-ContractErrors {
 if ([string]::IsNullOrWhiteSpace($RootPath)) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $resolvedRoot = [System.IO.Path]::GetFullPath($RootPath).TrimEnd('\','/')
 $configPath = Join-Path $resolvedRoot 'config\config.json'
+$configRaw = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
 $config = Read-ModelConfig -Path $configPath
+$configWriteText = $null
+if (-not [string]::IsNullOrWhiteSpace($GrokModel)) {
+    if (-not $Write) { throw '-GrokModel requires -Write.' }
+    $grokModelPattern = [regex]::new('(?m)(^\s*"grok"\s*:\s*\{\r?\n\s*"model"\s*:\s*")[^"]+("\s*,\s*$)')
+    if ($grokModelPattern.Matches($configRaw).Count -ne 1) {
+        throw 'Expected exactly one config.grok.model entry.'
+    }
+    $configWriteText = $grokModelPattern.Replace($configRaw,('$1' + $GrokModel + '$2'),1)
+    try { $config = $configWriteText | ConvertFrom-Json }
+    catch { throw "Updated config JSON is invalid: $($_.Exception.Message)" }
+}
 $contracts = Get-ModelContracts -Config $config
 
 if ($Write) {
@@ -301,6 +316,9 @@ if ($Write) {
         if ($preparationErrors.Count -gt 0) { throw ($preparationErrors -join '; ') }
 
         $preparedWrites = @()
+        if ($null -ne $configWriteText) {
+            $preparedWrites += [pscustomobject][ordered]@{ path = $configPath; text = $configWriteText }
+        }
         foreach ($contract in $contracts) {
             $skillPath = Join-Path $resolvedRoot "skills\$($contract.skill)\SKILL.md"
             if (-not (Test-Path -LiteralPath $skillPath -PathType Leaf)) { throw "Missing Skill file: $skillPath" }
@@ -401,5 +419,6 @@ if ($contractErrors.Count -gt 0) {
     skillCount = @($contracts).Count
     workerRoleCount = 4
     manifestUpdated = [bool]$Write
+    grokModel = [string]$config.grok.model
     configuredModelIds = @(Get-ConfiguredModelIds -Config $config)
 } | ConvertTo-Json -Depth 5

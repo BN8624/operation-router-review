@@ -143,6 +143,7 @@ function Get-ModelContractSurfaceSnapshot {
     param([Parameter(Mandatory)][string]$FixtureRoot)
     $paths = @(
         'README.md'
+        'config/config.json'
         'manifest-sha256.txt'
         'tests/fixtures/models-cache.ci.json'
         'skills/operation/SKILL.md'
@@ -158,12 +159,13 @@ function Get-ModelContractSurfaceSnapshot {
 }
 
 function Invoke-ModelContractTool {
-    param([Parameter(Mandatory)][string]$FixtureRoot, [switch]$Write)
+    param([Parameter(Mandatory)][string]$FixtureRoot, [switch]$Write, [string]$GrokModel)
     $mode = if ($Write) { '-Write' } else { '-Check' }
+    $modelArgument = if ([string]::IsNullOrWhiteSpace($GrokModel)) { '' } else { " -GrokModel $GrokModel" }
     $scriptPath = Join-Path $RouterRoot 'scripts\sync-model-contract.ps1'
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = 'powershell.exe'
-    $start.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RootPath `"$FixtureRoot`" $mode"
+    $start.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -RootPath `"$FixtureRoot`" $mode$modelArgument"
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
@@ -452,7 +454,7 @@ function New-PrMergeFixture {
     $pf=[pscustomobject]@{status='pr_opened';branch=$workflow.workBranch;startHead=$pre.snapshot.startHead;finalHead=$workflow.finalHead
         headChanged=$true;commitCount=1;worktreeClean=$true;aheadBehindAvailable=$true;ahead=$null;behind=$null
         pushComplete=$true;ciStatus='success';workerExitCode=0;workflow=$workflow}
-    $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='medium'}
+    $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='medium'}
     $wr=[pscustomobject]@{Success=$true;ExitCode=0;Output='verified';WorkerReportedVerification='1 passed';LocalVerificationComplete=$true}
     Save-RunReceipt -Operation $Operation -IssueNumber $IssueNumber -RepoPath $fixture.Repo -Snapshot $pre.snapshot -Postflight $pf `
         -Route $route -WorkerResult $wr -StatusOverride 'pr_opened' -ResultEnvelopePresent $true -Interrupted $false `
@@ -478,7 +480,7 @@ function Save-TestRunReceipt {
     $pf = [pscustomobject]@{ status=$Status; branch='main'; startHead=$start; finalHead=$final; headChanged=$true
         commitCount=1; worktreeClean=$true; aheadBehindAvailable=$true; ahead=0; behind=0; pushComplete=$true
         ciStatus='not-requested'; workerExitCode=0 }
-    $route = [pscustomobject]@{ worker=$Worker; model='grok-4.6'; effort='high' }
+    $route = [pscustomobject]@{ worker=$Worker; model=[string]$cfg.grok.model; effort='high' }
     $wr = [pscustomobject]@{ Output = 'worker self-reported: tests passed (not re-run by router)' }
     Save-RunReceipt -Operation 1 -IssueNumber $IssueNum -RepoPath $Repo -Snapshot $snap -Postflight $pf -Route $route -WorkerResult $wr -RemainingProblems @() `
         -ResultEnvelopePresent $true -Interrupted $false -VerificationProvenance 'valid_worker_result_envelope' | Out-Null
@@ -583,20 +585,40 @@ Describe '3b. config 단일 원본 모델 계약' {
         $result.Output | Should Match 'model_contract_valid'
     }
 
-    It 'v3.0.13 Grok 4.6 고정 ID가 모든 작전 경로와 문서에 전파된다' {
-        $cfg.grok.model | Should Be 'grok-4.6'
+    It 'v3.0.13 config의 Grok 고정 ID가 모든 작전 경로와 문서에 전파된다' {
         foreach ($operation in @(1,2,3)) {
             $route = Resolve-OperationRoute -OperationNumber $operation `
                 -GrokState (GS 'available' 0) -GptState (GS 'available' 0) -Config $cfg
             $route.worker | Should Be 'grok'
-            $route.model | Should Be 'grok-4.6'
+            $route.model | Should Be $cfg.grok.model
         }
         $readme = Get-Content -LiteralPath (Join-Path $RouterRoot 'README.md') -Raw -Encoding UTF8
-        @([regex]::Matches($readme,'grok-4\.6')).Count | Should BeGreaterThan 4
+        @([regex]::Matches($readme,[regex]::Escape([string]$cfg.grok.model))).Count | Should BeGreaterThan 3
         foreach ($skillName in @('operation-1','operation-2','operation-3')) {
             $skillText = Get-Content -LiteralPath (Join-Path $SkillsRoot "$skillName\SKILL.md") -Raw -Encoding UTF8
-            $skillText | Should Match 'Grok 4\.6'
+            $skillText | Should Match 'config\.grok\.model'
         }
+    }
+
+    It 'v3.0.13 한 명령으로 Grok 고정 ID와 생성 표·manifest를 원자 갱신한다' {
+        $fixture = New-ModelContractFixture
+        (Invoke-ModelContractTool -FixtureRoot $fixture -Write -GrokModel 'grok-9-vision').ExitCode | Should Be 0
+        (Invoke-ModelContractTool -FixtureRoot $fixture).ExitCode | Should Be 0
+        $updated = Get-Content -LiteralPath (Join-Path $fixture 'config\config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $updated.grok.model | Should Be 'grok-9-vision'
+        (Get-Content -LiteralPath (Join-Path $fixture 'README.md') -Raw -Encoding UTF8) | Should Match 'grok-9-vision'
+        foreach ($line in (Get-Content -LiteralPath (Join-Path $fixture 'manifest-sha256.txt') -Encoding UTF8)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            ($line -match '^([a-f0-9]{64})  (.+)$') | Should Be $true
+            (Get-FileHash -LiteralPath (Join-Path $fixture $Matches[2]) -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be $Matches[1]
+        }
+    }
+
+    It 'v3.0.13 alias 입력은 config와 생성물을 쓰기 전에 거부한다' {
+        $fixture = New-ModelContractFixture
+        $before = Get-ModelContractSurfaceSnapshot -FixtureRoot $fixture
+        (Invoke-ModelContractTool -FixtureRoot $fixture -Write -GrokModel 'grok-latest').ExitCode | Should Not Be 0
+        (Get-ModelContractSurfaceSnapshot -FixtureRoot $fixture) | Should Be $before
     }
 
     It 'Skill drift를 탐지하고 -Write가 frontmatter와 README를 함께 복구한다' {
@@ -1229,8 +1251,8 @@ Describe '추가: 검증/주입/워커/doctor (기존 유지분)' {
         try {
             $q = { param($fp,$al) [pscustomobject]@{ ExitCode=1; Output='weekly limit reached' } }
             $f = { param($fp,$al) [pscustomobject]@{ ExitCode=1; Output='build failed' } }
-            (Invoke-GrokWorker -Cwd $HOME -Model 'grok-4.6' -Effort 'low' -MaxTurns 5 -PromptFilePath $tmp -Runner $q).QuotaExhausted | Should Be $true
-            (Invoke-GrokWorker -Cwd $HOME -Model 'grok-4.6' -Effort 'low' -MaxTurns 5 -PromptFilePath $tmp -Runner $f).QuotaExhausted | Should Be $false
+            (Invoke-GrokWorker -Cwd $HOME -Model ([string]$cfg.grok.model) -Effort 'low' -MaxTurns 5 -PromptFilePath $tmp -Runner $q).QuotaExhausted | Should Be $true
+            (Invoke-GrokWorker -Cwd $HOME -Model ([string]$cfg.grok.model) -Effort 'low' -MaxTurns 5 -PromptFilePath $tmp -Runner $f).QuotaExhausted | Should Be $false
         } finally { Remove-TempOrderFile -Path $tmp }
     }
     It 'doctor 보고서 항목' {
@@ -1288,7 +1310,7 @@ Describe '추가: 검증/주입/워커/doctor (기존 유지분)' {
         (@($codexModels.missing) -join ',') | Should Be 'gpt-9-terra'
         $codexModels.allConfiguredAvailable | Should Be $false
 
-        $grok = Get-GrokModelStatus -ConfiguredModel 'grok-9-vision' -ModelsOutput "grok-4.6`ngrok-9-vision"
+        $grok = Get-GrokModelStatus -ConfiguredModel 'grok-9-vision' -ModelsOutput "$($cfg.grok.model)`ngrok-9-vision"
         $grok.defaultModel | Should Be 'grok-9-vision'
         $grok.configuredModelAvailable | Should Be $true
         (Get-GrokModelStatus -ConfiguredModel 'grok-10' -ModelsOutput 'grok-100').configuredModelAvailable | Should Be $false
@@ -1637,7 +1659,7 @@ Describe 'v2.2-5. 검수 프롬프트에 실제 완료 자료(postflight) 포함
             $script:pt = $null
             $runner = { param($repo,$prompt,$r) $script:pt = Get-Content -LiteralPath $prompt -Raw -Encoding UTF8; [pscustomobject]@{ ExitCode=0; Output='{"verdict":"PASS","findings":[]}' } }
             Invoke-OperationReview -OperationNumber 1 -IssueNumber 74 -RepoPath $repo -IssueFetcher $issue -GptReviewRunner $runner | Out-Null
-            $script:pt | Should Match 'worker=grok model=grok-4\.5 effort=high'
+            $script:pt | Should Match 'worker=grok model=grok-4\.6 effort=high'
             $script:pt | Should Match 'worker 종료코드'
             $script:pt | Should Match 'commitCount='
             $script:pt | Should Match 'branch=main'
@@ -2315,7 +2337,7 @@ Describe 'v2.3.1-12~15. quota 축소와 fallback 루프 가드' {
         $prompt = New-TempOrderFile -Content 'mock'
         try {
             $snapshot = Get-StartSnapshot -RepoPath $repo
-            $route = [pscustomobject]@{ status='routed'; worker='grok'; model='grok-4.6'; effort='medium' }
+            $route = [pscustomobject]@{ status='routed'; worker='grok'; model=[string]$cfg.grok.model; effort='medium' }
             $log = New-Object System.Collections.Generic.List[string]
             $script:loopGptCalled = 0
             $gp = { param($r,$repo,$prompt) $script:loopGptCalled++; [pscustomobject]@{ ExitCode=0;Success=$true;Output='must not run' } }
@@ -2333,7 +2355,7 @@ Describe 'v2.3.2-1~7. grok 헤드리스 권한 인수 (acceptEdits 제거, v2.3.
         $tmp = New-TempOrderFile -Content 'x'
         try {
             $cap = { param($fp,$al) [pscustomobject]@{ ExitCode=0; Output='{"stopReason":"EndTurn"}' } }
-            $r = Invoke-GrokWorker -Cwd $HOME -Model 'grok-4.6' -Effort 'low' -MaxTurns 40 -PromptFilePath $tmp -NoPlan $true -NoSubagents $true -Runner $cap
+            $r = Invoke-GrokWorker -Cwd $HOME -Model ([string]$cfg.grok.model) -Effort 'low' -MaxTurns 40 -PromptFilePath $tmp -NoPlan $true -NoSubagents $true -Runner $cap
             $joined = ($r.ArgumentList -join ' ')
             $joined | Should Not Match 'acceptEdits'                              # 1
             ($r.ArgumentList -contains '--always-approve') | Should Be $true      # 2 (v2.3.3)
@@ -2355,7 +2377,7 @@ Describe 'v2.3.2-1~7. grok 헤드리스 권한 인수 (acceptEdits 제거, v2.3.
         $tmp = New-TempOrderFile -Content 'x'
         try {
             $cap = { param($fp,$al) [pscustomobject]@{ ExitCode=0; Output='{"stopReason":"EndTurn"}' } }
-            $r = Invoke-GrokWorker -Cwd $HOME -Model 'grok-4.6' -Effort 'low' -MaxTurns 40 -PromptFilePath $tmp -Runner $cap
+            $r = Invoke-GrokWorker -Cwd $HOME -Model ([string]$cfg.grok.model) -Effort 'low' -MaxTurns 40 -PromptFilePath $tmp -Runner $cap
             $denyCount = @($r.ArgumentList | Where-Object { $_ -eq '--deny' }).Count
             $denyCount | Should Be 19
             $allowCount = @($r.ArgumentList | Where-Object { $_ -eq '--allow' }).Count
@@ -2488,7 +2510,7 @@ Describe 'v2.3.2-18. doctor grok 헤드리스 권한 판정' {
 }
 
 Describe 'v2.3.2-19. 기존 작전 3 grok 실행 설정 불변' {
-    It '19. grok-4.6 low / maxTurns 40 / noPlan / noSubagents 유지' {
+    It '19. config Grok model / low / maxTurns 40 / noPlan / noSubagents 유지' {
         $cfg2 = Get-Config
         $cfg2.grok.operations.'3'.effort | Should Be 'low'
         $cfg2.grok.operations.'3'.maxTurns | Should Be 40
@@ -2665,7 +2687,7 @@ Describe 'v2.4.4. 실행 세대 영속화·중복 차단·recover' {
                 '-ConfigPathOverride',('"'+$Script:ConfigPath+'"'))
             $hostProcess=Start-Process -FilePath 'powershell.exe' -ArgumentList $hostArgs -WorkingDirectory $repo -PassThru -WindowStyle Hidden
             $sawPartial=$false
-            1..30 | ForEach-Object {
+            1..150 | ForEach-Object {
                 if(-not $hostProcess.HasExited -and (Read-SharedTextFile -Path $rc.logPath) -match 'partial-before-exit'){$sawPartial=$true}
                 if(-not $hostProcess.HasExited){Start-Sleep -Milliseconds 100;$hostProcess.Refresh()}
             }
@@ -2864,7 +2886,7 @@ Describe 'v2.4.6-1. 모든 repair 경로의 verified run/review receipt 자격 �
     It 'Save-RunReceipt 기본 provenance는 legacy 호출자를 review와 repair에 fail-closed 한다' {
         $repo=New-FakeRepo -WithRemote
         try {
-            $final=Head-Of $repo;$snap=[pscustomobject]@{startHead=$final};$pf=[pscustomobject]@{status='completed';finalHead=$final};$route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $final=Head-Of $repo;$snap=[pscustomobject]@{startHead=$final};$pf=[pscustomobject]@{status='completed';finalHead=$final};$route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             Save-RunReceipt -Operation 1 -IssueNumber 433 -RepoPath $repo -Snapshot $snap -Postflight $pf -Route $route|Out-Null
             $receipt=Get-RunReceipt -Operation 1 -IssueNumber 433 -RepoPath $repo
             $receipt.resultEnvelopePresent|Should Be $false;$receipt.interrupted|Should Be $true;$receipt.verificationProvenance|Should Be 'unknown'
@@ -2943,7 +2965,7 @@ Describe 'v2.4.7-0. v2.4.6 runtime hotfix 회귀 고정' {
         $prompt=Join-Path $TestWorkRoot 'hotfix-null-poll.txt'
         Set-Content -LiteralPath $prompt -Value 'fixture' -Encoding UTF8
         $snapshot=Get-StartSnapshot -RepoPath $repo
-        $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
+        $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
         $localConfig=Get-Config
         $localConfig.execution.foregroundWaitSeconds=2
         $localConfig.execution.pollIntervalMilliseconds=100
@@ -3017,7 +3039,7 @@ Describe 'v2.4.7-1. sanitized progress journal과 GPT observable parser' {
     It 'event schema는 단조 seq와 필수 필드를 유지하고 summary를 정규화·마스킹·500자로 제한한다' {
         $repo=New-FakeRepo
         try{
-            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 451 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'fixture' -RunId 'progress-schema'
             $secret='ghp_abcdefghijklmnopqrstuvwx1234'
             Write-ExecutionProgressEvent -Receipt $receipt -Event heartbeat -Summary (($secret+"`n")+('x'*700)) | Out-Null
@@ -3032,7 +3054,7 @@ Describe 'v2.4.7-1. sanitized progress journal과 GPT observable parser' {
         $repo=New-FakeRepo;$original=${function:Get-ProgressConfig}
         try{
             Set-Item function:Get-ProgressConfig -Value {[pscustomobject]@{pollIntervalMilliseconds=10;heartbeatSeconds=1;maxSummaryCharacters=500;maxJournalBytes=1;followCheckpointSeconds=1}}
-            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 452 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent 'fixture' -RunId 'progress-limit'
             Write-ExecutionProgressEvent -Receipt $receipt -Event file_changed -Summary 'a.txt' | Out-Null
             Write-ExecutionProgressEvent -Receipt $receipt -Event file_changed -Summary 'b.txt' | Out-Null
@@ -3067,7 +3089,7 @@ Describe 'v2.4.7-1. sanitized progress journal과 GPT observable parser' {
     It 'injected worker 경로도 process/output/exit/sanitized 이벤트를 순서대로 기록한다' {
         $repo=New-FakeRepo -WithRemote;$prompt=Join-Path $TestWorkRoot 'progress-injected.txt';Set-Content -LiteralPath $prompt -Value 'fixture' -Encoding UTF8
         try{
-            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
             $runner={param($r,$path,$p)[pscustomobject]@{ExitCode=0;Success=$true;QuotaExhausted=$false;ErrorClass='none';Output='fixture output'}}
             $result=Invoke-PersistentRouteWorker -Route $route -RepoPath $repo -PromptPath $prompt -Config (Get-Config) -OperationNumber 3 -IssueNumber 453 -Kind logic -Snapshot $snap -RunId 'progress-injected' -InjectedRunner $runner
             $receipt=$result.ExecutionReceipt;$events=@(Read-ExecutionProgressEvents -Receipt $receipt);$names=@($events|ForEach-Object event)
@@ -3083,7 +3105,7 @@ Describe 'v2.4.7-2. detach 실행과 generation 고정 watch terminal handoff' {
         $original=${function:Start-ExecutionWorkerHost};$script:v247HostCalls=0
         try{
             Set-Item function:Start-ExecutionWorkerHost -Value {param($Receipt,$Route,$Config,[string]$RepoPath)$script:v247HostCalls++;[pscustomobject]@{Id=999}}
-            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
             $result=Invoke-PersistentRouteWorker -Route $route -RepoPath $repo -PromptPath $prompt -Config (Get-Config) -OperationNumber 1 -IssueNumber 460 -Kind logic -Snapshot $snap -RunId detach -Detach
             $result.ErrorClass|Should Be 'execution_pending';$result.WorkerCalls|Should Be 1;$result.ExecutionReceipt.status|Should Be 'worker_starting';$script:v247HostCalls|Should Be 1
         }finally{Set-Item function:Start-ExecutionWorkerHost -Value $original;Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue}
@@ -3102,7 +3124,7 @@ Describe 'v2.4.7-2. detach 실행과 generation 고정 watch terminal handoff' {
     It 'watch one-shot은 현재 progress를 출력하되 worker와 generation을 만들지 않는다' {
         $repo=New-FakeRepo
         try{
-            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 462 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId watch
             Write-ExecutionProgressEvent -Receipt $receipt -Event heartbeat -Summary 'running fixture'|Out-Null;Save-ExecutionReceipt -Receipt $receipt -RepoPath $repo|Out-Null
             $script:v247WatchLines=@();$emit={param($line)$script:v247WatchLines+=$line}
@@ -3116,7 +3138,7 @@ Describe 'v2.4.7-2. detach 실행과 generation 고정 watch terminal handoff' {
     It 'watch follow는 worker result 후 recover를 1회 재개하고 terminal review handoff를 출력한다' {
         $repo=New-FakeRepo -WithRemote
         try{
-            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 463 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId follow
             Push-Location $repo;try{Set-Content a.txt 'changed';git add a.txt;git commit -q -m fixture;git push -q origin main}finally{Pop-Location}
             Write-AtomicJsonFile -Path $receipt.resultPath -Object ([pscustomobject]@{schemaVersion=1;executionId=$receipt.executionId;generation=$receipt.generation;worker='grok';exitCode=0;success=$true;quotaExhausted=$false;errorClass='none';workerStopReason='EndTurn';localVerificationComplete=$true;stdoutPath=$receipt.rawStdoutPath;stderrPath=$receipt.rawStderrPath})
@@ -3143,7 +3165,7 @@ Describe 'v2.4.7-2. detach 실행과 generation 고정 watch terminal handoff' {
     It 'result 없는 interrupted recover는 성공을 합성하지 않고 manual_verification으로 끝난다' {
         $repo=New-FakeRepo -WithRemote
         try{
-            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $snap=Get-StartSnapshot -RepoPath $repo;$route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 465 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId unverified
             Push-Location $repo;try{Set-Content a.txt 'changed';git add a.txt;git commit -q -m fixture;git push -q origin main}finally{Pop-Location}
             $receipt.status='interrupted_postflight_pending';$receipt.updatedAt=[DateTime]::UtcNow.AddMinutes(-1).ToString('o');Save-ExecutionReceipt -Receipt $receipt -RepoPath $repo|Out-Null
@@ -3865,7 +3887,7 @@ Describe 'v3.0.0. issue branch와 Draft PR workflow' {
             }
             $remoteFailure=Resolve-PullRequestPostflight -RepoPath $f.Repo -StartSnapshot ([pscustomobject]@{startHead=$saved.startHead}) `
                 -WorkerResult ([pscustomobject]@{Success=$true;ExitCode=0;WorkerReportedVerification='ok'}) -Workflow $saved.workflow `
-                -Operation 2 -IssueNumber 19 -Route ([pscustomobject]@{worker='grok';model='grok-4.6';effort='medium'}) `
+                -Operation 2 -IssueNumber 19 -Route ([pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='medium'}) `
                 -PrProbe $pr.Probe -RemoteHeadProbe $remoteProbe -ExistingPrOnly
             $remoteFailure.status|Should Be 'remote_sync_unavailable'
         } finally {Remove-PrFakeRepo $f}
@@ -4007,7 +4029,7 @@ Describe 'v3.0.0. Draft PR와 PR CI workflow' {
 
     It '33. PR body는 secret을 마스킹하고 prompt와 raw output 원문을 포함하지 않는다' {
         $w=[pscustomobject]@{baseBranch='main';baseHead=('a'*40);workBranch='operation-router/issue-33';workStartHead=('a'*40);finalHead=('b'*40)}
-        $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+        $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
         $secret='Authorization: Bearer abcdefghij1234567890'
         $body=New-PullRequestBody -Operation 1 -IssueNumber 33 -Route $route -Workflow $w -VerificationSummary $secret
         $body|Should Not Match 'abcdefghij1234567890'
@@ -4215,7 +4237,7 @@ Describe 'v3.0.0. workflow receipt와 merge_ready' {
             $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 49 -Config (Get-Config)
             Add-Member -InputObject $pre.workflow -NotePropertyName issueNumber -NotePropertyValue 49 -Force
             $pre.workflow.finalHead=Get-GitHead -Path $f.Repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='medium'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='medium'}
             $res=Ensure-DraftPullRequest -RepoPath $f.Repo -Operation 1 -IssueNumber 49 -Route $route -Workflow $pre.workflow -PrProbe $pr.Probe -ExistingOnly
             $res.status|Should Be 'pr_context_mismatch'
             $pr.State.CreateCalls|Should Be 0
@@ -4442,7 +4464,7 @@ Describe 'v3.0.0 외부 비판적 검토 결함 회귀' {
                 git push -q -u origin HEAD
             } finally {Pop-Location}
             $wr=[pscustomobject]@{Success=$true;ExitCode=0;WorkerReportedVerification='tests passed';WorkerRemainingProblems=@()}
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='medium'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='medium'}
             $pf=Resolve-PullRequestPostflight -RepoPath $f.Repo -StartSnapshot $pre.snapshot -WorkerResult $wr -Workflow $pre.workflow `
                 -Operation 2 -IssueNumber 610 -Route $route -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
             $pf.status|Should Be 'required_workflow_removed'
@@ -4464,7 +4486,7 @@ Describe 'v3.0.0 외부 비판적 검토 결함 회귀' {
             } finally {Pop-Location}
             $pf=Resolve-PullRequestPostflight -RepoPath $f.Repo -StartSnapshot $pre.snapshot `
                 -WorkerResult ([pscustomobject]@{Success=$true;ExitCode=0;WorkerReportedVerification='tests passed'}) -Workflow $pre.workflow `
-                -Operation 2 -IssueNumber 611 -Route ([pscustomobject]@{worker='grok';model='grok-4.6';effort='medium'}) `
+                -Operation 2 -IssueNumber 611 -Route ([pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='medium'}) `
                 -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
             $pf.status|Should Be 'pr_ci_unavailable'
             $pf.workflow.baseWorkflow.exists|Should Be $false
@@ -4491,7 +4513,7 @@ Describe 'v3.0.0 외부 비판적 검토 결함 회귀' {
             try {'change'|Set-Content change.txt;git add .;git commit -q -m change;git push -q -u origin HEAD}finally{Pop-Location}
             $pf=Resolve-PullRequestPostflight -RepoPath $f.Repo -StartSnapshot $pre.snapshot `
                 -WorkerResult ([pscustomobject]@{Success=$true;ExitCode=0;WorkerReportedVerification='tests passed'}) -Workflow $pre.workflow `
-                -Operation 2 -IssueNumber 613 -Route ([pscustomobject]@{worker='grok';model='grok-4.6';effort='medium'}) -PrProbe $pr.Probe `
+                -Operation 2 -IssueNumber 613 -Route ([pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='medium'}) -PrProbe $pr.Probe `
                 -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@((New-PrCiCheck -PrNumber $n -HeadSha $h))}}
             $pf.status|Should Be 'pr_opened'
             $pf.ciStatus|Should Be 'success'
@@ -4875,7 +4897,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
         $repo=New-FakeRepo -WithRemote
         try {
             $snap=Get-StartSnapshot -RepoPath $repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high';maxTurns=1;noPlan=$false;noSubagents=$false}
             $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8301 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId weekly-clean
             New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
             $script:v303GptCalls=0
@@ -4898,7 +4920,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
         $repo=New-FakeRepo -WithRemote
         try {
             $snap=Get-StartSnapshot -RepoPath $repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8302 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId weekly-partial
             Push-Location $repo; try { 'dirty'|Set-Content partial.txt } finally { Pop-Location }
             New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
@@ -4925,7 +4947,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
             $repo=New-FakeRepo -WithRemote
             try {
                 $snap=Get-StartSnapshot -RepoPath $repo
-                $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+                $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
                 $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber $case.n -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId ("ec-$($case.ec)")
                 New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass $case.ec
                 $script:v303GptCalls=0
@@ -4959,7 +4981,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
                 $pre.ok|Should Be $true
                 $snap=$pre.snapshot;$wf=Copy-WorkflowContext -Workflow $pre.workflow
                 Add-Member -InputObject $wf -NotePropertyName issueNumber -NotePropertyValue $case.n -Force
-                $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+                $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
                 $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber $case.n -RepoPath $f.Repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId ("pr-$($case.ec)") -Workflow $wf
                 if ($case.partial) {
                     Push-Location $f.Repo
@@ -4991,7 +5013,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
         $repo=New-FakeRepo -WithRemote
         try {
             $snap=Get-StartSnapshot -RepoPath $repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 8320 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId watch-transient
             New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass transient_rate_limit
             $script:v303GptCalls=0
@@ -5014,7 +5036,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
         $repo=New-FakeRepo -WithRemote
         try {
             $snap=Get-StartSnapshot -RepoPath $repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 1 -IssueNumber 8321 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId watch-weekly
             New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
             $script:v303GptCalls=0
@@ -5035,7 +5057,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
         $prompt=New-TempOrderFile -Content 'fixture'
         try {
             $snap=Get-StartSnapshot -RepoPath $repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8322 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId first
             New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
             $script:v303UnexpectedCalls=0
@@ -5059,7 +5081,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
         $prompt=New-TempOrderFile -Content 'fixture'
         try {
             $snap=Get-StartSnapshot -RepoPath $repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $runner={param($r,$p,$o)[pscustomobject]@{ExitCode=1;Success=$false;QuotaExhausted=$false;ErrorClass='transient_rate_limit';Output='HTTP 429'}}
             $result=Invoke-PersistentRouteWorker -Route $route -RepoPath $repo -PromptPath $prompt -Config (Get-Config) `
                 -OperationNumber 2 -IssueNumber 8323 -Kind logic -Snapshot $snap -RunId sync-failure -InjectedRunner $runner
@@ -5079,7 +5101,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
         $repo=New-FakeRepo -WithRemote
         try {
             $snap=Get-StartSnapshot -RepoPath $repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8324 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId issue-fetch-failure
             New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
             $result=Invoke-RecoverCommand -OperationNumber 2 -IssueNumber 8324 -RepoPath $repo `
@@ -5099,7 +5121,7 @@ Describe 'v3.0.3. Detach envelope watch/recover 오류 정책 정직성 (F1/F2/F
         $repo=New-FakeRepo -WithRemote
         try {
             $snap=Get-StartSnapshot -RepoPath $repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8325 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId secondary-provider
             New-DetachedFailureEnvelope -Receipt $receipt -ErrorClass weekly_exhausted
             $script:v303SecondaryCalls=0
@@ -5203,7 +5225,7 @@ Describe 'v3.0.3. abandon-claude mutation lock 안전 해제 (F4)' {
         $repo=New-FakeRepo -WithRemote
         try {
             $snap=Get-StartSnapshot -RepoPath $repo
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $receipt=New-ExecutionGeneration -Operation 2 -IssueNumber 8404 -RepoPath $repo -Kind logic -Snapshot $snap -Route $route -PromptContent fixture -RunId active-abandon
             $mut=Enter-RepositoryMutation -RepoPath $repo -Operation 2 -IssueNumber 8404 -Purpose run
             Set-RepositoryMutationExecution -RepoPath $repo -Token $mut.token -ExecutionReceipt $receipt
@@ -7277,7 +7299,7 @@ Describe 'v3.0.11 후속 주문 branch·order source·HEAD 재봉인' {
             $post=[pscustomobject]@{status='pr_opened';branch='operation-router/issue-91';startHead=$pre.snapshot.startHead
                 finalHead=$sealedHead;commitCount=1;worktreeClean=$true;pushComplete=$true;ciStatus='success';workerExitCode=0
                 workflow=(Copy-WorkflowContext -Workflow $pre.workflow)}
-            $route=[pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}
+            $route=[pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}
             $worker=[pscustomobject]@{Output='done';WorkerReportedVerification='tests pass';WorkerRemainingProblems=@()}
             Save-RunReceipt -Operation 1 -IssueNumber 91 -RepoPath $f.Repo -Snapshot $pre.snapshot -Postflight $post `
                 -Route $route -WorkerResult $worker -StatusOverride 'pr_opened' -ResultEnvelopePresent $true `
@@ -7926,7 +7948,7 @@ Describe 'v3.0.12 후속 이슈 Draft PR 본문 연결' {
             try{'new'|Set-Content new.txt -Encoding UTF8;git add .;git commit -q -m new;git push -q -u origin HEAD}finally{Pop-Location}
             $pre.workflow.finalHead=Get-GitHead -Path $f.Repo
             $result=Ensure-DraftPullRequest -RepoPath $f.Repo -Operation 1 -IssueNumber 1224 `
-                -Route ([pscustomobject]@{worker='grok';model='grok-4.6';effort='high'}) -Workflow $pre.workflow -PrProbe $pr.Probe
+                -Route ([pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}) -Workflow $pre.workflow -PrProbe $pr.Probe
             $result.ok|Should Be $true
             $pr.State.Body|Should Match 'Closes #1224'
             $pr.State.Body|Should Not Match 'operation-router-follow-ups'

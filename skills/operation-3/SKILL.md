@@ -41,7 +41,7 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 `-OrderFile`은 한 번 읽은 동일 byte snapshot에서 strict UTF-8 본문·SHA-256·byte length를 만들며 recover 재진입은 기록된 절대 path·hash·length가 모두 일치할 때만 주문을 사용한다. 후속 이슈가 기존 Draft PR을 승계하면 기존 본문과 최초 `Closes`를 보존한 follow-up marker가 검증돼야 한다.
 
 - 기본 kind는 `logic`. 기계적/로직 판단은 라우터가 LLM으로 추측하지 않고 인수로 받는다.
-- Grok 사용 가능 → Grok 4.6 / low (no-plan, no-subagents)
+- Grok 사용 가능 → `config.grok.model` / low (no-plan, no-subagents)
 - Grok 소진·GPT 작업 허용:
   - `--kind logic` → GPT-5.6 Terra / medium
   - `--kind mechanical` → GPT-5.6 Luna / low

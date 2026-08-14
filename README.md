@@ -163,7 +163,7 @@ run -Detach
 - terminal `nextAction`은 Operation 1 Grok=`review`, Operation 1 GPT=`opus_end_review`, Operation 2=`sonnet_end_review`, Operation 3=`report`, unverified=`manual_verification`, 실패=`stop`이다.
 
 ```text
-[ORH][14:02:11] START     grok-4.6 / high process started
+[ORH][14:02:11] START     <config.grok.model> / high process started
 [ORH][14:03:42] COMMAND   command completed exit=0
 [ORH][14:05:34] COMMIT    4ab12cd
 [ORH][14:06:00] RUNNING   running 229s, output 18240 bytes, worktree clean, HEAD changed
@@ -466,7 +466,7 @@ Windows PowerShell 5.1 (`powershell.exe`)만 있고 `pwsh`는 없다. 스크립�
 ## 실제 확인된 CLI 모델 ID·옵션 (2026-07-25)
 
 - Skill frontmatter의 `model`,`effort`,`disable-model-invocation`,`argument-hint`,`user-invocable`,`when_to_use` 지원은 claude.exe에서 확인했다. 현재 번들 값은 위의 config 생성 표가 기준이며 effort 허용값은 low/medium/high/xhigh/max다. Claude Code 2.1.212의 `--model`은 최신 alias 또는 전체 모델명을 받지만 이 번들은 고정 ID만 허용한다. 2026-07-25 Operation 1 교체에 사용한 `claude-opus-5`는 [Anthropic 공식 마이그레이션 문서](https://platform.claude.com/docs/en/about-claude/models/migration-guide)에서 확인했다. 모델 가용성을 증명하는 유료 세션은 실행하지 않았다.
-- Grok 1.0.3: `grok models`에서 `grok-4.6`이 기본·사용 가능 모델이고 `grok-4.5`도 호환 모델로 확인됐다. 라우터는 고정 ID `grok-4.6`과 `--cwd --model --reasoning-effort --max-turns --prompt-file --output-format json --always-approve --allow <RULE> --deny <RULE> --no-plan --no-subagents`를 사용한다. stdin은 임시 `.cmd` 래퍼의 `< NUL`로 고정한다. `--deny`가 자동 승인보다 우선하며 `--no-auto-update`는 존재하지 않는다.
+- Grok 1.0.3: 2026-08-14 `grok models`에서 `grok-4.6`이 기본·사용 가능 모델이고 `grok-4.5`도 호환 모델로 확인됐다. 라우터는 `config.grok.model`의 고정 ID와 `--cwd --model --reasoning-effort --max-turns --prompt-file --output-format json --always-approve --allow <RULE> --deny <RULE> --no-plan --no-subagents`를 사용한다. 다음 고정 모델 교체는 `scripts/sync-model-contract.ps1 -Write -GrokModel <ID>` 한 명령으로 config·생성 표·manifest를 원자 갱신한다. stdin은 임시 `.cmd` 래퍼의 `< NUL`로 고정한다. `--deny`가 자동 승인보다 우선하며 `--no-auto-update`는 존재하지 않는다.
 - Codex 0.144.5: `codex exec --cd -m -c model_reasoning_effort=<e> -s workspace-write -c approval_policy=never -c sandbox_workspace_write.network_access=true --json -` (프롬프트 stdin). `-a`는 `codex exec`에 없는 옵션이므로 쓰지 않는다. 2026-07-22 `~/.codex/models_cache.json`에서 `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna`를 확인했다. doctor의 `unresolved`는 로컬 cache 진단이며 실행 게이트가 아니다. 라우터는 config의 고정 ID를 전달하고 provider CLI가 실제 가용성을 최종 판정한다.
 
 ## 삭제·복구

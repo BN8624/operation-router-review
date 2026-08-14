@@ -61,7 +61,7 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 - worker는 branch나 PR을 만들거나 바꾸거나 병합하지 않는다. worker push 대상은 receipt에 적힌 원격 work branch뿐이다.
 - 설정에 `gitWorkflow`가 없는 legacy 설치본 또는 명시적 `direct-main` mode에서는 v2 계약을 유지한다.
 라우터가 사용량에 따라 작업자를 정한다.
-- Grok 사용 가능 → Grok 4.6 / high
+- Grok 사용 가능 → `config.grok.model` / high
 - Grok 소진·GPT 작업 허용 → GPT-5.6 Sol / high
 - Grok 85~94%면 신규 실행이 보호 차단된다. 기존 작업 마감은 `--finish-current`일 때만.
 - run이 worker postflight까지 도달하면 실행 영수증(`state/pending/op1-issue<n>-run.json`)이 자동 저장된다. receipt에는 시작·최종 HEAD, worker, 검증 결과뿐 아니라 실행 시작 때 고정한 workflow mode, base/work branch, PR 번호·URL·head SHA·CI 상태가 들어간다.
