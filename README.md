@@ -1,10 +1,20 @@
-# operation-router (v3.0.12)
+# operation-router (v3.0.13)
 
-<!-- verification-summary sourceTreePassed=683 sourceTreeFailed=0 installedFixturePassed=683 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=689 sourceTreeFailed=0 installedFixturePassed=689 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 683 passed, 0 failed; installed fixture 683 passed, 0 failed.
+Official verification: source-tree 689 passed, 0 failed; installed fixture 689 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.13 Grok 4.6 and one-command model upgrades
+
+Grok Build 1.0.3의 `grok models`와 `--help`에서 기본·사용 가능 모델 `grok-4.6`과 기존 라우터 인수 호환성을 확인했다. 세 Operation의 Grok 경로는 effort·fallback 정책을 바꾸지 않고 config의 고정 ID `grok-4.6`을 전달한다.
+
+다음 Grok 고정 모델 교체는 아래 한 명령으로 config, README 생성 표, Skill frontmatter, test model cache, manifest를 원자 갱신한다. 작전 Skill의 설명과 테스트 fixture는 모델 ID를 복제하지 않고 `config.grok.model`을 참조한다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-model-contract.ps1 -RootPath . -Write -GrokModel grok-4.6
+```
 
 ## v3.0.12 reseal verification, atomic orders, and follow-up links
 

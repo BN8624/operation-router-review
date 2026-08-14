@@ -1,10 +1,14 @@
-# REENTRY — operation-router v3.0.12 pull-request workflow
+# REENTRY — operation-router v3.0.13 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=683 sourceTreeFailed=0 installedFixturePassed=683 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=689 sourceTreeFailed=0 installedFixturePassed=689 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 683 passed, 0 failed; installed fixture 683 passed, 0 failed.
+Official verification: source-tree 689 passed, 0 failed; installed fixture 689 passed, 0 failed.
 Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.13 Grok model contract
+
+현재 Grok 고정 ID는 `config.grok.model=grok-4.6`이다. Operation 1/2/3의 effort·라우팅·fallback 정책은 v3.0.12와 동일하다. 다음 고정 모델 교체는 `scripts/sync-model-contract.ps1 -RootPath . -Write -GrokModel <ID>` 한 명령으로 수행하고 `-Check`와 전체 격리 테스트로 확인한다. Skill 설명과 test fixture는 config 값을 참조하므로 모델 ID를 여러 파일에서 수동 치환하지 않는다.
 
 ## v3.0.12 re-entry invariants
 

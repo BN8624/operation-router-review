@@ -1,5 +1,12 @@
 # CHANGELOG — operation-router
 
+## v3.0.13 (2026-08-14)
+
+- Grok Build 1.0.3의 로컬 `grok models`에서 기본·사용 가능 모델 `grok-4.6`을 확인하고 Operation 1/2/3의 Grok 고정 ID를 `grok-4.5`에서 `grok-4.6`으로 변경했다. effort·라우팅·사용량·fallback 정책은 바꾸지 않았다.
+- `sync-model-contract.ps1 -Write -GrokModel <ID>`가 config, README 생성 표, Skill frontmatter, test model cache, manifest를 한 번에 원자 갱신한다. unsafe alias와 잘못된 ID는 쓰기 전에 fail-closed한다.
+- 작전 Skill 문구와 테스트 fixture의 모델 ID 복제를 제거해 `config.grok.model`을 참조하게 했다. 다음 Grok 모델 교체에는 테스트 fixture 전수 치환이 필요하지 않다.
+- 검증은 source-tree 689/689와 격리 installed fixture 689/689다. 실제 유료 Grok/GPT/Claude 호출은 0회다.
+
 ## v3.0.12 (2026-07-29)
 
 - reseal verification gate: an explicitly resealed external HEAD now requires exact-head PR-linked CI success or a structured local verification receipt bound to Operation 1, repository identity, follow-up issue, work branch, and current HEAD. Missing or invalid evidence returns `reseal_verification_required`.
