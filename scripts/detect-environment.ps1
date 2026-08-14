@@ -172,7 +172,7 @@ function Invoke-EnvironmentDetection {
     $report.grokHeadless.allowRuleSupported = [bool]$allowSupported
     $report.grokHeadless.denyRuleSupported = [bool]$denySupported
     $report.grokHeadless.noAutoUpdateFlagSupported = [bool]$noAutoUpdateFlag
-    $report.grokHeadless.noAutoUpdateNote = 'grok 0.2.102에는 --no-auto-update 플래그·환경변수·config 키가 없다. 추측 구문을 넣지 않으며(없는 플래그는 grok 실행을 깨뜨림), 헤드리스 --output-format json 실행은 대화형 자동 업데이트를 유발하지 않는다.'
+    $report.grokHeadless.noAutoUpdateNote = 'grok 1.0.3 --help에는 --no-auto-update 플래그가 없다. 추측 구문을 넣지 않으며(없는 플래그는 grok 실행을 깨뜨림), 헤드리스 --output-format json 실행은 대화형 자동 업데이트를 유발하지 않는다.'
     $report.grokHeadless.configuredMode = $configuredMode
     $report.grokHeadless.usesAcceptEdits = ($configuredMode -eq 'acceptEdits' -or $hardcodedAcceptEdits)
     $report.grokHeadless.allowRules = $allowRules

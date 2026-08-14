@@ -1,4 +1,4 @@
-# Grok CLI 헤드리스 래퍼. 문서화된 옵션만 사용 (grok --help 2026-07-20). 전경 1회 실행.
+# Grok CLI 헤드리스 래퍼. 문서화된 옵션만 사용 (grok 1.0.3 --help 2026-08-14). 전경 1회 실행.
 # v2.3.2: acceptEdits 제거 → config.grok.headlessPermissions(dontAsk + allow/deny). exit 0만으로 성공 처리하지 않고
 #         --output-format json 결과의 stopReason을 구조적으로 파싱해 Cancelled/turn limit/파싱실패를 실패로 판정한다.
 # v2.3.3: mode=alwaysApprove 지원. grok 내장 정책은 heredoc(<<)·명령 치환이 든 명령을 ask 규칙으로 분류하는데,

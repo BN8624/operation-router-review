@@ -48,7 +48,7 @@ PowerShell은 `$env:USERPROFILE` 경로, Git Bash는 `$USERPROFILE` 경로를 �
 - terminal의 `nextAction`은 `sonnet_end_review` 또는 `stop`만 수행한다.
 - 기본 `pull-request` mode에서는 라우터가 `operation-router/issue-<이슈번호>` branch와 Draft PR을 소유한다. worker는 branch·PR을 만들거나 바꾸거나 병합하지 않고 receipt의 원격 work branch에만 push한다.
 - 설정에 `gitWorkflow`가 없는 legacy 설치본 또는 명시적 `direct-main` mode에서는 v2 계약을 유지한다.
-- Grok 사용 가능 → Grok 4.5 / medium
+- Grok 사용 가능 → Grok 4.6 / medium
 - Grok 소진·GPT 작업 허용 → GPT-5.6 Terra / medium
 - GPT 80% 이상 → `status: claude_only_required`와 config 기반 `requiredModel` 반환. 이 세션이 반환된 `resumeCommand`(`/operation-2 <n> --claude-only`)로 직접 구현을 이어갈 수 있다.
 - Grok 85~94%면 신규 실행이 보호 차단된다(기존 마감은 `--finish-current`).

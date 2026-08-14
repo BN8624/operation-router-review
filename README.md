@@ -163,7 +163,7 @@ run -Detach
 - terminal `nextAction`은 Operation 1 Grok=`review`, Operation 1 GPT=`opus_end_review`, Operation 2=`sonnet_end_review`, Operation 3=`report`, unverified=`manual_verification`, 실패=`stop`이다.
 
 ```text
-[ORH][14:02:11] START     grok-4.5 / high process started
+[ORH][14:02:11] START     grok-4.6 / high process started
 [ORH][14:03:42] COMMAND   command completed exit=0
 [ORH][14:05:34] COMMIT    4ab12cd
 [ORH][14:06:00] RUNNING   running 229s, output 18240 bytes, worktree clean, HEAD changed
@@ -315,11 +315,11 @@ Claude Code 2.1.212의 SKILL.md frontmatter는 `model`·`effort`를 **정적(로
 <!-- worker-model-contract:start -->
 | 작전 | Grok 가능 | Grok 소진 + GPT 작업 허용 | GPT 차단(80%+/reserved/exhausted) |
 |---|---|---|---|
-| 1 구현 | grok-4.5 high | gpt-5.6-sol high | claude_only_required (`claudeOnly.1`) |
+| 1 구현 | grok-4.6 high | gpt-5.6-sol high | claude_only_required (`claudeOnly.1`) |
 | 1 검수 | — | gpt-5.6-sol high | claude_review_fallback (Opus 직접) / 예비분은 `--use-gpt-review-reserve`만 |
-| 2 구현 | grok-4.5 medium | gpt-5.6-terra medium | claude_only_required (`claudeOnly.2`) |
-| 3 logic | grok-4.5 low | gpt-5.6-terra medium | claude_only_required (`claudeOnly.3.logic`) |
-| 3 mechanical | grok-4.5 low | gpt-5.6-luna low | claude_direct (`claudeOnly.3.mechanical`, 기계적 작업만) |
+| 2 구현 | grok-4.6 medium | gpt-5.6-terra medium | claude_only_required (`claudeOnly.2`) |
+| 3 logic | grok-4.6 low | gpt-5.6-terra medium | claude_only_required (`claudeOnly.3.logic`) |
+| 3 mechanical | grok-4.6 low | gpt-5.6-luna low | claude_direct (`claudeOnly.3.mechanical`, 기계적 작업만) |
 <!-- worker-model-contract:end -->
 
 `sol`·`terra`·`luna`는 라우팅 역할 이름이며 실제 모델 ID는 위 표처럼 config에서 생성된다. 과거 Terra로 수행한 V11~V13·V15는 실제 Sol 재검증 전까지 `PASS_PENDING_SOL_RETEST`를 유지한다.
@@ -376,7 +376,7 @@ PR mode의 정상 상태는 `pr_opened`, `pr_ci_pending`, `pr_ci_unavailable`이
 
 ### Grok 헤드리스 권한 정책 + stopReason 판정 (v2.3.2)
 - **현재 권한**: `config.grok.headlessPermissions.mode=alwaysApprove`를 Grok의 `--always-approve`로 전달한다. `--deny` 위험 명령 규칙은 자동 승인보다 우선하며, 거부된 도구 호출은 세션 전체 취소가 아니라 작업자에게 전달되는 도구 오류가 된다. `acceptEdits`는 셸 승인을 해결하지 못해 쓰지 않는다. `dontAsk`도 heredoc·명령 치환에 대한 ask 규칙을 답할 수 없어 `PermissionCancelled`를 일으킨 과거 실패 모드이므로 현재 사용하지 않는다.
-- **`--no-auto-update`**: grok 0.2.102에는 해당 플래그·환경변수·config 키가 존재하지 않는다. 없는 구문을 추측해 넣으면 grok 실행 자체가 깨지므로 넣지 않으며, 헤드리스 `--output-format json` 단발 실행은 대화형 자동 업데이트를 유발하지 않는다.
+- **`--no-auto-update`**: grok 1.0.3 `--help`에는 해당 플래그가 없다. 없는 구문을 추측해 넣으면 grok 실행 자체가 깨지므로 넣지 않으며, 헤드리스 `--output-format json` 단발 실행은 대화형 자동 업데이트를 유발하지 않는다.
 - **성공 판정**: `--output-format json` 결과를 실제 JSON으로 파싱해 `stopReason`/`sessionId`/text/usage를 구조적으로 추출한다. 성공은 `ExitCode==0` **그리고** JSON 파싱 성공 **그리고** stopReason이 Cancelled/Aborted/Error/MaxTurns 계열이 아님을 모두 충족해야 한다.
   - stopReason Cancelled/Aborted → `worker_cancelled`
   - stopReason MaxTurns/turn limit → `worker_turn_limit`
@@ -466,7 +466,7 @@ Windows PowerShell 5.1 (`powershell.exe`)만 있고 `pwsh`는 없다. 스크립�
 ## 실제 확인된 CLI 모델 ID·옵션 (2026-07-25)
 
 - Skill frontmatter의 `model`,`effort`,`disable-model-invocation`,`argument-hint`,`user-invocable`,`when_to_use` 지원은 claude.exe에서 확인했다. 현재 번들 값은 위의 config 생성 표가 기준이며 effort 허용값은 low/medium/high/xhigh/max다. Claude Code 2.1.212의 `--model`은 최신 alias 또는 전체 모델명을 받지만 이 번들은 고정 ID만 허용한다. 2026-07-25 Operation 1 교체에 사용한 `claude-opus-5`는 [Anthropic 공식 마이그레이션 문서](https://platform.claude.com/docs/en/about-claude/models/migration-guide)에서 확인했다. 모델 가용성을 증명하는 유료 세션은 실행하지 않았다.
-- Grok 0.2.102: 모델 grok-4.5(유일). `--cwd --model --reasoning-effort --max-turns --prompt-file --output-format json --always-approve --allow <RULE> --deny <RULE> --no-plan --no-subagents`. stdin은 임시 `.cmd` 래퍼의 `< NUL`로 고정한다. `--deny`가 자동 승인보다 우선하며 `--no-auto-update`는 존재하지 않는다.
+- Grok 1.0.3: `grok models`에서 `grok-4.6`이 기본·사용 가능 모델이고 `grok-4.5`도 호환 모델로 확인됐다. 라우터는 고정 ID `grok-4.6`과 `--cwd --model --reasoning-effort --max-turns --prompt-file --output-format json --always-approve --allow <RULE> --deny <RULE> --no-plan --no-subagents`를 사용한다. stdin은 임시 `.cmd` 래퍼의 `< NUL`로 고정한다. `--deny`가 자동 승인보다 우선하며 `--no-auto-update`는 존재하지 않는다.
 - Codex 0.144.5: `codex exec --cd -m -c model_reasoning_effort=<e> -s workspace-write -c approval_policy=never -c sandbox_workspace_write.network_access=true --json -` (프롬프트 stdin). `-a`는 `codex exec`에 없는 옵션이므로 쓰지 않는다. 2026-07-22 `~/.codex/models_cache.json`에서 `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna`를 확인했다. doctor의 `unresolved`는 로컬 cache 진단이며 실행 게이트가 아니다. 라우터는 config의 고정 ID를 전달하고 provider CLI가 실제 가용성을 최종 판정한다.
 
 ## 삭제·복구

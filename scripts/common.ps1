@@ -1105,7 +1105,7 @@ function Remove-TempOrderFile {
 
 # 전경 자식 프로세스 1회 실행 (백그라운드/nohup 금지)
 # v2.3.3: StdinFilePath가 없으면 stdin을 호출 환경에서 상속하지 않고 NUL 장치에 고정한다.
-#         grok 0.2.102 헤드리스는 stdin이 파이프 EOF(예: Git Bash /dev/null 상속)면 실행 중이던 도구 호출을
+#         grok 헤드리스는 stdin이 파이프 EOF(예: Git Bash /dev/null 상속)면 실행 중이던 도구 호출을
 #         "User cancelled"로 오인해 stopReason=Cancelled로 중단한다 (2026-07-20 op3-issue2 E2E에서 재현·확인).
 #         NUL 고정은 임시 .cmd 래퍼(`< NUL`)로만 가능하다 — Start-Process -RedirectStandardInput은 장치 경로를 거부한다.
 function Invoke-ForegroundCommand {
