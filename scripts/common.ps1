@@ -19,6 +19,7 @@ $Script:DoctorReportPath = Join-Path $Script:StateDir 'doctor-report.json'
 
 . (Join-Path $PSScriptRoot 'state-store.ps1')
 . (Join-Path $PSScriptRoot 'worker-contract.ps1')
+. (Join-Path $PSScriptRoot 'gh-cli.ps1')
 
 function Initialize-RuntimeDirs {
     $dirs = @($Script:RuntimeRoot, $Script:ConfigDir, $Script:StateDir, $Script:PendingDir,

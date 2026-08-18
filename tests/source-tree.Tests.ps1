@@ -271,12 +271,22 @@ function New-TestPullRequestProbe {
         BodyPathExistedDuringCreate=$false;Actions=@();AutoAdvanceHead=$AutoAdvanceHead
         CreateFailure=$false;ReadyFailure=$false;ReadBodyCalls=0;UpdateBodyCalls=0
         ReadBodyFailure=$false;UpdateBodyFailure=$false;TamperAfterUpdate=$false
+        LookupFailuresRemaining=0;LookupEmptyRemaining=0;FailLookupAfterCreate=$false
     }
     $probe={
         param($Action,$Context)
         $state.Actions=@($state.Actions)+@($Action)
         if($Action -eq 'lookup'){
             $state.LookupCalls++
+            if($state.LookupFailuresRemaining -gt 0 -or ($state.FailLookupAfterCreate -and $state.CreateCalls -gt 0)){
+                if($state.LookupFailuresRemaining -gt 0){$state.LookupFailuresRemaining--}
+                return [pscustomobject]@{ok=$false;error='pr_lookup_failed';items=@()
+                    detail=[pscustomobject]@{exitCode=1;reason='invalid_json';stderrFirstLine='warning: unable to access git ignore';attempts=3}}
+            }
+            if($state.LookupEmptyRemaining -gt 0){
+                $state.LookupEmptyRemaining--
+                return [pscustomobject]@{ok=$true;items=@()}
+            }
             if($state.AutoAdvanceHead -and @($state.Items).Count -eq 1){
                 $head=(& git -C ([string]$Context.repoPath) rev-parse "refs/remotes/origin/$([string]$Context.workBranch)" 2>$null|Out-String).Trim()
                 if($head){$state.Items[0].headSha=$head}
@@ -8004,6 +8014,113 @@ Describe 'v3.0.12 후속 이슈 Draft PR 본문 연결' {
             [System.IO.File]::ReadAllText($path,(New-Object System.Text.UTF8Encoding($false)))|Should Be $content
             ([System.IO.File]::ReadAllBytes($path))[0]|Should Be 236
         } finally {Remove-TempOrderFile -Path $path}
+    }
+}
+
+Describe 'v3.0.14 gh 호출 스트림 분리·재시도·진단' {
+    Set-TestGitWorkflow -Mode pull-request
+    It '1. stdout만 파싱하므로 stderr 경고가 있어도 JSON이 성립한다' {
+        $runner={param($path,$ghArgs)[pscustomobject]@{ExitCode=0;Text='[{"number":7}]';StdErr='warning: unable to access git ignore';ToolAvailable=$true}}
+        $res=Invoke-GhWithRetry -Path $env:TEMP -GhArgs @('api','x') -ExpectJson -GhRunner $runner -Sleeper {param($ms)}
+        $res.ok|Should Be $true
+        @($res.value).Count|Should Be 1
+        $res.detail.stderrFirstLine|Should Be 'warning: unable to access git ignore'
+    }
+
+    It '2. JSON 파싱 실패는 재시도하고 다음 시도에서 성공한다' {
+        $script:ghAttempt=0
+        $runner={
+            param($path,$ghArgs)
+            $script:ghAttempt++
+            if($script:ghAttempt -lt 2){return [pscustomobject]@{ExitCode=0;Text='warning: noise';StdErr='';ToolAvailable=$true}}
+            return [pscustomobject]@{ExitCode=0;Text='[]';StdErr='';ToolAvailable=$true}
+        }
+        $res=Invoke-GhWithRetry -Path $env:TEMP -GhArgs @('api','x') -ExpectJson -GhRunner $runner -Sleeper {param($ms)}
+        $res.ok|Should Be $true
+        $script:ghAttempt|Should Be 2
+        $res.detail.attempts|Should Be 2
+    }
+
+    It '3. 계속 실패하면 마지막 진단을 담아 실패로 닫는다' {
+        $script:ghCalls=0
+        $runner={param($path,$ghArgs)$script:ghCalls++;[pscustomobject]@{ExitCode=1;Text='';StdErr="gh: connection reset`nsecond line";ToolAvailable=$true}}
+        $res=Invoke-GhWithRetry -Path $env:TEMP -GhArgs @('api','x') -ExpectJson -GhRunner $runner -Sleeper {param($ms)}
+        $res.ok|Should Be $false
+        $script:ghCalls|Should Be 3
+        $res.detail.exitCode|Should Be 1
+        $res.detail.reason|Should Be 'nonzero_exit'
+        $res.detail.stderrFirstLine|Should Be 'gh: connection reset'
+    }
+
+    It '4. gh 자체가 없으면 재시도하지 않고 tool_unavailable로 닫는다' {
+        $script:ghCalls2=0
+        $runner={param($path,$ghArgs)$script:ghCalls2++;[pscustomobject]@{ExitCode=$null;Text='';StdErr='';ToolAvailable=$false}}
+        $res=Invoke-GhWithRetry -Path $env:TEMP -GhArgs @('api','x') -ExpectJson -GhRunner $runner -Sleeper {param($ms)}
+        $res.ok|Should Be $false
+        $res.toolAvailable|Should Be $false
+        $script:ghCalls2|Should Be 1
+    }
+
+    It '5. 빈 출력과 오염된 출력은 성공으로 오인하지 않는다' {
+        (ConvertFrom-GhJsonText -Text '').ok|Should Be $false
+        (ConvertFrom-GhJsonText -Text '   ').reason|Should Be 'empty_output'
+        (ConvertFrom-GhJsonText -Text "warning: x`n[]").ok|Should Be $false
+        (ConvertFrom-GhJsonText -Text '[]').ok|Should Be $true
+    }
+
+    It '6. PR 생성 직후 조회가 비어도 재조회로 PR을 확정한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 1301 -Config (Get-Config) -PrProbe $pr.Probe
+            Push-Location $f.Repo
+            try{'x'|Set-Content lag.txt -Encoding UTF8;git add .;git commit -q -m lag;git push -q -u origin HEAD}finally{Pop-Location}
+            $pre.workflow.finalHead=Get-GitHead -Path $f.Repo
+            $pr.State.LookupEmptyRemaining=1
+            $result=Ensure-DraftPullRequest -RepoPath $f.Repo -Operation 1 -IssueNumber 1301 `
+                -Route ([pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}) `
+                -Workflow $pre.workflow -PrProbe $pr.Probe -Sleeper {param($ms)}
+            $result.ok|Should Be $true
+            $result.status|Should Be 'pr_opened'
+            $result.created|Should Be $true
+            $pr.State.CreateCalls|Should Be 1
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '7. 생성 뒤 조회가 계속 실패하면 생성 사실과 진단을 함께 돌려준다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 1302 -Config (Get-Config) -PrProbe $pr.Probe
+            Push-Location $f.Repo
+            try{'x'|Set-Content fail.txt -Encoding UTF8;git add .;git commit -q -m fail;git push -q -u origin HEAD}finally{Pop-Location}
+            $pre.workflow.finalHead=Get-GitHead -Path $f.Repo
+            $pr.State.FailLookupAfterCreate=$true
+            $result=Ensure-DraftPullRequest -RepoPath $f.Repo -Operation 1 -IssueNumber 1302 `
+                -Route ([pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}) `
+                -Workflow $pre.workflow -PrProbe $pr.Probe -Sleeper {param($ms)}
+            $result.ok|Should Be $false
+            $result.status|Should Be 'pr_lookup_failed'
+            $result.created|Should Be $true
+            $result.detail.stderrFirstLine|Should Be 'warning: unable to access git ignore'
+            $pr.State.CreateCalls|Should Be 1
+        } finally {Remove-PrFakeRepo $f}
+    }
+
+    It '8. postflight 결과가 PR 실패 진단과 생성 사실을 보존한다' {
+        $f=New-PrFakeRepo;$pr=New-TestPullRequestProbe
+        try {
+            $pre=Initialize-GitWorkflowRun -RepoPath $f.Repo -IssueNumber 1303 -Config (Get-Config) -PrProbe $pr.Probe
+            Push-Location $f.Repo
+            try{'x'|Set-Content pf.txt -Encoding UTF8;git add .;git commit -q -m pf;git push -q -u origin HEAD}finally{Pop-Location}
+            $pr.State.FailLookupAfterCreate=$true
+            $pf=Resolve-PullRequestPostflight -RepoPath $f.Repo -StartSnapshot $pre.snapshot `
+                -WorkerResult ([pscustomobject]@{Success=$true;ExitCode=0;WorkerReportedVerification='tests passed';WorkerRemainingProblems=@()}) `
+                -Workflow $pre.workflow -Operation 1 -IssueNumber 1303 `
+                -Route ([pscustomobject]@{worker='grok';model=[string]$cfg.grok.model;effort='high'}) `
+                -PrProbe $pr.Probe -CheckLister {param($p,$n,$h)[pscustomobject]@{ok=$true;checks=@()}}
+            $pf.status|Should Be 'pr_lookup_failed'
+            $pf.prCreatedBeforeFailure|Should Be $true
+            $pf.prFailureDetail.stderrFirstLine|Should Be 'warning: unable to access git ignore'
+        } finally {Remove-PrFakeRepo $f}
     }
 }
 

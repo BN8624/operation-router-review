@@ -155,7 +155,7 @@ function Get-RemainingProblems {
         'base_branch_touched' { $probs += 'worker final commit is reachable from the remote base branch; direct base push detected' }
         'local_base_ref_changed' { $probs += 'local base branch ref changed during the worker execution' }
         'pr_tool_unavailable' { $probs += 'GitHub PR tool is unavailable' }
-        'pr_lookup_failed' { $probs += 'Draft PR lookup failed' }
+        'pr_lookup_failed' { $probs += 'Draft PR lookup failed; the PR may already exist on the work branch. See receipt postflight.prFailureDetail' }
         'pr_create_failed' { $probs += 'Draft PR creation failed' }
         'pr_context_mismatch' { $probs += 'Draft PR base, head, or head SHA does not match the workflow receipt' }
         'pr_not_draft' { $probs += 'existing PR is unexpectedly not Draft' }
@@ -308,9 +308,14 @@ function Resolve-OrderInput {
     if($null -eq $IssueFetcher){
         $IssueFetcher={
             param($num,$path)
-            $out=& gh issue view $num --json body -q .body 2>&1
-            if($LASTEXITCODE -ne 0){throw "gh issue view failed: $out"}
-            return ($out|Out-String)
+            # stderr를 stdout에 합치면 gh/git 경고 한 줄이 주문 원문과 SHA-256에 섞인다.
+            $res=Invoke-GhWithRetry -Path $path -GhArgs @('issue','view',[string]$num,'--json','body','-q','.body')
+            if($null -eq $res -or -not [bool]$res.ok){
+                $detail=''
+                if($null -ne $res -and $null -ne $res.detail){$detail=[string]$res.detail.stderrFirstLine}
+                throw "gh issue view failed: $detail"
+            }
+            return [string]$res.text
         }
     }
     $content=& $IssueFetcher $IssueNumber $RepoPath

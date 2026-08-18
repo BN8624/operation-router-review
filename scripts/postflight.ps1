@@ -30,12 +30,10 @@ function Get-CiRunList {
     $ErrorActionPreference = 'Continue'
     Push-Location $RepoPath
     try {
-        $out = & gh run list --branch main --limit 20 --json headSha,status,conclusion 2>&1
-        $code = $LASTEXITCODE
-        $text = ($out | Out-String)
-        if ($code -ne 0) { return @{ ok = $false; runs = @() } }
-        $runs = $null
-        try { $runs = $text | ConvertFrom-Json } catch { return @{ ok = $false; runs = @() } }
+        $res = Invoke-GhWithRetry -Path $RepoPath -ExpectJson -GhArgs @(
+            'run','list','--branch','main','--limit','20','--json','headSha,status,conclusion')
+        if ($null -eq $res -or -not [bool]$res.ok) { return @{ ok = $false; runs = @() } }
+        $runs = $res.value
         if ($null -eq $runs) { $runs = @() }
         return @{ ok = $true; runs = @($runs) }
     } finally { Pop-Location }

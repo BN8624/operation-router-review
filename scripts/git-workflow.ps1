@@ -1,4 +1,4 @@
-# direct-main과 Draft PR Git 워크플로의 검증·상태 전이를 제공한다.
+﻿# direct-main과 Draft PR Git 워크플로의 검증·상태 전이를 제공한다.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -290,34 +290,43 @@ function Invoke-DefaultPullRequestProbe {
         if ($Action -eq 'lookup') {
             $owner = ([string]$Context.ownerRepo -split '/',2)[0]
             $endpoint = "repos/$($Context.ownerRepo)/pulls?state=all&head=$owner`:$($Context.workBranch)&per_page=100"
-            $out = & gh api -X GET $endpoint 2>&1
-            if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ok=$false;error='pr_lookup_failed';items=@()} }
-            try { $items = @((($out | Out-String) | ConvertFrom-Json)) } catch { return [pscustomobject]@{ok=$false;error='pr_lookup_failed';items=@()} }
-            return [pscustomobject]@{ok=$true;error=$null;items=@($items)}
+            $res = Invoke-GhWithRetry -Path ([string]$Context.repoPath) -GhArgs @('api','-X','GET',$endpoint) -ExpectJson
+            if ($null -eq $res -or -not [bool]$res.ok) {
+                $err = if ($null -ne $res -and -not [bool]$res.toolAvailable) { 'pr_tool_unavailable' } else { 'pr_lookup_failed' }
+                return [pscustomobject]@{ok=$false;error=$err;items=@();detail=$(if($null -eq $res){$null}else{$res.detail})}
+            }
+            return [pscustomobject]@{ok=$true;error=$null;items=@($res.value);detail=$res.detail}
         }
         if ($Action -eq 'create') {
-            $out = & gh pr create --repo ([string]$Context.ownerRepo) --draft --base ([string]$Context.baseBranch) `
-                --head ([string]$Context.workBranch) --title ([string]$Context.title) --body-file ([string]$Context.bodyPath) 2>&1
-            if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ok=$false;error='pr_create_failed';items=@()} }
-            return [pscustomobject]@{ok=$true;error=$null;url=(($out | Out-String).Trim());items=@()}
+            $res = Invoke-GhWithRetry -Path ([string]$Context.repoPath) -MaxAttempts 1 -GhArgs @(
+                'pr','create','--repo',([string]$Context.ownerRepo),'--draft','--base',([string]$Context.baseBranch),
+                '--head',([string]$Context.workBranch),'--title',([string]$Context.title),'--body-file',([string]$Context.bodyPath))
+            if ($null -eq $res -or -not [bool]$res.ok) {
+                $err = if ($null -ne $res -and -not [bool]$res.toolAvailable) { 'pr_tool_unavailable' } else { 'pr_create_failed' }
+                return [pscustomobject]@{ok=$false;error=$err;items=@();detail=$(if($null -eq $res){$null}else{$res.detail})}
+            }
+            return [pscustomobject]@{ok=$true;error=$null;url=([string]$res.text).Trim();items=@();detail=$res.detail}
         }
         if($Action -eq 'read-body'){
             $endpoint="repos/$($Context.ownerRepo)/pulls/$([int]$Context.prNumber)"
-            $out=& gh api -X GET $endpoint 2>&1
-            if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;error='pr_body_read_failed';body=$null}}
-            try{$item=(($out|Out-String)|ConvertFrom-Json -ErrorAction Stop)}
-            catch{return [pscustomobject]@{ok=$false;error='pr_body_read_failed';body=$null}}
-            $body=if($null -eq $item.body){''}else{[string]$item.body}
-            return [pscustomobject]@{ok=$true;error=$null;body=$body}
+            $res = Invoke-GhWithRetry -Path ([string]$Context.repoPath) -GhArgs @('api','-X','GET',$endpoint) -ExpectJson
+            if($null -eq $res -or -not [bool]$res.ok){
+                return [pscustomobject]@{ok=$false;error='pr_body_read_failed';body=$null;detail=$(if($null -eq $res){$null}else{$res.detail})}
+            }
+            $item=$res.value
+            $body=if($null -eq $item -or $null -eq $item.body){''}else{[string]$item.body}
+            return [pscustomobject]@{ok=$true;error=$null;body=$body;detail=$res.detail}
         }
         if($Action -eq 'update-body'){
             $endpoint="repos/$($Context.ownerRepo)/pulls/$([int]$Context.prNumber)"
             $json=([pscustomobject]@{body=[string]$Context.body}|ConvertTo-Json -Compress)
             $jsonPath=New-TempOrderFile -Content $json
-            try{$out=& gh api -X PATCH $endpoint --input $jsonPath 2>&1}
+            try{$res=Invoke-GhWithRetry -Path ([string]$Context.repoPath) -GhArgs @('api','-X','PATCH',$endpoint,'--input',$jsonPath)}
             finally{Remove-TempOrderFile -Path $jsonPath}
-            if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;error='pr_body_update_failed'}}
-            return [pscustomobject]@{ok=$true;error=$null}
+            if($null -eq $res -or -not [bool]$res.ok){
+                return [pscustomobject]@{ok=$false;error='pr_body_update_failed';detail=$(if($null -eq $res){$null}else{$res.detail})}
+            }
+            return [pscustomobject]@{ok=$true;error=$null;detail=$res.detail}
         }
     } finally { Pop-Location }
 }
@@ -455,14 +464,16 @@ function Get-PullRequestForBranch {
     )
     $ctx = [pscustomobject]@{repoPath=$RepoPath;ownerRepo=$OwnerRepo;workBranch=$WorkBranch}
     $res = Invoke-PullRequestProbe -Action lookup -Context $ctx -PrProbe $PrProbe
+    $detail = $null
+    if ($null -ne $res -and $res.PSObject.Properties.Name -contains 'detail') { $detail = $res.detail }
     if ($null -eq $res -or -not [bool]$res.ok) {
         $reason = 'pr_lookup_failed'
         if ($null -ne $res -and $res.PSObject.Properties.Name -contains 'error' -and [string]$res.error -eq 'pr_tool_unavailable') { $reason = 'pr_tool_unavailable' }
-        return [pscustomobject]@{ok=$false;status=$reason;items=@()}
+        return [pscustomobject]@{ok=$false;status=$reason;items=@();detail=$detail}
     }
     $items = @()
     foreach ($item in @($res.items)) { $items += ConvertTo-NormalizedPullRequest -PullRequest $item }
-    return [pscustomobject]@{ok=$true;status='ok';items=@($items)}
+    return [pscustomobject]@{ok=$true;status='ok';items=@($items);detail=$detail}
 }
 
 function Test-PullRequestContext {
@@ -917,13 +928,14 @@ function Ensure-DraftPullRequest {
         [Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][int]$Operation,
         [Parameter(Mandatory)][int]$IssueNumber, [Parameter(Mandatory)]$Route,
         [Parameter(Mandatory)]$Workflow, [string]$VerificationSummary='', $RemainingProblems=@(),
-        [scriptblock]$PrProbe, [scriptblock]$IssueTitleFetcher, [switch]$ExistingOnly
+        [scriptblock]$PrProbe, [scriptblock]$IssueTitleFetcher, [switch]$ExistingOnly,
+        [int]$PostCreateLookupAttempts=3, [int]$PostCreateLookupDelayMilliseconds=700, [scriptblock]$Sleeper
     )
     $ownerRepo = Get-GitOriginOwnerRepo -Path $RepoPath
     if (-not $ownerRepo) { return [pscustomobject]@{ok=$false;status='pr_lookup_failed'} }
     $lookup = Get-PullRequestForBranch -RepoPath $RepoPath -OwnerRepo $ownerRepo -WorkBranch ([string]$Workflow.workBranch) -PrProbe $PrProbe
-    if (-not $lookup.ok) { return [pscustomobject]@{ok=$false;status=$lookup.status} }
-    if ($lookup.items.Count -gt 1) { return [pscustomobject]@{ok=$false;status='pr_context_mismatch'} }
+    if (-not $lookup.ok) { return [pscustomobject]@{ok=$false;status=$lookup.status;detail=$lookup.detail} }
+    if ($lookup.items.Count -gt 1) { return [pscustomobject]@{ok=$false;status='pr_context_mismatch';detail=$lookup.detail} }
     if ($lookup.items.Count -eq 1) {
         $check = Test-PullRequestContext -PullRequest $lookup.items[0] -BaseBranch ([string]$Workflow.baseBranch) `
             -WorkBranch ([string]$Workflow.workBranch) -HeadSha ([string]$Workflow.finalHead) -OwnerRepo $ownerRepo -RequireDraft
@@ -956,9 +968,23 @@ function Ensure-DraftPullRequest {
             return [pscustomobject]@{ok=$false;status=$status}
         }
     } finally { Remove-TempOrderFile -Path $bodyPath }
-    $lookup = Get-PullRequestForBranch -RepoPath $RepoPath -OwnerRepo $ownerRepo -WorkBranch ([string]$Workflow.workBranch) -PrProbe $PrProbe
-    if (-not $lookup.ok) { return [pscustomobject]@{ok=$false;status=$lookup.status} }
-    if ($lookup.items.Count -ne 1) { return [pscustomobject]@{ok=$false;status='pr_context_mismatch'} }
+    # 생성 직후 조회는 GitHub 반영 지연이나 일시적 API 오류로 비거나 실패할 수 있다.
+    # PR은 이미 만들어졌으므로 여기서 포기하면 실행 전체가 복구 불가 상태로 닫힌다.
+    $lookup = $null
+    $lookupDelay = [Math]::Max(0, $PostCreateLookupDelayMilliseconds)
+    for ($attempt = 1; $attempt -le [Math]::Max(1, $PostCreateLookupAttempts); $attempt++) {
+        $lookup = Get-PullRequestForBranch -RepoPath $RepoPath -OwnerRepo $ownerRepo -WorkBranch ([string]$Workflow.workBranch) -PrProbe $PrProbe
+        if ($null -ne $lookup -and [bool]$lookup.ok -and @($lookup.items).Count -eq 1) { break }
+        if ($attempt -lt [Math]::Max(1, $PostCreateLookupAttempts)) {
+            if ($null -ne $Sleeper) { & $Sleeper $lookupDelay } elseif ($lookupDelay -gt 0) { Start-Sleep -Milliseconds $lookupDelay }
+            $lookupDelay = $lookupDelay * 2
+        }
+    }
+    if ($null -eq $lookup -or -not [bool]$lookup.ok) {
+        $status = if ($null -eq $lookup) { 'pr_lookup_failed' } else { [string]$lookup.status }
+        return [pscustomobject]@{ok=$false;status=$status;created=$true;detail=$(if($null -eq $lookup){$null}else{$lookup.detail})}
+    }
+    if (@($lookup.items).Count -ne 1) { return [pscustomobject]@{ok=$false;status='pr_context_mismatch';created=$true;detail=$lookup.detail} }
     $check = Test-PullRequestContext -PullRequest $lookup.items[0] -BaseBranch ([string]$Workflow.baseBranch) `
         -WorkBranch ([string]$Workflow.workBranch) -HeadSha ([string]$Workflow.finalHead) -OwnerRepo $ownerRepo -RequireDraft
     if (-not $check.ok) { return [pscustomobject]@{ok=$false;status=$check.status;pr=$check.pr} }
@@ -978,10 +1004,11 @@ function Get-DefaultPullRequestChecks {
     try {
         # GitHub Actions check suite의 pull_requests 목록만으로는 push 실행과 PR 실행을
         # 구분할 수 없다. 먼저 실제 pull_request workflow run을 조회해 허용 suite를 고정한다.
-        $actionOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' `
-            "repos/$OwnerRepo/actions/runs?head_sha=$HeadSha&event=pull_request&per_page=100" 2>&1
-        if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;checks=@()}}
-        try{$actionPages=(($actionOut|Out-String)|ConvertFrom-Json)}catch{return [pscustomobject]@{ok=$false;checks=@()}}
+        $actionRes=Invoke-GhWithRetry -Path $RepoPath -ExpectJson -GhArgs @('api','--paginate','--slurp',
+            '-H','Accept: application/vnd.github+json',
+            "repos/$OwnerRepo/actions/runs?head_sha=$HeadSha&event=pull_request&per_page=100")
+        if($null -eq $actionRes -or -not [bool]$actionRes.ok){return [pscustomobject]@{ok=$false;checks=@()}}
+        $actionPages=$actionRes.value
         $pullRequestActionSuites=@{}
         foreach($page in @($actionPages)){
             if($null -eq $page -or $page.PSObject.Properties.Name -notcontains 'workflow_runs'){continue}
@@ -1005,9 +1032,10 @@ function Get-DefaultPullRequestChecks {
                 }
             }
         }
-        $suiteOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' "repos/$OwnerRepo/commits/$HeadSha/check-suites?per_page=100" 2>&1
-        if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;checks=@()}}
-        try{$suitePages=(($suiteOut|Out-String)|ConvertFrom-Json)}catch{return [pscustomobject]@{ok=$false;checks=@()}}
+        $suiteRes=Invoke-GhWithRetry -Path $RepoPath -ExpectJson -GhArgs @('api','--paginate','--slurp',
+            '-H','Accept: application/vnd.github+json',"repos/$OwnerRepo/commits/$HeadSha/check-suites?per_page=100")
+        if($null -eq $suiteRes -or -not [bool]$suiteRes.ok){return [pscustomobject]@{ok=$false;checks=@()}}
+        $suitePages=$suiteRes.value
         $suites=@()
         foreach($page in @($suitePages)){
             if($null -ne $page -and $page.PSObject.Properties.Name -contains 'check_suites'){
@@ -1042,9 +1070,10 @@ function Get-DefaultPullRequestChecks {
                 if(-not $pullRequestActionSuites.ContainsKey($suiteKey)){continue}
                 $actionRun=$pullRequestActionSuites[$suiteKey]
             }
-            $runOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' "repos/$OwnerRepo/check-suites/$([int64]$suite.id)/check-runs?per_page=100" 2>&1
-            if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;checks=@()}}
-            try{$runPages=(($runOut|Out-String)|ConvertFrom-Json)}catch{return [pscustomobject]@{ok=$false;checks=@()}}
+            $runRes=Invoke-GhWithRetry -Path $RepoPath -ExpectJson -GhArgs @('api','--paginate','--slurp',
+                '-H','Accept: application/vnd.github+json',"repos/$OwnerRepo/check-suites/$([int64]$suite.id)/check-runs?per_page=100")
+            if($null -eq $runRes -or -not [bool]$runRes.ok){return [pscustomobject]@{ok=$false;checks=@()}}
+            $runPages=$runRes.value
             foreach($page in @($runPages)){
                 if($null -eq $page -or $page.PSObject.Properties.Name -notcontains 'check_runs'){continue}
                 foreach($c in @($page.check_runs)){
@@ -1066,10 +1095,10 @@ function Get-DefaultPullRequestChecks {
         }
         # Legacy commit status는 API 응답만으로 push와 pull_request 연관성을 구분할 수 없다.
         # 존재 자체를 숨기지 않고 미확인 context로 전달해 상위 집계가 unavailable로 닫히게 한다.
-        $statusOut=& gh api --paginate --slurp -H 'Accept: application/vnd.github+json' `
-            "repos/$OwnerRepo/commits/$HeadSha/status?per_page=100" 2>&1
-        if($LASTEXITCODE -ne 0){return [pscustomobject]@{ok=$false;checks=@()}}
-        try{$statusPages=(($statusOut|Out-String)|ConvertFrom-Json)}catch{return [pscustomobject]@{ok=$false;checks=@()}}
+        $statusRes=Invoke-GhWithRetry -Path $RepoPath -ExpectJson -GhArgs @('api','--paginate','--slurp',
+            '-H','Accept: application/vnd.github+json',"repos/$OwnerRepo/commits/$HeadSha/status?per_page=100")
+        if($null -eq $statusRes -or -not [bool]$statusRes.ok){return [pscustomobject]@{ok=$false;checks=@()}}
+        $statusPages=$statusRes.value
         foreach($page in @($statusPages)){
             if($null -eq $page -or $page.PSObject.Properties.Name -notcontains 'statuses'){continue}
             foreach($statusContext in @($page.statuses)){
@@ -1193,7 +1222,7 @@ function Resolve-PullRequestPostflight {
     $remoteBase=Get-GitRemoteBranchHead -RepoPath $RepoPath -Branch ([string]$w.baseBranch) -RemoteHeadProbe $RemoteHeadProbe
     $localBase=Get-GitRefHead -RepoPath $RepoPath -Ref "refs/heads/$($w.baseBranch)"
     $pushComplete=($remoteWork -and $final -ceq $remoteWork)
-    $status=$null;$ci='not-checked';$pr=$null
+    $status=$null;$ci='not-checked';$pr=$null;$prFailureDetail=$null;$prCreatedBeforeFailure=$false
     if(-not $WorkerResult.Success){
         # PR mode에서도 worker_failed로 붕괴하지 않고 구조화 실패 분류를 보존한다.
         $errorClass = Get-WorkerResultErrorClass -Result $WorkerResult
@@ -1236,7 +1265,12 @@ function Resolve-PullRequestPostflight {
         }
         $ensured=Ensure-DraftPullRequest -RepoPath $RepoPath -Operation $Operation -IssueNumber $IssueNumber -Route $Route -Workflow $w `
             -VerificationSummary $summary -RemainingProblems $workerProblems -PrProbe $PrProbe -IssueTitleFetcher $IssueTitleFetcher -ExistingOnly:$ExistingPrOnly
-        if(-not $ensured.ok){$status=[string]$ensured.status}else{
+        if(-not $ensured.ok){
+            $status=[string]$ensured.status
+            # 실패 원인을 영수증에 남긴다. 원인 없는 pr_lookup_failed는 사후 진단이 불가능하다.
+            if($ensured.PSObject.Properties.Name -contains 'detail' -and $null -ne $ensured.detail){$prFailureDetail=$ensured.detail}
+            if($ensured.PSObject.Properties.Name -contains 'created' -and [bool]$ensured.created){$prCreatedBeforeFailure=$true}
+        }else{
             $pr=$ensured.pr;$w.pr=$pr
             $ci=Get-PullRequestCiStatus -RepoPath $RepoPath -PrNumber ([int]$pr.number) -HeadSha $final -CheckLister $CheckLister `
                 -BaseWorkflow $w.baseWorkflow -HeadWorkflow $w.headWorkflow `
@@ -1248,7 +1282,7 @@ function Resolve-PullRequestPostflight {
         status=$status;branch=$branch;startHead=$StartSnapshot.startHead;finalHead=$final;headChanged=($final -cne [string]$StartSnapshot.startHead)
         commitCount=[int]$commits;worktreeClean=[bool]$wt.Clean;aheadBehindAvailable=$true;ahead=$null;behind=$null
         pushComplete=[bool]$pushComplete;ciStatus=$ci;workerExitCode=$WorkerResult.ExitCode;workflow=$w
-        baseAdvanced=[bool]$w.baseAdvanced;pr=$pr
+        baseAdvanced=[bool]$w.baseAdvanced;pr=$pr;prFailureDetail=$prFailureDetail;prCreatedBeforeFailure=[bool]$prCreatedBeforeFailure
     }
 }
 
