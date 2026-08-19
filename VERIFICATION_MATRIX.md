@@ -1,6 +1,6 @@
-# VERIFICATION_MATRIX — operation-router v3.0.13
+# VERIFICATION_MATRIX — operation-router v3.0.14
 
-<!-- verification-summary sourceTreePassed=689 sourceTreeFailed=0 installedFixturePassed=689 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=697 sourceTreeFailed=0 installedFixturePassed=697 installedFixtureFailed=0 -->
 
 현재 실행 계약은 `run -Detach` → `watch -Follow` → `operation_terminal` → `nextAction` → final review → `finalize` 순서다. recover는 watch가 없는 새 세션 재진입에만 사용한다.
 
@@ -41,6 +41,7 @@
 | v3.0.12 reseal verification | 외부 HEAD 실행 검증 | 정확한 reseal HEAD의 PR-linked CI success 또는 저장소·issue·branch·HEAD 결합 local verification receipt 필요, pending/failure/unavailable/required workflow removed 우회 금지, 새 reseal에서 stale receipt 제거 |
 | v3.0.12 atomic OrderFile | 주문 원문 증거 | 단일 byte snapshot에서 strict UTF-8 content·SHA-256·byte length 생성, BOM 처리, invalid UTF-8 거부, review·repair·recover path/hash/length 재검증 |
 | v3.0.12 follow-up PR link | GitHub 추적성 | 기존 본문·Closes 보존, 결정론적 marker와 중복 방지, OPEN Draft·base/head/SHA/PR 번호 재검증 후 mutation, update 후 재조회, mismatch·marker 손상 fail-closed |
+| v3.0.14 gh stream separation | PR 조회 복원력·진단 | stdout·stderr 분리로 경고 오염 차단, JSON 파싱 실패·비정상 종료 재시도, 생성 직후 조회 지연 재조회, tool 부재는 재시도 금지, 실패 시 exit code·stderr 첫 줄·생성 여부 영수증 기록 |
 | v3.0.13 Grok model lifecycle | 고정 ID·단일 명령 갱신 | Grok Build 1.0.3 models/help 실측, `grok-4.6` config 라우팅, `-GrokModel` config·생성 표·manifest 원자 갱신, alias 선차단, fixture config 참조, 유료 호출 0 |
 | v3.0.11 후속 주문 continuity | branch·PR·order source·외부 HEAD | receipt-owned 기존 branch와 단일 OPEN Draft PR만 명시 재사용, 후속 이슈 link receipt 재진입, file/issue-body source hash 고정, 변경 source fail-closed, clean pushed descendant HEAD 명시 reseal, 원래 envelope 비포함 증거 보존 |
 
@@ -69,10 +70,10 @@ PR CI 기대 여부는 receipt에 고정된 base/head commit workflow 스냅샷�
 ## 실행 결과
 
 <!-- verification-visible:start -->
-- source-tree 689 passed, 0 failed
-- installed fixture 689 passed, 0 failed
+- source-tree 697 passed, 0 failed
+- installed fixture 697 passed, 0 failed
 - installed integration failures 0
-- PowerShell parser files 23, manifest entries 46
+- PowerShell parser files 24, manifest entries 47
 - paid model calls 0
 <!-- verification-visible:end -->
 

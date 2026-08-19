@@ -1,5 +1,14 @@
 # CHANGELOG — operation-router
 
+## v3.0.14 (2026-08-19)
+
+- gh 호출이 `2>&1`로 stdout과 stderr를 합쳐 JSON 파싱에 넘기던 계약을 제거했다. gh나 내부 git의 경고 한 줄로 PR 조회가 `pr_lookup_failed`가 되던 실패 경로를 `scripts/gh-cli.ps1`의 stdout·stderr 분리 호출로 닫았다.
+- JSON을 기대하는 gh 호출은 비정상 종료와 파싱 실패를 기본 3회까지 backoff 재시도한다. gh 자체가 없으면 재시도하지 않고 `pr_tool_unavailable`로 즉시 닫는다.
+- Draft PR 생성 직후 조회는 GitHub 반영 지연을 감안해 재조회한다. 생성은 성공했는데 조회만 실패한 경우 실행 영수증에 `prCreatedBeforeFailure`와 `prFailureDetail`(exit code, stderr 첫 줄, 시도 횟수)을 남겨 사후 진단이 가능하다.
+- lookup, create, read-body, update-body, PR CI check, 이슈 본문 조회, run list의 gh 호출을 모두 같은 헬퍼로 통일했다. 이슈 본문은 stderr가 섞이지 않으므로 주문 원문과 SHA-256이 경고 문구로 오염되지 않는다.
+- 검증은 source-tree 697/697과 격리 installed fixture 697/697이다. 실제 유료 Grok/GPT/Claude 호출은 0회다.
+- refactor metrics: baseline `4ef0c56ff0e8ce24fccdaf161835635e8e29feb5`, `common.ps1` 1671->1216, `run-operation.ps1` 2414->2646, `state-store.ps1` 309, `worker-contract.ps1` 319 lines.
+
 ## v3.0.13 (2026-08-14)
 
 - Grok Build 1.0.3의 로컬 `grok models`에서 기본·사용 가능 모델 `grok-4.6`을 확인하고 Operation 1/2/3의 Grok 고정 ID를 `grok-4.5`에서 `grok-4.6`으로 변경했다. effort·라우팅·사용량·fallback 정책은 바꾸지 않았다.

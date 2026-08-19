@@ -1,10 +1,14 @@
-# REENTRY — operation-router v3.0.13 pull-request workflow
+# REENTRY — operation-router v3.0.14 pull-request workflow
 
-<!-- verification-summary sourceTreePassed=689 sourceTreeFailed=0 installedFixturePassed=689 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=697 sourceTreeFailed=0 installedFixturePassed=697 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 689 passed, 0 failed; installed fixture 689 passed, 0 failed.
-Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
+Official verification: source-tree 697 passed, 0 failed; installed fixture 697 passed, 0 failed.
+Verified PowerShell files 24, manifest entries 47, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.14 gh call contract
+
+모든 gh 호출은 `scripts/gh-cli.ps1`의 `Invoke-GhRaw`·`Invoke-GhWithRetry`를 거친다. stdout과 stderr를 절대 합치지 않으며, JSON 파싱 실패와 비정상 종료는 기본 3회까지 재시도한다. PR 생성 직후 조회도 재시도하므로 생성 성공 뒤 조회 실패 하나로 실행 전체가 닫히지 않는다. 그래도 실패하면 영수증 `postflight.prFailureDetail`에 exit code·stderr 첫 줄·시도 횟수가, `postflight.prCreatedBeforeFailure`에 PR 생성 여부가 남는다. 재진입 시 이 값으로 원인을 먼저 확인한다.
 
 ## v3.0.13 Grok model contract
 

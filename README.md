@@ -1,10 +1,16 @@
-# operation-router (v3.0.13)
+# operation-router (v3.0.14)
 
-<!-- verification-summary sourceTreePassed=689 sourceTreeFailed=0 installedFixturePassed=689 installedFixtureFailed=0 -->
+<!-- verification-summary sourceTreePassed=697 sourceTreeFailed=0 installedFixturePassed=697 installedFixtureFailed=0 -->
 <!-- verification-visible:start -->
-Official verification: source-tree 689 passed, 0 failed; installed fixture 689 passed, 0 failed.
-Verified PowerShell files 23, manifest entries 46, installed integration failures 0, paid model calls 0.
+Official verification: source-tree 697 passed, 0 failed; installed fixture 697 passed, 0 failed.
+Verified PowerShell files 24, manifest entries 47, installed integration failures 0, paid model calls 0.
 <!-- verification-visible:end -->
+
+## v3.0.14 gh stream separation and PR lookup resilience
+
+`gh` 호출이 `2>&1`로 stdout과 stderr를 합친 뒤 JSON으로 파싱하고 있어, gh나 내부 git이 경고 한 줄만 출력해도 PR 조회가 파싱 실패로 닫혔다. 실측 사례에서 Draft PR 생성은 성공했는데 직후 재조회가 실패해 실행 영수증의 PR context가 비었고 `review`와 `finalize`가 모두 fail-closed 됐다.
+
+`scripts/gh-cli.ps1`이 모든 gh 호출을 stdout·stderr 분리로 실행한다. JSON을 기대하는 호출은 비정상 종료와 파싱 실패를 짧은 backoff로 재시도하고, PR 생성 직후 조회는 GitHub 반영 지연을 감안해 다시 조회한다. 그래도 실패하면 exit code와 stderr 첫 줄, 시도 횟수, PR 생성 여부를 postflight 영수증의 `prFailureDetail`·`prCreatedBeforeFailure`에 남겨 사후 진단이 가능하다. lookup, create, read-body, update-body, CI check, 이슈 본문, run list가 모두 같은 헬퍼를 쓴다.
 
 ## v3.0.13 Grok 4.6 and one-command model upgrades
 

@@ -1,4 +1,4 @@
-﻿# direct-main과 Draft PR Git 워크플로의 검증·상태 전이를 제공한다.
+# direct-main과 Draft PR Git 워크플로의 검증·상태 전이를 제공한다.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
